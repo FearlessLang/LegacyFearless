@@ -791,7 +791,7 @@ OrderEq:Eq{ m->m.eq }
 
 OrderMore:Eq{ m->m.more }
 
-Comparator[T]:{
+Comparator[T]:{//TODO: We changed this in the new guide, but also.. it was wrong
   #(a:T, b:T): Order,//the only abstract method
   #[S](supplier : F[S,T]) : Comparator[T] -> 
     { a,b -> this#(supplier#a,supplier#b) }
