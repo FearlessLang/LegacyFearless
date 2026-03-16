@@ -16,14 +16,14 @@ public class Id {
   public static boolean validM(String m){
     assert m!=null && !m.isEmpty();
     if (m.endsWith("$")) { return true; }
-    return new parser.Parser(Parser.dummy,m).parseM();      
+    return new parser.Parser(Parser.dummy,m).parseM();
   }
   public static boolean validDecName(String name){
     assert name!=null && !name.isEmpty();
     if (name.endsWith("$")) { return true; }
-    return new parser.Parser(Parser.dummy,name).parseFullCN();      
+    return new parser.Parser(Parser.dummy,name).parseFullCN();
   }
-  public static boolean validGX(String name){ 
+  public static boolean validGX(String name){
     assert name!=null && !name.isEmpty();
     // Compiler-inserted names are valid
     if (name.contains("$")) { return true; }
@@ -41,8 +41,8 @@ public class Id {
       return this.name.endsWith("$");
     }
     /**The pattern captures two groups:
-    * The first group captures the package name (excluding the last dot).
-    * The second group captures the class name.*/
+     * The first group captures the package name (excluding the last dot).
+     * The second group captures the class name.*/
     static Pattern pkgRegex = Pattern.compile("(.+\\.)+([A-Za-z0-9_'$]+)\\$?$");
     public String pkg(){ return FullEAntlrVisitor.extractPackageName(name); }
     public String shortName() {

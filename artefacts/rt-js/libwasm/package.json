@@ -1,0 +1,15 @@
+{
+  "name": "native-rt",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "native_rt_bg.wasm",
+    "native_rt.js",
+    "native_rt.d.ts"
+  ],
+  "main": "native_rt.js",
+  "types": "native_rt.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

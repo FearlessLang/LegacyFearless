@@ -60,6 +60,10 @@ public class Magic {
   public static final Id.DecId SafeFlowSource = new Id.DecId("base.flows._SafeSource", 0);
 
   public static final Id.DecId MapK = new Id.DecId("base.Maps", 0);
+  public static final Id.DecId Document = new Id.DecId("base.Document", 0);
+  public static final Id.DecId Documents = new Id.DecId("base.Documents", 0);
+  public static final Id.DecId Element = new Id.DecId("base.Element", 0);
+  public static final Id.DecId Event = new Id.DecId("base.Event", 0);
 
   public static astFull.T.Dec getFullDec(Function<Id.DecId, astFull.T.Dec> resolve, Id.DecId id) {
     var base = _getDec(resolve, id);

@@ -1,11 +1,17 @@
 package main;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import codegen.java.JavaFile;
+import codegen.js.JsFile;
 import parser.Parser;
 import utils.IoErr;
 import utils.ResolveResource;
@@ -15,6 +21,7 @@ public interface InputOutput{
   List<String> commandLineArguments();
   Path baseDir();
   Path magicDir();
+  Path magicJsDir();
   Path output();//where we put temp .class
   Path cachedBase(); //where we save base, can be the same of output
   List<Parser> cachedFiles();
@@ -29,6 +36,7 @@ public interface InputOutput{
   default List<JavaFile> magicFiles(){//crucially, this method is lazy
     return InputOutputHelper.readMagicFiles(magicDir());
   }
+  default List<JsFile> magicJsFiles(){ return InputOutputHelper.readMagicJsFiles(magicJsDir()); }
 
   default String generateAliases() {
     return ResolveResource.read(this.defaultAliases());
@@ -39,6 +47,7 @@ public interface InputOutput{
     List<String> commandLineArguments,
     Path baseDir,
     Path magicDir,
+    Path magicJsDir,
     List<Parser> inputFiles,
     Path output,
     Path cachedBase,
@@ -50,6 +59,7 @@ public interface InputOutput{
     return new FieldsInputOutput(
       null,
       List.of(),
+      null,
       null,
       null,
       List.of(),
@@ -68,6 +78,7 @@ public interface InputOutput{
       commandLineArguments,
       ResolveResource.asset("/base"),
       ResolveResource.asset("/rt"),
+      ResolveResource.asset("/rt-js"),
       inputFiles,
       output,
       output,
@@ -84,6 +95,7 @@ public interface InputOutput{
       commandLineArguments,
       ResolveResource.asset("/immBase"),
       ResolveResource.asset("/immRt"),
+      ResolveResource.asset("/rt-js"),
       inputFiles,
       output,
       output,
@@ -107,6 +119,7 @@ public interface InputOutput{
       commandLineArguments,
       ResolveResource.asset("/base"),
       ResolveResource.asset("/rt"),
+      ResolveResource.asset("/rt-js"),
       inputFiles,
       output,
       cachedBase,//ResolveResource.of("/cachedBase"),
@@ -130,6 +143,7 @@ public interface InputOutput{
       commandLineArguments,
       ResolveResource.asset("/immBase"),
       ResolveResource.asset("/immRt"),
+      ResolveResource.asset("/rt-js"),
       inputFiles,
       output,
       cachedBase,//ResolveResource.of("/cachedImmBase"),
@@ -179,5 +193,39 @@ class InputOutputHelper{
     return files.stream()
       .map(p->new JavaFile(p.fileName(),p.content()))
       .toList();
+  }
+  public static List<JsFile> readMagicJsFiles(Path root) {
+    List<JsFile> files = new ArrayList<>();
+    // 1. Process rt-js/*.js
+    List<Parser> jsFiles = loadFiles(root,".js");
+    files.addAll(jsFiles.stream()
+      .map(p-> {
+        Path relative = root.relativize(p.fileName());
+        return new JsFile(
+          Path.of("rt-js").resolve(relative),
+          IoErr.of(()->p.content())
+        );
+      })
+      .toList());
+    // 2. Process .wasm files in rt-js/libwasm
+    Path wasmDir = root.resolve("libwasm");
+    if (Files.exists(wasmDir)) {
+      try (Stream<Path> wasmFiles = Files.walk(wasmDir)) {
+        wasmFiles
+          .filter(Files::isRegularFile)
+          .filter(p -> p.getFileName().toString().endsWith(".wasm"))
+          .forEach(p -> {
+            Path relative = wasmDir.relativize(p);
+            Path destPath = Path.of("rt-js/libwasm").resolve(relative);
+            files.add(new JsFile(
+              destPath,
+              IoErr.of(() -> new String(Files.readAllBytes(p), StandardCharsets.ISO_8859_1))
+            ));
+          });
+      } catch (IOException e) {
+        throw new UncheckedIOException(e);
+      }
+    }
+    return files;
   }
 }

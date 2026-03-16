@@ -1,0 +1,81 @@
+package base
+
+// Minimal DOM-like API
+Document:{
+  mut .getElementById(id: Str): mut Opt[mut Element],
+  mut .createElement(tag: Str): mut Element,
+}
+_Document: Document, Sealed{
+  .getElementById(id) -> Magic!,
+  .createElement(tag) -> Magic!,
+}
+Documents:Sealed{ #(s:mut System): mut Document -> mut _Document }
+
+Element: {
+  // Basic properties
+  read .value: Str,
+  mut .setValue(v: Str): Void,
+  mut .setText(v: Str): Void,               // innerText = v
+  mut .setClass(v: Str): Void,              // className = v
+  mut .setAttr(name: Str, value: Str): Void,// setAttribute(name, value)
+  mut .setData(key: Str, value: Str): Void, // dataset[key] = value
+  read .getData(key: Str): Str,             // dataset[key]
+
+  // DOM structure manipulation
+  mut .appendChild(child: mut Element): Void,
+  mut .replaceChild(newEl: mut Element, oldEl: mut Element): Void,
+  mut .remove: Void,
+
+  // Focus and selection
+  mut .focus: Void,
+  mut .select: Void,
+
+  // Event handling
+  mut .onClick(callback: F[mut Event, mut Document, Void]): Void,
+  mut .onDblClick(callback: F[mut Event, mut Document, Void]): Void,
+  mut .onInput(callback: F[mut Event, mut Document, Void]): Void,
+  mut .onKeyDown(callback: F[mut Event, mut Document, Void]): Void,
+  mut .onBlur(callback: F[mut Event, mut Document, Void]): Void,
+  mut .addEventListener(event: Str, callback: F[Event, mut Document, Void]): Void,
+  mut .onClickWith[E:**](with: mut E, callBack: F[Event, mut Document, mut E, Void]): Void,
+}
+
+_Element: Element,Sealed{
+  // Basic properties
+  .value -> Magic!,
+  .setValue(v) -> Magic!,
+  .setText(v) -> Magic!,               // innerText = v
+  .setClass(v) -> Magic!,              // className = v
+  .setAttr(name, value) -> Magic!,// setAttribute(name, value)
+  .setData(key, value) -> Magic!, // dataset[key] = value
+  .getData(key) -> Magic!,             // dataset[key]
+
+  // DOM structure manipulation
+  .appendChild(child) -> Magic!,
+  .replaceChild(newEl, oldEl) -> Magic!,
+  .remove -> Magic!,
+
+  // Focus and selection
+  .focus -> Magic!,
+  .select -> Magic!,
+
+  // Event handling
+  .onClick(callback) -> Magic!,
+  .onDblClick(callback) -> Magic!,
+  .onInput(callback) -> Magic!,
+  .onKeyDown(callback) -> Magic!,
+  .onBlur(callback) -> Magic!,
+  .addEventListener(event, callback) -> Magic!,
+  .onClickWith(with, callBack) -> Magic!,
+}
+
+Event: {
+  read .eventType: Str,
+  mut .target: mut Element,
+  read .key: Str,
+}
+_Event: Event, Sealed{
+  .eventType -> Magic!,
+  .target -> Magic!,
+  .key -> Magic!,
+}

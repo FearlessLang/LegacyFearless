@@ -10,20 +10,28 @@ crate-type = ["cdylib"]
 [features]
 compiler-only = []
 runtime-only = []
+native = ["jni"]
+wasm = ["wasm-bindgen", "js-sys"]
+default = ["native"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 # Common
-jni = { version = "0.21.1" }
+jni = { version = "0.21.1", optional = true }
 unicode-segmentation = { version = "1.11.0" }
 unicode-normalization = { version = "0.1.23" }
 regex = "1.10.6"
 lru = "0.12.4"
 hashbrown = "0.14.5"
+
 # RT Only
 # Compiler Only
 seahash = { version = "4.1.0", features = ["use_std"] }
+
+# wasm
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
 
 [profile.release]
 lto = true
