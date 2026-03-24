@@ -5,6 +5,7 @@ import com.github.bogdanovmn.cmdline.CmdLineAppBuilder;
 import id.Id;
 import main.html.LogicMainHtml;
 import main.java.LogicMainJava;
+import main.zig.LogicMainZig;
 import program.MethLookup;
 import program.typesystem.SubTyping;
 import utils.Box;
@@ -40,6 +41,7 @@ public class Main {
       .withFlag("print-codegen", "pc", "Print the output of the codegen stage to standard output")
       .withFlag("show-tasks", "sct", "Print progress messages showing the current task the compiler is performing.")
       .withFlag("show-full-progress", "sfp", "Print progress messages showing the current task and all sub-tasks the compiler is performing.")
+      .withFlag("zig", "Compile using the Zig/FeaRT backend instead of Java")
       .withAtLeastOneRequiredOption("help", "new", "check", "build", "run", "regenerate-aliases", "generate-docs")
       .withEntryPoint(res->{
         CompilerFrontEnd.ProgressVerbosity pv = CompilerFrontEnd.ProgressVerbosity.None;
@@ -62,7 +64,8 @@ public class Main {
         }
         var projectPath = Path.of(res.getArgList().getFirst());
         var extraArgs = res.getArgList().subList(1, res.getArgList().size());
-        var io = res.hasOption("imm-base")
+        var useImmBase = res.hasOption("imm-base") || res.hasOption("zig");
+        var io = useImmBase
           ? InputOutput.userFolderImm(res.getOptionValue("entry-point"), extraArgs, projectPath)
           : InputOutput.userFolder(res.getOptionValue("entry-point"), extraArgs, projectPath);
 
@@ -71,6 +74,20 @@ public class Main {
           main.writeDocs();
           System.out.println("Documentation written to: "+io.output());
           return;
+        }
+
+        if (res.hasOption("zig")) {
+          var zigMain = LogicMainZig.of(io, verbosity.get());
+          if (res.hasOption("build")) {
+            zigMain.buildAndCache();
+            System.out.println("Compilation successful (Zig backend)");
+            return;
+          }
+          if (res.hasOption("run")) {
+            var p = zigMain.run().inheritIO().start().onExit().join();
+            System.exit(p.exitValue());
+            return;
+          }
         }
 
         var main = LogicMainJava.of(io, verbosity.get());
