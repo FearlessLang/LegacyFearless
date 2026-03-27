@@ -29,7 +29,6 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
     var magic = new ZigMagicImpls(null, null, mir.p());
     return new OptimisationBuilder(magic)
       .withBoolIfOptimisation()
-      .withBlockOptimisation()
       .run(mir);
   }
 
@@ -44,7 +43,7 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   }
 
   @Override default ProcessBuilder execution(ZigProgram exe) {
-    return new ProcessBuilder(executablePath().toString()).inheritIO();
+    return new ProcessBuilder(executablePath().toString());
   }
 
   static LogicMainZig of(InputOutput io, Verbosity verbosity) {

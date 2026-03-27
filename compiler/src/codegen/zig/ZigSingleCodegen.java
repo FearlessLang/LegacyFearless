@@ -104,7 +104,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     // Emit captures struct
     if (!createObj.captures().isEmpty()) {
       var fields = createObj.captures().stream()
-        .map(x -> "    " + id.varName(x.name()) + ": rt.FatPtr,")
+        .map(x -> id.varName(x.name()) + ": rt.FatPtr,")
         .collect(Collectors.joining("\n"));
       captureStructs.put(objId,
         "const " + id.getSimpleName(objId) + "_Captures = extern struct {\n"
@@ -141,53 +141,18 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     }
     var paramStr = String.join(", ", params);
 
-    var paramDiscard = "    _ = .{ " + params.stream().map(p -> p.split(":")[0].trim()).collect(Collectors.joining(", ")) + " };\n";
+    var paramDiscard = "_ = .{ " + params.stream().map(p -> p.split(":")[0].trim()).collect(Collectors.joining(", ")) + " };\n";
     if (isUnreachable || meth.fName().isEmpty()) {
       // Unreachable method
       functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
         + paramDiscard
-        + "    unreachable;\n"
+        + "unreachable;\n"
         + "}");
     } else {
       // Real method: delegate to the static Fun
       var fName = id.getFName(meth.fName().get());
-      var funArgs = new ArrayList<String>();
-      // Fun args order: sig.xs, self, captures
-      for (var x : sig.xs()) {
-        funArgs.add(id.varName(x.name()));
-      }
-      funArgs.add("self_m");
-      for (var capture : meth.captures()) {
-        funArgs.add("self_m"); // Captures come from self - handled by deref in the Fun
-      }
-
-      // Actually, let's look at how the Java codegen builds funArgs:
-      // sig.xs as varNames, "this", captures as "this.captureName"
-      // In Zig, we pass self + captures from the deref'd object
-      // Let's build this properly based on the Fun's args
       var fun = funMap.get(meth.fName().get());
       if (fun != null) {
-        var callArgs = new ArrayList<String>();
-        for (var arg : fun.args()) {
-          var argName = arg.name();
-          // Is it the self arg?
-          if (meth.capturesSelf() && argName.equals(fun.args().stream()
-            .filter(a -> !sig.xs().stream().anyMatch(x -> x.name().equals(a.name())))
-            .filter(a -> !meth.captures().contains(a.name()))
-            .map(MIR.X::name).findFirst().orElse(""))) {
-            callArgs.add("self_m");
-          } else if (sig.xs().stream().anyMatch(x -> x.name().equals(argName))) {
-            callArgs.add(id.varName(argName));
-          } else if (meth.captures().contains(argName)) {
-            // This is a captured variable - need to deref from self
-            callArgs.add(id.varName(argName) + "_from_self");
-          } else {
-            callArgs.add("self_m");
-          }
-        }
-
-        // Simpler approach: just pass args in the order the Fun expects
-        // The Fun's args are: [sig.xs..., self, captures...]
         var simpleArgs = new ArrayList<String>();
         for (var x : sig.xs()) {
           simpleArgs.add(id.varName(x.name()));
@@ -205,13 +170,13 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
         functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
           + paramDiscard
-          + "    return " + fName + "(" + String.join(", ", simpleArgs) + ");\n"
+          + "return " + fName + "(" + String.join(", ", simpleArgs) + ");\n"
           + "}");
       } else {
         // Fun not found, make unreachable
         functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
-          + "    _ = .{ " + params.stream().map(p -> p.split(":")[0].trim()).collect(Collectors.joining(", ")) + " };\n"
-          + "    unreachable;\n"
+          + "_ = .{ " + params.stream().map(p -> p.split(":")[0].trim()).collect(Collectors.joining(", ")) + " };\n"
+          + "unreachable;\n"
           + "}");
       }
     }
@@ -229,7 +194,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     }
 
     functions.add("fn " + tName + "(" + String.join(", ", thunkParams) + ") callconv(.c) rt.FatPtr {\n"
-      + "    return " + mfName + "(" + String.join(", ", thunkCallArgs) + ");\n"
+      + "return " + mfName + "(" + String.join(", ", thunkCallArgs) + ");\n"
       + "}");
   }
 
@@ -257,7 +222,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       "&[_]*const anyopaque{ " + String.join(", ", methods) + " }";
 
     vtableDefs.put(objId,
-      "const VT_" + typeName + ": rt.VTable = .{\n"
+      "pub const VT_" + typeName + ": rt.VTable = .{\n"
       + "    .type_name = \"" + objId.name() + "/" + objId.gen() + "\",\n"
       + "    .hashes = " + hashesStr + ",\n"
       + "    .methods = " + methodsStr + ",\n"
@@ -277,14 +242,14 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     sb.append("fn ").append(name).append("(").append(params).append(") rt.FatPtr {\n");
     // Discard all params to avoid unused-parameter errors
     if (!paramNames.isEmpty()) {
-      sb.append("    _ = .{ ");
+      sb.append("_ = .{ ");
       sb.append(String.join(", ", paramNames));
       sb.append(" };\n");
     }
     if (body.equals("unreachable")) {
-      sb.append("    unreachable;\n");
+      sb.append("unreachable;\n");
     } else {
-      sb.append("    return ").append(body).append(";\n");
+      sb.append("return ").append(body).append(";\n");
     }
     sb.append("}");
     functions.add(sb.toString());
@@ -381,13 +346,15 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       case MIR.E e -> e.accept(this, checkMagic);
     };
 
-    return "(if (" + recv + ".vt == &bool_rt.VT_True) " + thenBody + " else " + elseBody + ")";
+    return "(if (" + recv + ".vt == &VT_True_0) " + thenBody + " else " + elseBody + ")";
   }
 
   private String inlineBlock(MIR.Block block) {
     return visitBlockExpr(block, true);
   }
 
+  // TODO: the block optimisation impl here is not correct, will clean up later.
+  /*
   @Override
   public String visitBlockExpr(MIR.Block expr, boolean checkMagic) {
     var stmts = new ArrayDeque<>(expr.stmts());
@@ -398,36 +365,36 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       var stmt = stmts.poll();
       switch (stmt) {
         case MIR.Block.BlockStmt.Return ret ->
-          sb.append("        break :blk ").append(ret.e().accept(this, true)).append(";\n");
+          sb.append("break :blk ").append(ret.e().accept(this, true)).append(";\n");
         case MIR.Block.BlockStmt.Do do_ -> {
-          sb.append("        _ = ").append(do_.e().accept(this, true)).append(";\n");
+          sb.append("_ = ").append(do_.e().accept(this, true)).append(";\n");
           doIdx++;
         }
         case MIR.Block.BlockStmt.Throw throw_ ->
-          sb.append("        @panic(\"Fearless error\");\n");
+          sb.append("@panic(\"Fearless error\");\n");
         case MIR.Block.BlockStmt.Loop loop ->
-          sb.append("        while (true) { _ = ").append(loop.e().accept(this, true)).append("; }\n");
+          sb.append("while (true) { _ = ").append(loop.e().accept(this, true)).append("; }\n");
         case MIR.Block.BlockStmt.If if_ -> {
           var nextStmt = stmts.poll();
           var body = nextStmt != null ? visitBlockStmt(nextStmt) : "unreachable";
-          sb.append("        if (").append(if_.pred().accept(this, true))
-            .append(".vt == &bool_rt.VT_True) { ").append(body).append(" }\n");
+          sb.append("if (").append(if_.pred().accept(this, true))
+            .append(".vt == &VT_True_0) { ").append(body).append(" }\n");
         }
         case MIR.Block.BlockStmt.Let let -> {
           var vn = id.varName(let.name());
-          sb.append("        const ").append(vn).append(" = ")
+          sb.append("const ").append(vn).append(" = ")
             .append(let.value().accept(this, true)).append(";\n");
-          sb.append("        _ = .{ ").append(vn).append(" };\n");
+          sb.append("_ = .{ ").append(vn).append(" };\n");
         }
         case MIR.Block.BlockStmt.Var var_ -> {
           var vn = id.varName(var_.name());
-          sb.append("        const ").append(vn).append(" = ")
+          sb.append("const ").append(vn).append(" = ")
             .append(var_.value().accept(this, true)).append(";\n");
-          sb.append("        _ = .{ ").append(vn).append(" };\n");
+          sb.append("_ = .{ ").append(vn).append(" };\n");
         }
       }
     }
-    sb.append("    }");
+    sb.append("}");
     return sb.toString();
   }
 
@@ -437,11 +404,12 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       case MIR.Block.BlockStmt.Do do_ -> "_ = " + do_.e().accept(this, true) + ";";
       case MIR.Block.BlockStmt.Throw throw_ -> "@panic(\"Fearless error\");";
       case MIR.Block.BlockStmt.Loop loop -> "while (true) { _ = " + loop.e().accept(this, true) + "; }";
-      case MIR.Block.BlockStmt.If if_ -> "if (" + if_.pred().accept(this, true) + ".vt == &bool_rt.VT_True)";
+      case MIR.Block.BlockStmt.If if_ -> "if (" + if_.pred().accept(this, true) + ".vt == &VT_True_0)";
       case MIR.Block.BlockStmt.Let let -> "const " + id.varName(let.name()) + " = " + let.value().accept(this, true) + ";";
       case MIR.Block.BlockStmt.Var var_ -> "const " + id.varName(var_.name()) + " = " + var_.value().accept(this, true) + ";";
     };
   }
+   */
 
   @Override
   public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {

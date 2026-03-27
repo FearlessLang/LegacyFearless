@@ -3,10 +3,7 @@ package codegen.zig;
 import codegen.MIR;
 import failure.Fail;
 import id.Id;
-import id.Mdf;
 import magic.FearlessStringHandler;
-import magic.Magic;
-import magic.MagicCallable;
 import magic.MagicTrait;
 import visitors.MIRVisitor;
 
@@ -23,7 +20,6 @@ import static magic.Magic.getLiteral;
 record ZigNumOps(ZigNumOps.NumOp onNat) {
   interface NumOp { String apply(String[] args); }
   static final String POISON = "(rt.FatPtr{ .data = .{ .int = 0xDEAD }, .vt = @ptrFromInt(0) })";
-  static NumOp crashOp = _ -> POISON;
 
   private static final Map<Id.MethName, ZigNumOps> numOps = new LinkedHashMap<>();
   private static Id.MethName m(String name, int arity) { return new Id.MethName(name, arity); }
@@ -36,6 +32,9 @@ record ZigNumOps(ZigNumOps.NumOp onNat) {
       .orElseGet(() -> { throw utils.Bug.of("Expected magic to exist for: " + m); });
   }
   static String emitNat(Id.MethName m, String... args) { return emit(m, args).onNat().apply(args); }
+  static String zigBool(String condition) {
+    return "(if (" + condition + ") rt.obj_k_singleton(&VT_True_0) else rt.obj_k_singleton(&VT_False_0))";
+  }
 
   static String[] callArgs(MagicTrait<MIR.E, String> magic, List<? extends MIR.E> args, MIRVisitor<String> gen) {
     String self = magic.instantiate().orElseThrow();
@@ -45,7 +44,7 @@ record ZigNumOps(ZigNumOps.NumOp onNat) {
 
   static {
     // conversions
-    put(".int", 0, a -> a[0]); // identity: same representation
+    put(".int", 0, a -> "int_rt.make(@bitCast(nat_rt.deref(" + a[0] + ")))"); // Nat→Int conversion
     put(".nat", 0, a -> a[0]); // identity
     put(".float", 0, a -> POISON); // not supported
     put(".byte", 0, a -> POISON); // not supported
@@ -69,12 +68,12 @@ record ZigNumOps(ZigNumOps.NumOp onNat) {
     put(".bitwiseOr", 1, a -> "nat_rt.bitwise_or(" + a[0] + ", " + a[1] + ")");
 
     // comparisons
-    put(">", 1, a -> "nat_rt.gt(" + a[0] + ", " + a[1] + ")");
-    put("<", 1, a -> "nat_rt.lt(" + a[0] + ", " + a[1] + ")");
-    put(">=", 1, a -> "nat_rt.gte(" + a[0] + ", " + a[1] + ")");
-    put("<=", 1, a -> "nat_rt.lte(" + a[0] + ", " + a[1] + ")");
-    put("==", 1, a -> "nat_rt.eq(" + a[0] + ", " + a[1] + ")");
-    put("!=", 1, a -> "nat_rt.neq(" + a[0] + ", " + a[1] + ")");
+    put(">", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") > nat_rt.deref(" + a[1] + ")"));
+    put("<", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") < nat_rt.deref(" + a[1] + ")"));
+    put(">=", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") >= nat_rt.deref(" + a[1] + ")"));
+    put("<=", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") <= nat_rt.deref(" + a[1] + ")"));
+    put("==", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") == nat_rt.deref(" + a[1] + ")"));
+    put("!=", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") != nat_rt.deref(" + a[1] + ")"));
 
     // assertEq - crash for now (uses strings)
     put(".assertEq", 1, a -> POISON);
@@ -103,10 +102,10 @@ class ZigStrOps {
   static {
     put(".str", 0, a -> a[0]); // identity: Str.str returns self
     put(".size", 0, a -> "str_rt.str_size(" + a[0] + ")");
-    put(".isEmpty", 0, a -> "str_rt.str_is_empty(" + a[0] + ")");
+    put(".isEmpty", 0, a -> ZigNumOps.zigBool("str_rt.deref_str(" + a[0] + ").len == 0"));
     put("+", 1, a -> "str_rt.str_concat(" + a[0] + ", " + a[1] + ")");
-    put("==", 1, a -> "str_rt.str_eq(" + a[0] + ", " + a[1] + ")");
-    put("!=", 1, a -> "bool_rt.to_bool(str_rt.str_eq(" + a[0] + ", " + a[1] + ").vt != &bool_rt.VT_True)");
+    put("==", 1, a -> ZigNumOps.zigBool("std.mem.eql(u8, str_rt.deref_str(" + a[0] + "), str_rt.deref_str(" + a[1] + "))"));
+    put("!=", 1, a -> ZigNumOps.zigBool("!std.mem.eql(u8, str_rt.deref_str(" + a[0] + "), str_rt.deref_str(" + a[1] + "))"));
     put(".assertEq", 1, a -> ZigNumOps.POISON); // needs error handling
     put(".assertEq", 2, a -> ZigNumOps.POISON);
   }
@@ -124,7 +123,7 @@ public record ZigMagicImpls(
         var lit = getLiteral(p, name);
         try {
           return lit
-            .map(lambdaName -> "rt.make_int(" + Long.parseUnsignedLong(lambdaName.replace("_", ""), 10) + ")")
+            .map(lambdaName -> "nat_rt.make(" + Long.parseUnsignedLong(lambdaName.replace("_", ""), 10) + ")")
             .orElseGet(() -> e.accept(gen, true)).describeConstable();
         } catch (NumberFormatException ignored) {
           throw Fail.invalidNum(lit.orElse(name.toString()), "Nat");
@@ -144,7 +143,7 @@ public record ZigMagicImpls(
         try {
           return lit
             .map(lambdaName -> lambdaName.startsWith("+") ? lambdaName.substring(1) : lambdaName)
-            .map(lambdaName -> "rt.make_int(" + Long.parseLong(lambdaName.replace("_", ""), 10) + ")")
+            .map(lambdaName -> "int_rt.make(" + Long.parseLong(lambdaName.replace("_", ""), 10) + ")")
             .orElseGet(() -> e.accept(gen, true)).describeConstable();
         } catch (NumberFormatException ignored) {
           throw Fail.invalidNum(lit.orElse(name.toString()), "Int");

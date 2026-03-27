@@ -3,12 +3,11 @@ package codegen.zig;
 import main.CompilerFrontEnd;
 import main.InputOutput;
 import utils.Bug;
+import utils.DeleteOnExit;
 import utils.IoErr;
 
 import java.io.IOException;
 import java.nio.file.*;
-import java.nio.file.attribute.BasicFileAttributes;
-import java.util.stream.Stream;
 
 public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) {
   /** The absolute path to the feart runtime source tree (the experiments/feart directory). */
@@ -21,10 +20,11 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
     var candidates = new Path[]{
       Path.of("feart"),
       Path.of("../feart"),
+      Path.of("../../feart"),
       Path.of("experiments/feart"),
     };
     for (var c : candidates) {
-      if (Files.isDirectory(c.resolve("src/runtime"))) { return c.toAbsolutePath(); }
+      if (Files.isDirectory(c)) { return c.toAbsolutePath(); }
     }
     throw Bug.of("Cannot find feart runtime. Set FEART_ROOT environment variable.");
   }
@@ -61,6 +61,9 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
 
       return null;
     });
+    if (!verbosity.printCodegen()) {
+      DeleteOnExit.of(workDir);
+    }
     return workDir.resolve("zig-out/bin/fearless-app");
   }
 
@@ -112,7 +115,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
   }
 
   private void runZigBuild(Path workDir) throws IOException {
-    var pb = new ProcessBuilder("zig", "build")
+    var pb = new ProcessBuilder("zig", "build", "-Doptimize=ReleaseFast")
       .directory(workDir.toFile())
       .redirectErrorStream(true);
     var process = pb.start();

@@ -45,8 +45,8 @@ class ZigProgramBuilder {
     // Imports
     sb.append("const std = @import(\"std\");\n");
     sb.append("const rt = @import(\"runtime/objs.zig\");\n");
-    sb.append("const bool_rt = @import(\"runtime/intrinsics/bool.zig\");\n");
     sb.append("const nat_rt = @import(\"runtime/intrinsics/nat.zig\");\n");
+    sb.append("const int_rt = @import(\"runtime/intrinsics/int.zig\");\n");
     sb.append("const gc = @import(\"runtime/gc.zig\");\n");
     sb.append("const str_rt = @import(\"runtime/intrinsics/str.zig\");\n");
     // Force fiber.zig to be compiled so fiber_trampoline is linked for the assembly files
