@@ -1,13 +1,11 @@
 package codegen.zig;
 
 import codegen.MIR;
-import id.Id;
-import magic.LiteralKind;
 
 /**
  * Builds the signature strings that get hashed by FNV-1a at comptime in Zig.
- * Must produce the same strings as the hand-written examples in feart's main.zig,
- * e.g. "mut #(Int): Int", "read .speak(): Str".
+ * Must produce the same strings as the hand-written examples in FeaRT's main.zig,
+ * e.g. "mut #/1", "read .speak/0".
  */
 public final class ZigSigStringBuilder {
   private final ast.Program p;
@@ -18,26 +16,15 @@ public final class ZigSigStringBuilder {
 
   /**
    * Build the signature string for a method.
-   * Format: "<mdf> <name>(<paramTypes>): <retType>"
+   * Format: "<mdf> <name>/<arity>"
    */
   public String sigString(MIR.Sig sig) {
-    var sb = new StringBuilder();
-    sb.append(sig.mdf().toString());
-    sb.append(' ');
-    sb.append(sig.name().name());
-    sb.append('(');
-    for (int i = 0; i < sig.xs().size(); i++) {
-      if (i > 0) sb.append(", ");
-      sb.append(typeShortName(sig.xs().get(i).t()));
-    }
-    sb.append("): ");
-    sb.append(typeShortName(sig.rt()));
-    return sb.toString();
+    return sig.mdf().toString() + " " + sig.name().name() + "/" + sig.xs().size();
   }
 
   /**
    * Compute the FNV-1a 64-bit hash of a signature string.
-   * Same algorithm as hash_signature in feart's objs.zig.
+   * Same algorithm as hash_signature in FeaRT's objs.zig.
    */
   public long sigHash(MIR.Sig sig) {
     return fnv1a(sigString(sig));
@@ -54,21 +41,6 @@ public final class ZigSigStringBuilder {
       hash *= prime;
     }
     return hash;
-  }
-
-  /**
-   * Get a short type name for use in signature strings.
-   * e.g. "base.Int/0" -> "Int", "animals.Dog/0" -> "Dog"
-   */
-  private String typeShortName(MIR.MT t) {
-    return t.name()
-      .map(id -> {
-        // Literals like "base.natLit.10" should resolve to "Nat", not "10"
-        return LiteralKind.nameToType(id.name())
-          .map(it -> it.name().shortName())
-          .orElse(id.shortName());
-      })
-      .orElse("Any");
   }
 
   /**

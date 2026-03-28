@@ -32,6 +32,10 @@ record ZigNumOps(ZigNumOps.NumOp onNat) {
       .orElseGet(() -> { throw utils.Bug.of("Expected magic to exist for: " + m); });
   }
   static String emitNat(Id.MethName m, String... args) { return emit(m, args).onNat().apply(args); }
+  /** Try to emit a Nat/Int magic operation; returns empty if the method is not in the table. */
+  static Optional<String> tryEmitNat(Id.MethName m, String... args) {
+    return Optional.ofNullable(numOps.get(m)).map(ops -> ops.onNat().apply(args));
+  }
   static String zigBool(String condition) {
     return "(if (" + condition + ") rt.obj_k_singleton(&VT_True_0) else rt.obj_k_singleton(&VT_False_0))";
   }
@@ -99,6 +103,10 @@ class ZigStrOps {
       .map(op -> op.apply(args))
       .orElse(ZigNumOps.POISON);
   }
+  /** Try to emit a Str magic operation; returns empty if the method is not in the table. */
+  static Optional<String> tryEmit(Id.MethName m, String... args) {
+    return Optional.ofNullable(strOps.get(m)).map(op -> op.apply(args));
+  }
   static {
     put(".str", 0, a -> a[0]); // identity: Str.str returns self
     put(".size", 0, a -> "str_rt.str_size(" + a[0] + ")");
@@ -130,7 +138,7 @@ public record ZigMagicImpls(
         }
       }
       @Override public Optional<String> call(Id.MethName m, List<? extends MIR.E> args, EnumSet<MIR.MCall.CallVariant> variants, MIR.MT expectedT) {
-        return Optional.of(ZigNumOps.emitNat(m, ZigNumOps.callArgs(this, args, gen)));
+        return Optional.empty(); // Handled by runtime dispatch in objs.zig
       }
     };
   }
@@ -150,8 +158,7 @@ public record ZigMagicImpls(
         }
       }
       @Override public Optional<String> call(Id.MethName m, List<? extends MIR.E> args, EnumSet<MIR.MCall.CallVariant> variants, MIR.MT expectedT) {
-        // Int uses the same ops as Nat for now (same underlying i64)
-        return Optional.of(ZigNumOps.emitNat(m, ZigNumOps.callArgs(this, args, gen)));
+        return Optional.empty(); // Handled by runtime dispatch in objs.zig
       }
     };
   }
@@ -182,7 +189,7 @@ public record ZigMagicImpls(
         return e.accept(gen, true).describeConstable();
       }
       @Override public Optional<String> call(Id.MethName m, List<? extends MIR.E> args, EnumSet<MIR.MCall.CallVariant> variants, MIR.MT expectedT) {
-        return Optional.of(ZigStrOps.emit(m, ZigNumOps.callArgs(this, args, gen)));
+        return Optional.empty(); // Handled by runtime dispatch in objs.zig
       }
     };
   }

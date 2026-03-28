@@ -49,8 +49,8 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
         System.out.println("--- End Generated Zig ---");
       }
 
-      // 3. Write build.zig
-      Files.writeString(workDir.resolve("build.zig"), buildZig());
+      // 3. Write build.zig (trace/safety logging enabled when verbose)
+      Files.writeString(workDir.resolve("build.zig"), buildZig(verbosity.printCodegen()));
 
       // 4. Write build.zig.zon
       Files.writeString(workDir.resolve("build.zig.zon"), buildZigZon());
@@ -134,7 +134,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
     }
   }
 
-  private String buildZig() {
+  private String buildZig(boolean enableTracing) {
     return """
       const std = @import("std");
       pub fn build(b: *std.Build) void {
@@ -143,9 +143,9 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
 
           const build_options = b.addOptions();
           build_options.addOption(bool, "log_scheduling", false);
-          build_options.addOption(bool, "log_safety", false);
+          build_options.addOption(bool, "log_safety", %s);
           build_options.addOption(bool, "log_dispatch", false);
-          build_options.addOption(bool, "log_trace", false);
+          build_options.addOption(bool, "log_trace", %s);
 
           const exe = b.addExecutable(.{
               .name = "fearless-app",
@@ -198,7 +198,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
               run_cmd.addArgs(args);
           }
       }
-      """;
+      """.formatted(enableTracing, enableTracing);
   }
 
   private String buildZigZon() {

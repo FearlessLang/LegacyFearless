@@ -120,7 +120,8 @@ public sealed interface MIR {
       Standard,
       PipelineParallelFlow,
       DataParallelFlow,
-      SafeMutSourceFlow;
+      SafeMutSourceFlow,
+      VPFParallelisable;
 
       public boolean isStandard() { return this == Standard; }
     }

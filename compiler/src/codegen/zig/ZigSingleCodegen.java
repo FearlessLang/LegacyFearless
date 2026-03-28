@@ -35,6 +35,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   private String pkg;
 
+  // Counter for unique VPF thief names within a codegen run
+  private int vpfCounter = 0;
+
   public ZigSingleCodegen(MIR.Program p) {
     magic = new ZigMagicImpls(this, t -> "rt.FatPtr", p.p());
     sigBuilder = new ZigSigStringBuilder(p.p());
@@ -237,6 +240,14 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var params = fun.args().stream()
       .map(x -> id.varName(x.name()) + ": rt.FatPtr")
       .collect(Collectors.joining(", "));
+
+    // Check if this function body contains a VPF-parallelisable call
+    var vpfInfo = findVPFCall(fun.body());
+    if (vpfInfo != null) {
+      emitVPFFun(fun, name, paramNames, params, vpfInfo);
+      return;
+    }
+
     var body = fun.body().accept(this, true);
     var sb = new StringBuilder();
     sb.append("fn ").append(name).append("(").append(params).append(") rt.FatPtr {\n");
@@ -246,6 +257,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       sb.append(String.join(", ", paramNames));
       sb.append(" };\n");
     }
+    sb.append("heartbeat.tryPromote();\n");
     if (body.equals("unreachable")) {
       sb.append("unreachable;\n");
     } else {
@@ -253,6 +265,300 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     }
     sb.append("}");
     functions.add(sb.toString());
+  }
+
+  // --- VPF (Very Parallel Fearless) Support ---
+
+  /** Info about a VPF call found in a function body. */
+  private record VPFCallInfo(
+    MIR.MCall vpfCall,
+    MIR.BoolExpr boolExpr, // non-null if wrapped in BoolExpr (base case + recursive case)
+    List<SubExprInfo> subExprs, // all sub-expressions (recv + args), classified
+    String hashName // hash constant name for the VPF call's method
+  ) {}
+
+  /** Classification of a sub-expression within a VPF call. */
+  private record SubExprInfo(MIR.E expr, boolean isFrameAdding, int index) {}
+
+  /** Find a VPFParallelisable MCall in the function body, return null if none. */
+  private VPFCallInfo findVPFCall(MIR.E body) {
+    return switch (body) {
+      case MIR.MCall call -> {
+        if (call.variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
+          yield buildVPFInfo(call, null);
+        }
+        yield null;
+      }
+      case MIR.BoolExpr boolExpr -> {
+        // The VPF call is typically in the else-branch (recursive case)
+        var elseFun = funMap.get(boolExpr.else_());
+        if (elseFun != null) {
+          var inner = findVPFCallInner(elseFun.body());
+          if (inner != null) {
+            yield new VPFCallInfo(inner.vpfCall, boolExpr, inner.subExprs, inner.hashName);
+          }
+        }
+        yield null;
+      }
+      default -> null;
+    };
+  }
+
+  /** Like findVPFCall but doesn't look through BoolExpr (inner level). */
+  private VPFCallInfo findVPFCallInner(MIR.E body) {
+    if (body instanceof MIR.MCall call &&
+        call.variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
+      return buildVPFInfo(call, null);
+    }
+    return null;
+  }
+
+  private VPFCallInfo buildVPFInfo(MIR.MCall call, MIR.BoolExpr boolExpr) {
+    var subExprs = new ArrayList<SubExprInfo>();
+    // Receiver is sub-expr 0
+    subExprs.add(new SubExprInfo(call.recv(), isFrameAddingExpr(call.recv()), 0));
+    // Args are sub-exprs 1..N
+    for (int i = 0; i < call.args().size(); i++) {
+      var arg = call.args().get(i);
+      subExprs.add(new SubExprInfo(arg, isFrameAddingExpr(arg), i + 1));
+    }
+
+    var sig = new MIR.Sig(call.name(),
+      call.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
+      call.originalRet());
+    addHashConstant(sig);
+    var hashName = sigBuilder.hashConstName(sig, id);
+
+    return new VPFCallInfo(call, boolExpr, subExprs, hashName);
+  }
+
+  /** MCalls and BoolExprs are the only MIR expressions that add stack frames. */
+  private boolean isFrameAddingExpr(MIR.E expr) {
+    return expr instanceof MIR.MCall || expr instanceof MIR.BoolExpr;
+  }
+
+  /** Emit a VPF-instrumented function: locals struct + thief function + instrumented body. */
+  private void emitVPFFun(MIR.Fun fun, String name, List<String> paramNames, String params, VPFCallInfo vpf) {
+    int vpfId = vpfCounter++;
+    var localsName = name + "_" + vpfId + "_Locals";
+    var thiefName = name + "_" + vpfId + "_thief";
+
+    var frameAddingExprs = vpf.subExprs.stream().filter(s -> s.isFrameAdding).toList();
+    var plainExprs = vpf.subExprs.stream().filter(s -> !s.isFrameAdding).toList();
+
+    // Build set of function parameter names for the thief's locals prefix
+    var funParamNames = new HashSet<String>();
+    for (var arg : fun.args()) {
+      funParamNames.add(arg.name());
+    }
+
+    // 1. Emit Locals struct: all function params + r1 slot
+    var localsFields = new StringBuilder();
+    for (var arg : fun.args()) {
+      localsFields.append(id.varName(arg.name())).append(": rt.FatPtr,\n");
+    }
+    localsFields.append("r1: rt.FatPtr,\n");
+    captureStructs.put(
+      new DecId(localsName, 0),
+      "const " + localsName + " = extern struct {\n" + localsFields + "};"
+    );
+
+    // 2. Emit thief function
+    emitThiefFunction(thiefName, localsName, fun, vpf, frameAddingExprs, funParamNames);
+
+    // 3. Emit the instrumented function body
+    var sb = new StringBuilder();
+    sb.append("fn ").append(name).append("(").append(params).append(") rt.FatPtr {\n");
+    if (!paramNames.isEmpty()) {
+      sb.append("_ = .{ ");
+      sb.append(String.join(", ", paramNames));
+      sb.append(" };\n");
+    }
+
+    // If there's a BoolExpr, emit the base case as an early return
+    if (vpf.boolExpr != null) {
+      var cond = vpf.boolExpr.condition().accept(this, true);
+      var thenFun = funMap.get(vpf.boolExpr.then());
+      String thenBody = thenFun.body().accept(this, true);
+      sb.append("if (").append(cond).append(".vt == &VT_True_0) return ").append(thenBody).append(";\n");
+    }
+
+    // heartbeat.tryPromote() — after base case, before shadow frame
+    sb.append("heartbeat.tryPromote();\n");
+
+    // Initialize locals struct
+    sb.append("var locals = ").append(localsName).append("{ ");
+    for (var arg : fun.args()) {
+      sb.append(".").append(id.varName(arg.name())).append(" = ").append(id.varName(arg.name())).append(", ");
+    }
+    sb.append(".r1 = undefined };\n");
+
+    // Compiler fence to flush locals to memory before pushing frame
+    sb.append("asm volatile (\"\" ::: .{ .memory = true });\n");
+
+    // Push shadow frame using helper
+    var methodHash = vpf.hashName;
+    sb.append("const frame_idx = shadow_stack_mod.pushFrame(.{\n");
+    sb.append("    .target_method = ").append(methodHash).append(",\n");
+    sb.append("    .join_obligation = std.atomic.Value(?*JoinObligation).init(null),\n");
+    sb.append("    .child_obligation = std.atomic.Value(?*JoinObligation).init(null),\n");
+    sb.append("    .locals = @ptrCast(&locals),\n");
+    sb.append("    .locals_size = @sizeOf(").append(localsName).append("),\n");
+    sb.append("    .thief_fn = &").append(thiefName).append(",\n");
+    sb.append("});\n");
+
+    // Main thread computes first frame-adding sub-expression → locals.r1
+    if (!frameAddingExprs.isEmpty()) {
+      var firstFrameAdding = frameAddingExprs.getFirst();
+      var firstExprCode = firstFrameAdding.expr.accept(this, true);
+      sb.append("locals.r1 = ").append(firstExprCode).append(";\n");
+    }
+
+    // Pop and claim the frame using helper
+    sb.append("if (shadow_stack_mod.popAndClaim(frame_idx)) |obligation| {\n");
+    // Promoted path: deliver r1 to thief, wait for thief result
+    sb.append("    shadow_stack_mod.fulfillChildObligation(frame_idx, locals.r1);\n");
+    sb.append("    return obligation.wait(worker_mod.getCurrentWorker().?);\n");
+    sb.append("}\n");
+
+    // Not-promoted path: compute remaining frame-adding sub-exprs ourselves, call combiner
+    for (int i = 1; i < frameAddingExprs.size(); i++) {
+      var expr = frameAddingExprs.get(i);
+      sb.append("const r").append(i + 1).append(" = ").append(expr.expr.accept(this, true)).append(";\n");
+    }
+
+    // Call combiner with all results
+    sb.append("return ").append(emitCombiner(vpf, frameAddingExprs, plainExprs, false)).append(";\n");
+
+    sb.append("}");
+    functions.add(sb.toString());
+  }
+
+  /** Emit the thief function that computes all frame-adding sub-exprs except the first. */
+  private void emitThiefFunction(String thiefName, String localsName, MIR.Fun fun,
+                                  VPFCallInfo vpf, List<SubExprInfo> frameAddingExprs,
+                                  Set<String> funParamNames) {
+    // Build a thief-local codegen that prefixes param references with "locals."
+    var thiefGen = new ThiefCodegen(this, funParamNames);
+
+    var sb = new StringBuilder();
+    sb.append("fn ").append(thiefName).append("(locals_ptr: *anyopaque, child_obl_opt: ?*JoinObligation) rt.FatPtr {\n");
+    sb.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
+
+    // Compute all frame-adding sub-exprs except the first (r2, r3, ...)
+    for (int i = 1; i < frameAddingExprs.size(); i++) {
+      var expr = frameAddingExprs.get(i);
+      sb.append("const r").append(i + 1).append(" = ").append(expr.expr.accept(thiefGen, true)).append(";\n");
+    }
+
+    // Wait for r1 from main thread via child_obl_opt
+    sb.append("const r1 = child_obl_opt.?.wait(worker_mod.getCurrentWorker().?);\n");
+
+    // Call combiner
+    var plainExprs = vpf.subExprs.stream().filter(s -> !s.isFrameAdding).toList();
+    sb.append("return ").append(emitCombiner(vpf, frameAddingExprs, plainExprs, true)).append(";\n");
+    sb.append("}");
+    functions.add(sb.toString());
+  }
+
+  /**
+   * Emit the combiner expression for a VPF call.
+   * Replaces each sub-expression with its result variable name.
+   * For magic types (Nat, Int, Str) we try to inline the intrinsic since they have no VTables.
+   * Falls back to rt.call for non-magic types.
+   * @param inThief if true, plain expressions use "locals." prefix for param refs
+   */
+  private String emitCombiner(VPFCallInfo vpf, List<SubExprInfo> frameAddingExprs,
+                               List<SubExprInfo> plainExprs, boolean inThief) {
+    // Build a mapping from sub-expr index to its emitted code
+    var resultMap = new HashMap<Integer, String>();
+
+    // Frame-adding exprs get result variable names
+    // In the thief, r1 comes from child_obl_opt.wait() (a local variable), not locals.r1
+    // In the main function, r1 is in locals.r1
+    for (int i = 0; i < frameAddingExprs.size(); i++) {
+      resultMap.put(frameAddingExprs.get(i).index, i == 0 ? (inThief ? "r1" : "locals.r1") : "r" + (i + 1));
+    }
+
+    // Build string args array with result variable names for all sub-expressions
+    var allArgs = new String[vpf.subExprs.size()];
+    for (var sub : vpf.subExprs) {
+      if (resultMap.containsKey(sub.index)) {
+        allArgs[sub.index] = resultMap.get(sub.index);
+      } else {
+        allArgs[sub.index] = inThief
+          ? emitExprWithLocalsPrefix(sub.expr)
+          : sub.expr.accept(this, true);
+      }
+    }
+
+    // All method calls go through rt.call — intrinsics are handled by runtime dispatch
+    String recvStr = allArgs[0];
+    var argStrs = new ArrayList<String>();
+    for (int i = 1; i < allArgs.length; i++) {
+      argStrs.add(allArgs[i]);
+    }
+
+    var argsTuple = argStrs.isEmpty() ? ".{}" : ".{ " + String.join(", ", argStrs) + " }";
+    return "rt.call(" + recvStr + ", " + vpf.hashName + ", " + argsTuple + ", @src())";
+  }
+
+  /** Emit an expression with locals. prefix for any X that is a function parameter. */
+  private String emitExprWithLocalsPrefix(MIR.E expr) {
+    if (expr instanceof MIR.X x) {
+      return "locals." + id.varName(x.name());
+    }
+    return expr.accept(this, true);
+  }
+
+  /**
+   * ThiefCodegen: a wrapper that overrides visitX to prefix param names with "locals."
+   * for use inside thief functions where params are accessed via the locals struct pointer.
+   */
+  private static class ThiefCodegen implements MIRVisitor<String> {
+    private final ZigSingleCodegen delegate;
+    private final Set<String> paramNames;
+
+    ThiefCodegen(ZigSingleCodegen delegate, Set<String> paramNames) {
+      this.delegate = delegate;
+      this.paramNames = paramNames;
+    }
+
+    @Override public String visitX(MIR.X x, boolean checkMagic) {
+      if (paramNames.contains(x.name())) {
+        return "locals." + delegate.id.varName(x.name());
+      }
+      return delegate.visitX(x, checkMagic);
+    }
+    @Override public String visitMCall(MIR.MCall call, boolean checkMagic) {
+      // In the thief, all MCalls go through rt.call with locals-prefixed variable references.
+      // We skip magic inlining here because (a) params come from a locals struct pointer, and
+      // (b) not all magic methods are in the numOps table.
+      var recv = call.recv().accept(this, checkMagic);
+      var sig = new MIR.Sig(call.name(),
+        call.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
+        call.originalRet());
+      delegate.addHashConstant(sig);
+      var hashName = delegate.sigBuilder.hashConstName(sig, delegate.id);
+
+      var args = call.args().stream()
+        .map(a -> a.accept(this, checkMagic))
+        .collect(Collectors.joining(", "));
+      var argsTuple = args.isEmpty() ? ".{}" : ".{ " + args + " }";
+      return "rt.call(" + recv + ", " + hashName + ", " + argsTuple + ", @src())";
+    }
+    @Override public String visitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
+      return delegate.visitCreateObj(createObj, checkMagic);
+    }
+    @Override public String visitBoolExpr(MIR.BoolExpr expr, boolean checkMagic) {
+      return delegate.visitBoolExpr(expr, checkMagic);
+    }
+    @Override public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
+      return delegate.visitStaticCall(call, checkMagic);
+    }
+    @Override public String visitUpdatableListAsIdFnCall(MIR.UpdatableListAsIdFnCall call, boolean checkMagic) {
+      return delegate.visitUpdatableListAsIdFnCall(call, checkMagic);
+    }
   }
 
   @Override

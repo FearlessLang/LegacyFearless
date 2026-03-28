@@ -14,6 +14,8 @@ import program.TypeTable;
 import utils.Push;
 import utils.Range;
 
+import vpf.ComputeVPFMode;
+
 import java.util.*;
 import java.util.stream.IntStream;
 
@@ -140,7 +142,8 @@ public interface EMethTypeSystem extends ETypeSystem {
     Mdf mdf = multi.recvMdfs().get(i);
     List<T> ts= multi.tss().stream().map(tsj->tsj.get(i)).toList();
     T ret= multi.rets().get(i);
-    TsT tst = new TsT(mdf, ts, ret, selected);
+    var vpfMode = ComputeVPFMode.of(this, e);
+    TsT tst = new TsT(mdf, ts, ret, selected, vpfMode);
     resolvedCalls().put(e.callId(), tst);
     return FailOr.res(ret);
   }

@@ -9,6 +9,7 @@ import magic.Magic;
 import program.CM;
 import program.typesystem.TsT;
 import program.typesystem.XBs;
+import vpf.VPFCallMode;
 import utils.*;
 import visitors.CollectorVisitor;
 import visitors.CtxVisitor;
@@ -293,6 +294,11 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     }
     if (recvIT.name().equals(Magic.FlowK) && e.name().equals(new Id.MethName(".range", 1))) {
       return EnumSet.of(MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
+    }
+
+    var tst = this.resolvedCalls.get(e.callId());
+    if (tst != null && tst.vpfMode() == VPFCallMode.Parallel) {
+      return EnumSet.of(MIR.MCall.CallVariant.VPFParallelisable);
     }
 
     return EnumSet.of(MIR.MCall.CallVariant.Standard);

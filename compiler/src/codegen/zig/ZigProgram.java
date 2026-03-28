@@ -49,8 +49,15 @@ class ZigProgramBuilder {
     sb.append("const int_rt = @import(\"runtime/intrinsics/int.zig\");\n");
     sb.append("const gc = @import(\"runtime/gc.zig\");\n");
     sb.append("const str_rt = @import(\"runtime/intrinsics/str.zig\");\n");
+    // VPF runtime imports
+    sb.append("const shadow_stack_mod = @import(\"runtime/shadow_stack.zig\");\n");
+    sb.append("const worker_mod = @import(\"runtime/worker.zig\");\n");
+    sb.append("const JoinObligation = @import(\"runtime/sync/join_obligation.zig\").JoinObligation;\n");
+    sb.append("const heartbeat = @import(\"runtime/heartbeat.zig\");\n");
+    sb.append("const log = @import(\"runtime/log.zig\");\n");
+    sb.append("const Fiber = @import(\"runtime/fiber.zig\").Fiber;\n");
     // Force fiber.zig to be compiled so fiber_trampoline is linked for the assembly files
-    sb.append("comptime { _ = @import(\"runtime/fiber.zig\"); }\n");
+    sb.append("comptime { _ = Fiber; }\n");
     sb.append('\n');
 
     // Hash constants
@@ -104,7 +111,7 @@ class ZigProgramBuilder {
     var entryVtName = "VT_" + gen.id.getSimpleName(entryDecId);
 
     // immBase Main: { #(args: LList[Str]): Str }
-    var sigStr = "imm #(LList): Str";
+    var sigStr = "imm #/1";
     var hashSuffix = Long.toHexString(ZigSigStringBuilder.fnv1a(sigStr));
     var hashMethName = gen.id.getMName(id.Mdf.imm, new Id.MethName("#", 1));
     var hashConstName = "H_" + hashMethName + "_" + hashSuffix;
@@ -119,13 +126,24 @@ class ZigProgramBuilder {
     var sb = new StringBuilder();
     sb.append("// === Entry Point ===\n");
     sb.append("pub fn main() void {\n");
+    sb.append("    log.installCrashHandler();\n");
     sb.append("    gc.init_gc();\n");
-    sb.append("    const entry = rt.obj_k_singleton(&").append(entryVtName).append(");\n");
-    sb.append("    const args = rt.obj_k_singleton(&").append(llistVtName).append(");\n");
-    sb.append("    const result = rt.call(entry, ").append(hashConstName).append(", .{args}, @src());\n");
-    sb.append("    const str_data = str_rt.deref_str(result);\n");
-    sb.append("    _ = std.posix.write(std.posix.STDOUT_FILENO, str_data) catch {};\n");
-    sb.append("    _ = std.posix.write(std.posix.STDOUT_FILENO, \"\\n\") catch {};\n");
+    sb.append("    const cpu_count = std.Thread.getCpuCount() catch 1;\n");
+    sb.append("    const pool = worker_mod.WorkerPool.init(cpu_count) catch @panic(\"OOM\");\n");
+    sb.append("    const main_fiber = Fiber.create(struct {\n");
+    sb.append("        fn run(_: *Fiber) void {\n");
+    sb.append("            const entry = rt.obj_k_singleton(&").append(entryVtName).append(");\n");
+    sb.append("            const args = rt.obj_k_singleton(&").append(llistVtName).append(");\n");
+    sb.append("            const result = rt.call(entry, ").append(hashConstName).append(", .{args}, @src());\n");
+    sb.append("            const str_data = str_rt.deref_str(result);\n");
+    sb.append("            _ = std.posix.write(std.posix.STDOUT_FILENO, str_data) catch {};\n");
+    sb.append("            _ = std.posix.write(std.posix.STDOUT_FILENO, \"\\n\") catch {};\n");
+    sb.append("            worker_mod.global_done.store(true, .release);\n");
+    sb.append("        }\n");
+    sb.append("    }.run, null) catch @panic(\"OOM\");\n");
+    sb.append("    pool.enqueueFiber(main_fiber);\n");
+    sb.append("    pool.run();\n");
+    sb.append("    log.dumpAllTraceBuffers();\n");
     sb.append("}\n");
     return sb.toString();
   }
