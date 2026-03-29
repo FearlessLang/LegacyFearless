@@ -36,10 +36,10 @@ public class TestZigProgramImm {
     Test:Main{ _ -> (1 + 2) > 7 ? { .then -> "uh oh", .else -> "Yay!" } }
     """);}
 
-  @Test void fib30() { ok(new Res("832040", "", 0), """
+  @Test void fib40() { ok(new Res("102334155", "", 0), """
     package test
     alias base.Main as Main, alias base.Nat as Nat,
-    Test:Main{ _ -> Fib#(30).str }
+    Test:Main{ _ -> Fib#(40).str }
     Fib: {
       #(n: Nat): Nat -> n <= 1 ? {
         .then -> n,

@@ -375,6 +375,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       sb.append(" };\n");
     }
 
+    // heartbeat.tryPromote() — before base case check, so promotion always runs
+    sb.append("heartbeat.tryPromote();\n");
+
     // If there's a BoolExpr, emit the base case as an early return
     if (vpf.boolExpr != null) {
       var cond = vpf.boolExpr.condition().accept(this, true);
@@ -382,9 +385,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       String thenBody = thenFun.body().accept(this, true);
       sb.append("if (").append(cond).append(".vt == &VT_True_0) return ").append(thenBody).append(";\n");
     }
-
-    // heartbeat.tryPromote() — after base case, before shadow frame
-    sb.append("heartbeat.tryPromote();\n");
 
     // Initialize locals struct
     sb.append("var locals = ").append(localsName).append("{ ");

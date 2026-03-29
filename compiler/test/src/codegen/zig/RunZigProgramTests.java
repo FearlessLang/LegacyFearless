@@ -18,7 +18,7 @@ public class RunZigProgramTests {
   public static void okWithArgs(Res expected, List<String> args, String... content) {
     assert content.length > 0;
     Main.resetAll();
-    var verbosity = new CompilerFrontEnd.Verbosity(false, false, CompilerFrontEnd.ProgressVerbosity.None);
+    var verbosity = new CompilerFrontEnd.Verbosity(true, false, CompilerFrontEnd.ProgressVerbosity.None);
     var logicMain = LogicMainZig.of(TestInputOutputs.programmaticImm(Arrays.asList(content), args), verbosity);
     assertResMatch(logicMain.run(), expected);
   }
