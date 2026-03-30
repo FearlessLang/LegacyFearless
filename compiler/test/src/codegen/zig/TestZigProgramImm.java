@@ -47,4 +47,27 @@ public class TestZigProgramImm {
         }
       }
     """);}
+
+  @Test void ternaryVPF() { ok(new Res("10", "", 0), """
+    package test
+    alias base.Main as Main, alias base.Nat as Nat,
+    Test:Main{ _ -> Tri#(3, 4, 5).str }
+    Tri: {
+      #(a: Nat, b: Nat, c: Nat): Nat -> this.combine((this.work(a)), (this.work(b)), (this.work(c))),
+      .work(n: Nat): Nat -> n <= 1 ? { .then -> n, .else -> (this.work(n - 1)) + (this.work(n - 2)) },
+      .combine(x: Nat, y: Nat, z: Nat): Nat -> x + y + z
+      }
+    """);}
+
+  @Test void quaternaryVPF() { ok(new Res("409336620", "", 0), """
+    package test
+    alias base.Main as Main, alias base.Nat as Nat,
+    Test:Main{ _ -> Quad#(40, 40, 40, 40).str }
+    Quad: {
+      #(a: Nat, b: Nat, c: Nat, d: Nat): Nat ->
+        this.combine((this.work(a)), (this.work(b)), (this.work(c)), (this.work(d))),
+      .work(n: Nat): Nat -> n <= 1 ? { .then -> n, .else -> (this.work(n - 1)) + (this.work(n - 2)) },
+      .combine(w: Nat, x: Nat, y: Nat, z: Nat): Nat -> w + x + y + z
+      }
+    """);}
 }

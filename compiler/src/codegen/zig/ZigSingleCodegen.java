@@ -434,31 +434,241 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     functions.add(sb.toString());
   }
 
-  /** Emit the thief function that computes all frame-adding sub-exprs except the first. */
+  /** Dispatch: if 2+ remaining frame-adding sub-exprs, emit VPF thief; otherwise simple thief. */
   private void emitThiefFunction(String thiefName, String localsName, MIR.Fun fun,
                                   VPFCallInfo vpf, List<SubExprInfo> frameAddingExprs,
                                   Set<String> funParamNames) {
-    // Build a thief-local codegen that prefixes param references with "locals."
+    var remaining = frameAddingExprs.subList(1, frameAddingExprs.size());
+    if (remaining.size() >= 2) {
+      emitVPFThiefFunction(thiefName, localsName, fun, vpf, frameAddingExprs,
+        remaining, funParamNames, List.of());
+    } else {
+      emitSimpleThiefFunction(thiefName, localsName, fun, vpf, frameAddingExprs,
+        funParamNames, List.of());
+    }
+  }
+
+  /**
+   * Simple thief (innermost level): computes its assigned sub-exprs sequentially,
+   * waits for child_obl (from immediate parent), waits for forwarded obligations,
+   * calls full combiner.
+   *
+   * Variable naming for K total frame-adding sub-exprs with fwdCount forwarded obligations:
+   *   fwd_r_{fwdCount-1} = frameAddingExprs[0] (original main's r1)
+   *   fwd_r_{fwdCount-2} = frameAddingExprs[1] (outermost VPF thief's sub-expr)
+   *   ...
+   *   fwd_r_0 = frameAddingExprs[fwdCount-1]
+   *   r1 (child_obl_opt) = frameAddingExprs[fwdCount] (immediate parent's sub-expr)
+   *   r{i+1} = frameAddingExprs[fwdCount+1..K-1] (computed locally by this thief)
+   */
+  private void emitSimpleThiefFunction(String thiefName, String localsName, MIR.Fun fun,
+                                        VPFCallInfo vpf, List<SubExprInfo> frameAddingExprs,
+                                        Set<String> funParamNames,
+                                        List<String> forwardedChildOblFields) {
     var thiefGen = new ThiefCodegen(this, funParamNames);
+    int fwdCount = forwardedChildOblFields.size();
 
     var sb = new StringBuilder();
     sb.append("fn ").append(thiefName).append("(locals_ptr: *anyopaque, child_obl_opt: ?*JoinObligation) rt.FatPtr {\n");
     sb.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
 
-    // Compute all frame-adding sub-exprs except the first (r2, r3, ...)
-    for (int i = 1; i < frameAddingExprs.size(); i++) {
+    // Compute only the sub-exprs assigned to this thief (after fwd + child_obl)
+    for (int i = fwdCount + 1; i < frameAddingExprs.size(); i++) {
       var expr = frameAddingExprs.get(i);
       sb.append("const r").append(i + 1).append(" = ").append(expr.expr.accept(thiefGen, true)).append(";\n");
     }
 
-    // Wait for r1 from main thread via child_obl_opt
+    // Wait for immediate parent's sub-expr via child_obl_opt
     sb.append("const r1 = child_obl_opt.?.wait(worker_mod.getCurrentWorker().?);\n");
 
-    // Call combiner
+    // Wait for forwarded child obligations (reverse order to match naming)
+    for (int i = fwdCount - 1; i >= 0; i--) {
+      var field = forwardedChildOblFields.get(i);
+      sb.append("const fwd_obl_").append(i).append(": ?*JoinObligation = @ptrFromInt(locals.").append(field).append(");\n");
+      sb.append("const fwd_r").append(i).append(" = fwd_obl_").append(i).append(".?.wait(worker_mod.getCurrentWorker().?);\n");
+    }
+
+    // Build combiner variable map
+    var resultMap = buildThiefCombinerMap(frameAddingExprs, fwdCount, -1);
     var plainExprs = vpf.subExprs.stream().filter(s -> !s.isFrameAdding).toList();
-    sb.append("return ").append(emitCombiner(vpf, frameAddingExprs, plainExprs, true)).append(";\n");
+    sb.append("return ").append(emitCombinerFromMap(vpf, resultMap, plainExprs)).append(";\n");
     sb.append("}");
     functions.add(sb.toString());
+  }
+
+  /**
+   * VPF-instrumented thief: computes one sub-expr, pushes shadow frame for inner thief,
+   * either waits for inner thief result (stolen path) or computes remaining sequentially (not-stolen path).
+   */
+  private void emitVPFThiefFunction(String thiefName, String localsName, MIR.Fun fun,
+                                     VPFCallInfo vpf, List<SubExprInfo> allFrameAddingExprs,
+                                     List<SubExprInfo> remainingFrameAdding,
+                                     Set<String> funParamNames,
+                                     List<String> forwardedChildOblFields) {
+    int innerVpfId = vpfCounter++;
+    var innerLocalsName = thiefName + "_" + innerVpfId + "_Locals";
+    var innerThiefName = thiefName + "_" + innerVpfId + "_thief";
+
+    var thiefGen = new ThiefCodegen(this, funParamNames);
+
+    var myExpr = remainingFrameAdding.getFirst();
+    int myGlobalIdx = allFrameAddingExprs.indexOf(myExpr);
+
+    // Build inner locals struct: params + forwarded obls + new fwd for this child_obl + r_thief slot
+    var innerFields = new StringBuilder();
+    for (var arg : fun.args()) {
+      innerFields.append(id.varName(arg.name())).append(": rt.FatPtr,\n");
+    }
+    var newForwardedFields = new ArrayList<>(forwardedChildOblFields);
+    for (var fwdField : forwardedChildOblFields) {
+      innerFields.append(fwdField).append(": usize,\n");
+    }
+    var newFwdFieldName = "fwd_child_obl_" + forwardedChildOblFields.size();
+    innerFields.append(newFwdFieldName).append(": usize,\n");
+    newForwardedFields.add(newFwdFieldName);
+    innerFields.append("r_thief: rt.FatPtr,\n");
+
+    captureStructs.put(
+      new DecId(innerLocalsName, 0),
+      "const " + innerLocalsName + " = extern struct {\n" + innerFields + "};"
+    );
+
+    // Recursively emit the inner thief
+    var innerRemaining = remainingFrameAdding.subList(1, remainingFrameAdding.size());
+    if (innerRemaining.size() >= 2) {
+      emitVPFThiefFunction(innerThiefName, innerLocalsName, fun, vpf,
+        allFrameAddingExprs, innerRemaining, funParamNames, newForwardedFields);
+    } else {
+      emitSimpleThiefFunction(innerThiefName, innerLocalsName, fun, vpf,
+        allFrameAddingExprs, funParamNames, newForwardedFields);
+    }
+
+    int fwdCount = forwardedChildOblFields.size();
+
+    // Emit this thief function
+    var sb = new StringBuilder();
+    sb.append("fn ").append(thiefName).append("(locals_ptr: *anyopaque, child_obl_opt: ?*JoinObligation) rt.FatPtr {\n");
+    sb.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
+
+    // Initialize inner thief locals
+    sb.append("var thief_locals = ").append(innerLocalsName).append("{ ");
+    for (var arg : fun.args()) {
+      var vn = id.varName(arg.name());
+      sb.append(".").append(vn).append(" = locals.").append(vn).append(", ");
+    }
+    for (var fwdField : forwardedChildOblFields) {
+      sb.append(".").append(fwdField).append(" = locals.").append(fwdField).append(", ");
+    }
+    sb.append(".").append(newFwdFieldName).append(" = @intFromPtr(child_obl_opt), ");
+    sb.append(".r_thief = undefined };\n");
+
+    sb.append("asm volatile (\"\" ::: .{ .memory = true });\n");
+
+    // Push shadow frame for inner thief
+    sb.append("const frame_idx = shadow_stack_mod.pushFrame(.{\n");
+    sb.append("    .target_method = ").append(vpf.hashName).append(",\n");
+    sb.append("    .join_obligation = std.atomic.Value(?*JoinObligation).init(null),\n");
+    sb.append("    .child_obligation = std.atomic.Value(?*JoinObligation).init(null),\n");
+    sb.append("    .locals = @ptrCast(&thief_locals),\n");
+    sb.append("    .locals_size = @sizeOf(").append(innerLocalsName).append("),\n");
+    sb.append("    .thief_fn = &").append(innerThiefName).append(",\n");
+    sb.append("});\n");
+
+    // Compute this thief's sub-expr
+    sb.append("thief_locals.r_thief = ").append(myExpr.expr.accept(thiefGen, true)).append(";\n");
+
+    // Stolen path: deliver result to inner thief, wait for inner thief's combined result
+    sb.append("if (shadow_stack_mod.popAndClaim(frame_idx)) |inner_obl| {\n");
+    sb.append("    shadow_stack_mod.fulfillChildObligation(frame_idx, thief_locals.r_thief);\n");
+    sb.append("    return inner_obl.wait(worker_mod.getCurrentWorker().?);\n");
+    sb.append("}\n");
+
+    // Not-stolen path: compute remaining sub-exprs sequentially
+    for (int i = 1; i < remainingFrameAdding.size(); i++) {
+      var expr = remainingFrameAdding.get(i);
+      int globalIdx = allFrameAddingExprs.indexOf(expr);
+      sb.append("const r").append(globalIdx + 1).append(" = ").append(expr.expr.accept(thiefGen, true)).append(";\n");
+    }
+
+    // Wait for immediate parent's sub-expr via child_obl_opt
+    sb.append("const r1 = child_obl_opt.?.wait(worker_mod.getCurrentWorker().?);\n");
+
+    // Wait for forwarded child obligations
+    for (int i = fwdCount - 1; i >= 0; i--) {
+      var field = forwardedChildOblFields.get(i);
+      sb.append("const fwd_obl_").append(i).append(": ?*JoinObligation = @ptrFromInt(locals.").append(field).append(");\n");
+      sb.append("const fwd_r").append(i).append(" = fwd_obl_").append(i).append(".?.wait(worker_mod.getCurrentWorker().?);\n");
+    }
+
+    // Full combiner for not-stolen path
+    var resultMap = buildThiefCombinerMap(allFrameAddingExprs, fwdCount, myGlobalIdx);
+    var plainExprs = vpf.subExprs.stream().filter(s -> !s.isFrameAdding).toList();
+    sb.append("return ").append(emitCombinerFromMap(vpf, resultMap, plainExprs)).append(";\n");
+    sb.append("}");
+    functions.add(sb.toString());
+  }
+
+  /**
+   * Build the sub-expr-index → variable-name mapping for a thief's combiner.
+   *
+   * The chain of results available in any thief:
+   *   frameAddingExprs[0]            → fwd_r_{fwdCount-1}  (forwarded from main)
+   *   frameAddingExprs[1]            → fwd_r_{fwdCount-2}  (forwarded from outermost VPF thief)
+   *   ...
+   *   frameAddingExprs[fwdCount-1]   → fwd_r_0             (forwarded from closest ancestor)
+   *   frameAddingExprs[fwdCount]     → r1                  (child_obl_opt from immediate parent)
+   *   frameAddingExprs[myGlobalIdx]  → thief_locals.r_thief (this VPF thief's computed sub-expr, if applicable)
+   *   remaining                      → r{globalIdx+1}      (computed sequentially in not-stolen path)
+   *
+   * @param myGlobalIdx index of the sub-expr this VPF thief computed (-1 for simple thief)
+   */
+  private Map<Integer, String> buildThiefCombinerMap(List<SubExprInfo> frameAddingExprs,
+                                                      int fwdCount, int myGlobalIdx) {
+    var resultMap = new HashMap<Integer, String>();
+
+    // Forwarded obligations: fwd_child_obl_0 holds e0, fwd_child_obl_1 holds e1, etc.
+    for (int i = 0; i < fwdCount; i++) {
+      resultMap.put(frameAddingExprs.get(i).index, "fwd_r" + i);
+    }
+
+    // child_obl_opt delivers the immediate parent's sub-expr
+    resultMap.put(frameAddingExprs.get(fwdCount).index, "r1");
+
+    // This VPF thief's own computed sub-expr (not applicable for simple thief)
+    if (myGlobalIdx >= 0) {
+      resultMap.put(frameAddingExprs.get(myGlobalIdx).index, "thief_locals.r_thief");
+    }
+
+    // Remaining sub-exprs computed sequentially
+    int startIdx = (myGlobalIdx >= 0) ? myGlobalIdx + 1 : fwdCount + 1;
+    for (int i = startIdx; i < frameAddingExprs.size(); i++) {
+      if (!resultMap.containsKey(frameAddingExprs.get(i).index)) {
+        resultMap.put(frameAddingExprs.get(i).index, "r" + (i + 1));
+      }
+    }
+
+    return resultMap;
+  }
+
+  /** Emit a combiner call using a pre-built sub-expr-index → variable-name map. */
+  private String emitCombinerFromMap(VPFCallInfo vpf, Map<Integer, String> resultMap,
+                                     List<SubExprInfo> plainExprs) {
+    var allArgs = new String[vpf.subExprs.size()];
+    for (var sub : vpf.subExprs) {
+      if (resultMap.containsKey(sub.index)) {
+        allArgs[sub.index] = resultMap.get(sub.index);
+      } else {
+        allArgs[sub.index] = emitExprWithLocalsPrefix(sub.expr);
+      }
+    }
+
+    String recvStr = allArgs[0];
+    var argStrs = new ArrayList<String>();
+    for (int i = 1; i < allArgs.length; i++) {
+      argStrs.add(allArgs[i]);
+    }
+    var argsTuple = argStrs.isEmpty() ? ".{}" : ".{ " + String.join(", ", argStrs) + " }";
+    return "rt.call(" + recvStr + ", " + vpf.hashName + ", " + argsTuple + ", @src())";
   }
 
   /**
