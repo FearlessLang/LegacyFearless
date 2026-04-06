@@ -77,7 +77,7 @@ class VPFCodegen {
       localsFields.append(parent.id.varName(arg.name())).append(": rt.FatPtr,\n");
     }
     localsFields.append("r1: rt.FatPtr,\n");
-    parent.captureStructs.put(
+    parent.currentState().captureStructs.put(
       new DecId(localsName, 0),
       "const " + localsName + " = extern struct {\n" + localsFields + "};"
     );
@@ -94,7 +94,7 @@ class VPFCodegen {
 
     // 3. Emit the instrumented function body
     var sb = new StringBuilder();
-    sb.append("fn ").append(name).append("(").append(params).append(") rt.FatPtr {\n");
+    sb.append("pub fn ").append(name).append("(").append(params).append(") rt.FatPtr {\n");
     if (!paramNames.isEmpty()) {
       sb.append("_ = .{ ");
       sb.append(String.join(", ", paramNames));
@@ -109,10 +109,10 @@ class VPFCodegen {
       var cond = vpf.boolExpr.condition().accept(parent, true);
       var thenFun = parent.funMap.get(vpf.boolExpr.then());
       String thenBody = thenFun.body().accept(parent, true);
-      sb.append("if (").append(cond).append(".vt == &VT_True_0) return ").append(thenBody).append(";\n");
+      sb.append("if (").append(cond).append(".vt == &").append(parent.vtableRef(new DecId("base.True", 0))).append(") return ").append(thenBody).append(";\n");
     }
 
-    // Initialize locals struct
+    // Initialise locals struct
     sb.append("var locals = ").append(localsName).append("{ ");
     for (var arg : fun.args()) {
       sb.append(".").append(parent.id.varName(arg.name())).append(" = ").append(parent.id.varName(arg.name())).append(", ");
@@ -156,7 +156,7 @@ class VPFCodegen {
     sb.append("return ").append(emitCombinerFromMap(vpf, resultMap)).append(";\n");
 
     sb.append("}");
-    parent.functions.add(sb.toString());
+    parent.currentState().functions.add(sb.toString());
   }
 
   /** Like findVPFCall but doesn't look through BoolExpr (inner level). */
@@ -181,11 +181,10 @@ class VPFCodegen {
     var sig = new MIR.Sig(call.name(),
       call.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
       call.originalRet());
-    parent.addHashConstant(sig);
-    var hashName = parent.sigBuilder.hashConstName(sig, parent.id);
+    var hashExpr = parent.sigBuilder.inlineHash(sig);
 
     var plainExprs = subExprs.stream().filter(s -> !s.isFrameAdding).toList();
-    return new VPFCallInfo(call, null, subExprs, plainExprs, hashName);
+    return new VPFCallInfo(call, null, subExprs, plainExprs, hashExpr);
   }
 
   /** MCalls and BoolExprs are the only MIR expressions that add stack frames. */
@@ -225,7 +224,7 @@ class VPFCodegen {
     newForwardedFields.add(newFwdFieldName);
     innerFields.append("r_thief: rt.FatPtr,\n");
 
-    parent.captureStructs.put(
+    parent.currentState().captureStructs.put(
       new DecId(innerLocalsName, 0),
       "const " + innerLocalsName + " = extern struct {\n" + innerFields + "};"
     );
@@ -278,7 +277,7 @@ class VPFCodegen {
       allFrameAddingExprs, vpf, fwdCount, myGlobalIdx, forwardedChildOblFields);
 
     sb.append("}");
-    parent.functions.add(sb.toString());
+    parent.currentState().functions.add(sb.toString());
   }
 
   /**
@@ -308,7 +307,7 @@ class VPFCodegen {
     sb.append(body);
 
     sb.append("}");
-    parent.functions.add(sb.toString());
+    parent.currentState().functions.add(sb.toString());
   }
 
   /** Shared tail for thief functions: compute remaining exprs, wait obligations, combine + return. */
@@ -436,14 +435,13 @@ class VPFCodegen {
       var sig = new MIR.Sig(call.name(),
         call.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
         call.originalRet());
-      delegate.addHashConstant(sig);
-      var hashName = delegate.sigBuilder.hashConstName(sig, delegate.id);
+      var hashExpr = delegate.sigBuilder.inlineHash(sig);
 
       var args = call.args().stream()
         .map(a -> a.accept(this, checkMagic))
         .collect(Collectors.joining(", "));
       var argsTuple = args.isEmpty() ? ".{}" : ".{ " + args + " }";
-      return "rt.call(" + recv + ", " + hashName + ", " + argsTuple + ", @src())";
+      return "rt.call(" + recv + ", " + hashExpr + ", " + argsTuple + ", @src())";
     }
     @Override public String visitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
       // Let parent handle side effects (type/vtable emission) and magic
@@ -456,17 +454,20 @@ class VPFCodegen {
 
       // Re-generate with our visitX so captures get the locals. prefix
       var objId = createObj.concreteT().id();
-      var typeName = delegate.id.getSimpleName(objId);
       var captures = createObj.captures().stream()
         .map(x -> "." + delegate.id.varName(x.name()) + " = " + this.visitX(x, checkMagic))
         .collect(Collectors.joining(", "));
-      return "rt.obj_k(" + typeName + "_Captures, &VT_" + typeName + ", .{ " + captures + " })";
+      return "rt.obj_k(" + delegate.capturesRef(objId) + ", &" + delegate.vtableRef(objId) + ", .{ " + captures + " })";
     }
     @Override public String visitBoolExpr(MIR.BoolExpr expr, boolean checkMagic) {
       return delegate.visitBoolExpr(expr, checkMagic);
     }
     @Override public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
-      return delegate.visitStaticCall(call, checkMagic);
+      var fRef = delegate.funRef(call.fun());
+      var args = call.args().stream()
+        .map(a -> a.accept(this, checkMagic))
+        .collect(Collectors.joining(", "));
+      return fRef + "(" + args + ")";
     }
 
   }

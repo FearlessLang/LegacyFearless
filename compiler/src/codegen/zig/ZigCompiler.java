@@ -36,13 +36,20 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
     }
     IoErr.of(() -> {
       var srcDir = workDir.resolve("src");
-      Files.createDirectories(srcDir);
+      var genDir = srcDir.resolve("generated");
+      Files.createDirectories(genDir);
 
       // 1. Copy runtime files
       copyRuntime(workDir);
 
-      // 2. Write generated code
-      Files.writeString(srcDir.resolve("main.zig"), program.generatedCode());
+      // 2. Write per-package generated files
+      for (var entry : program.packageFiles().entrySet()) {
+        var fileName = entry.getKey().replace(".", "_") + ".zig";
+        Files.writeString(genDir.resolve(fileName), entry.getValue());
+      }
+
+      // 3. Write main.zig
+      Files.writeString(srcDir.resolve("main.zig"), program.mainFile());
 
       // 3. Write build.zig (trace/safety logging enabled when verbose)
       Files.writeString(workDir.resolve("build.zig"), buildZig(verbosity.printCodegen()));

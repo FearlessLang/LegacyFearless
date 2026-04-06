@@ -3,9 +3,12 @@ package codegen.zig;
 import codegen.MIR;
 import id.Id;
 
-public record ZigProgram(String generatedCode, String entryPoint) {
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+public record ZigProgram(Map<String, String> packageFiles, String mainFile, String entryPoint) {
   public ZigProgram(ZigProgramBuilder builder) {
-    this(builder.build(), builder.entryPoint);
+    this(builder.packageFiles, builder.mainFile, builder.entryPoint);
   }
 
   public static ZigProgram of(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg) {
@@ -15,6 +18,8 @@ public record ZigProgram(String generatedCode, String entryPoint) {
 
 class ZigProgramBuilder {
   final String entryPoint;
+  final Map<String, String> packageFiles;
+  final String mainFile;
   private final MIR.Program program;
   private final java.util.Set<String> cachedPkg;
 
@@ -22,9 +27,7 @@ class ZigProgramBuilder {
     this.entryPoint = entryPoint;
     this.program = program;
     this.cachedPkg = cachedPkg;
-  }
 
-  String build() {
     var gen = new ZigSingleCodegen(program);
 
     // Visit all types in all packages
@@ -38,68 +41,114 @@ class ZigProgramBuilder {
       }
     }
 
+    // Build per-package files
+    this.packageFiles = buildPackageFiles(gen);
+
+    // Build main.zig
+    this.mainFile = buildMainFile(gen);
+  }
+
+  private Map<String, String> buildPackageFiles(ZigSingleCodegen gen) {
+    var files = new LinkedHashMap<String, String>();
+    for (var entry : gen.packageStates.entrySet()) {
+      var pkgName = entry.getKey();
+      var state = entry.getValue();
+      var sb = new StringBuilder();
+
+      // Root import + runtime aliases
+      sb.append("const root = @import(\"root\");\n");
+      sb.append("const std = root.std;\n");
+      sb.append("const rt = root.rt;\n");
+      sb.append("const nat_rt = root.nat_rt;\n");
+      sb.append("const int_rt = root.int_rt;\n");
+      sb.append("const gc = root.gc;\n");
+      sb.append("const str_rt = root.str_rt;\n");
+      sb.append("const var_rt = root.var_rt;\n");
+      sb.append("const sys_rt = root.sys_rt;\n");
+      sb.append("const heartbeat = root.heartbeat;\n");
+      sb.append("const shadow_stack_mod = root.shadow_stack_mod;\n");
+      sb.append("const worker_mod = root.worker_mod;\n");
+      sb.append("const JoinObligation = root.JoinObligation;\n");
+      sb.append("const log = root.log;\n");
+      sb.append("const Fiber = root.Fiber;\n");
+      sb.append('\n');
+
+      // Capture structs
+      if (!state.captureStructs.isEmpty()) {
+        for (var cs : state.captureStructs.values()) {
+          sb.append(cs).append('\n');
+        }
+        sb.append('\n');
+      }
+
+      // Functions
+      if (!state.functions.isEmpty()) {
+        for (var f : state.functions) {
+          sb.append(f).append('\n');
+        }
+        sb.append('\n');
+      }
+
+      // VTables (pub for cross-package access)
+      if (!state.vtableDefs.isEmpty()) {
+        for (var vt : state.vtableDefs.values()) {
+          sb.append(vt).append('\n');
+        }
+        sb.append('\n');
+      }
+
+      files.put(pkgName, sb.toString());
+    }
+    return files;
+  }
+
+  private String buildMainFile(ZigSingleCodegen gen) {
     var sb = new StringBuilder();
 
-    // Imports
-    sb.append("const std = @import(\"std\");\n");
-    sb.append("const rt = @import(\"runtime/objs.zig\");\n");
-    sb.append("const nat_rt = @import(\"runtime/intrinsics/nat.zig\");\n");
-    sb.append("const int_rt = @import(\"runtime/intrinsics/int.zig\");\n");
-    sb.append("const gc = @import(\"runtime/gc.zig\");\n");
-    sb.append("const str_rt = @import(\"runtime/intrinsics/str.zig\");\n");
-    sb.append("const var_rt = @import(\"runtime/intrinsics/var.zig\");\n");
-    sb.append("const sys_rt = @import(\"runtime/intrinsics/sys.zig\");\n");
-    // VPF runtime imports
-    sb.append("const shadow_stack_mod = @import(\"runtime/shadow_stack.zig\");\n");
-    sb.append("const worker_mod = @import(\"runtime/worker.zig\");\n");
-    sb.append("const JoinObligation = @import(\"runtime/sync/join_obligation.zig\").JoinObligation;\n");
-    sb.append("const heartbeat = @import(\"runtime/heartbeat.zig\");\n");
-    sb.append("const log = @import(\"runtime/log.zig\");\n");
-    sb.append("const Fiber = @import(\"runtime/fiber.zig\").Fiber;\n");
-    // Force fiber.zig to be compiled so fiber_trampoline is linked for the assembly files
+    // Imports — all pub so package files can access via @import("root")
+    sb.append("pub const std = @import(\"std\");\n");
+    sb.append("pub const rt = @import(\"runtime/objs.zig\");\n");
+    sb.append("pub const nat_rt = @import(\"runtime/intrinsics/nat.zig\");\n");
+    sb.append("pub const int_rt = @import(\"runtime/intrinsics/int.zig\");\n");
+    sb.append("pub const gc = @import(\"runtime/gc.zig\");\n");
+    sb.append("pub const str_rt = @import(\"runtime/intrinsics/str.zig\");\n");
+    sb.append("pub const var_rt = @import(\"runtime/intrinsics/var.zig\");\n");
+    sb.append("pub const sys_rt = @import(\"runtime/intrinsics/sys.zig\");\n");
+    sb.append("pub const shadow_stack_mod = @import(\"runtime/shadow_stack.zig\");\n");
+    sb.append("pub const worker_mod = @import(\"runtime/worker.zig\");\n");
+    sb.append("pub const JoinObligation = @import(\"runtime/sync/join_obligation.zig\").JoinObligation;\n");
+    sb.append("pub const heartbeat = @import(\"runtime/heartbeat.zig\");\n");
+    sb.append("pub const log = @import(\"runtime/log.zig\");\n");
+    sb.append("pub const Fiber = @import(\"runtime/fiber.zig\").Fiber;\n");
     sb.append("comptime { _ = Fiber; }\n");
     sb.append('\n');
 
-    // Hash constants
-    if (!gen.hashConstants.isEmpty()) {
-      sb.append("// === Hash Constants ===\n");
-      for (var h : gen.hashConstants) {
-        sb.append(h).append('\n');
-      }
-      sb.append('\n');
+    // Generated package imports — all pub for cross-package @import("root") access
+    for (var pkgName : packageFiles.keySet()) {
+      var fieldName = "pkg_" + pkgName.replace(".", "_");
+      var fileName = pkgName.replace(".", "_") + ".zig";
+      sb.append("pub const ").append(fieldName).append(" = @import(\"generated/").append(fileName).append("\");\n");
     }
+    sb.append('\n');
 
-    // Capture structs (forward declarations)
-    if (!gen.captureStructs.isEmpty()) {
-      sb.append("// === Capture Structs ===\n");
-      for (var entry : gen.captureStructs.values()) {
-        sb.append(entry).append('\n');
-      }
-      sb.append('\n');
-    }
+    // Re-export core VTables for runtime compatibility
+    appendReExportIfPresent(sb, gen, "VT_Void_0", new Id.DecId("base.Void", 0));
+    appendReExportIfPresent(sb, gen, "VT_True_0", new Id.DecId("base.True", 0));
+    appendReExportIfPresent(sb, gen, "VT_False_0", new Id.DecId("base.False", 0));
+    sb.append('\n');
 
-    // Functions (MF_, T_, static funs)
-    if (!gen.functions.isEmpty()) {
-      sb.append("// === Functions ===\n");
-      for (var f : gen.functions) {
-        sb.append(f).append('\n');
-      }
-      sb.append('\n');
-    }
-
-    // VTables
-    if (!gen.vtableDefs.isEmpty()) {
-      sb.append("// === VTables ===\n");
-      for (var vt : gen.vtableDefs.values()) {
-        sb.append(vt).append('\n');
-      }
-      sb.append('\n');
-    }
-
-    // Entry point main function
+    // Entry point
     sb.append(generateMain(gen));
 
     return sb.toString();
+  }
+
+  private void appendReExportIfPresent(StringBuilder sb, ZigSingleCodegen gen, String vtName, Id.DecId decId) {
+    var owningPkg = gen.typeToPackage.get(decId);
+    if (owningPkg != null && packageFiles.containsKey(owningPkg)) {
+      var fieldName = "pkg_" + owningPkg.replace(".", "_");
+      sb.append("pub const ").append(vtName).append(" = ").append(fieldName).append(".").append(vtName).append(";\n");
+    }
   }
 
   private boolean isBaseMain() {
@@ -107,21 +156,24 @@ class ZigProgramBuilder {
   }
 
   private String generateMain(ZigSingleCodegen gen) {
-    // Parse the entry point name like "test.App" → DecId("App", "test", 0)
     var lastDot = entryPoint.lastIndexOf('.');
     String pkg = lastDot >= 0 ? entryPoint.substring(0, lastDot) : "";
     String typeName = lastDot >= 0 ? entryPoint.substring(lastDot + 1) : entryPoint;
     var entryDecId = new Id.DecId(pkg + "." + typeName, 0);
-    var entryVtName = "VT_" + gen.id.getSimpleName(entryDecId);
+    var entryVtName = gen.id.getSimpleName(entryDecId);
 
-    // Both Main signatures hash to "imm #/1"
+    // Resolve entry VTable reference via package
+    var entryPkg = gen.typeToPackage.get(entryDecId);
+    String entryVtRef;
+    if (entryPkg != null) {
+      entryVtRef = "pkg_" + entryPkg.replace(".", "_") + ".VT_" + entryVtName;
+    } else {
+      entryVtRef = "VT_" + entryVtName;
+    }
+
+    // Inline hash for "imm #/1"
     var sigStr = "imm #/1";
-    var hashSuffix = Long.toHexString(ZigSigStringBuilder.fnv1a(sigStr));
-    var hashMethName = gen.id.getMName(id.Mdf.imm, new Id.MethName("#", 1));
-    var hashConstName = "H_" + hashMethName + "_" + hashSuffix;
-
-    // Add the hash constant declaration if not already present
-    gen.hashConstants.add("const " + hashConstName + " = rt.hash_signature(\"" + sigStr + "\");");
+    var hashExpr = "comptime rt.hash_signature(\"" + sigStr + "\")";
 
     var sb = new StringBuilder();
     sb.append("// === Entry Point ===\n");
@@ -132,18 +184,23 @@ class ZigProgramBuilder {
     sb.append("    const pool = worker_mod.WorkerPool.init(cpu_count) catch @panic(\"OOM\");\n");
     sb.append("    const main_fiber = Fiber.create(struct {\n");
     sb.append("        fn run(_: *Fiber) void {\n");
-    sb.append("            const entry = rt.obj_k_singleton(&").append(entryVtName).append(");\n");
+    sb.append("            const entry = rt.obj_k_singleton(&").append(entryVtRef).append(");\n");
 
     if (isBaseMain()) {
-      // base Main: { #(s: mut System): Void }
       sb.append("            const sys = sys_rt.make_system();\n");
-      sb.append("            _ = rt.call(entry, ").append(hashConstName).append(", .{sys}, @src());\n");
+      sb.append("            _ = rt.call(entry, ").append(hashExpr).append(", .{sys}, @src());\n");
     } else {
-      // immBase Main: { #(args: LList[Str]): Str }
       var llistDecId = new Id.DecId("base.LList", 1);
-      var llistVtName = "VT_" + gen.id.getSimpleName(llistDecId);
-      sb.append("            const args = rt.obj_k_singleton(&").append(llistVtName).append(");\n");
-      sb.append("            const result = rt.call(entry, ").append(hashConstName).append(", .{args}, @src());\n");
+      var llistVtName = gen.id.getSimpleName(llistDecId);
+      var llistPkg = gen.typeToPackage.get(llistDecId);
+      String llistVtRef;
+      if (llistPkg != null) {
+        llistVtRef = "pkg_" + llistPkg.replace(".", "_") + ".VT_" + llistVtName;
+      } else {
+        llistVtRef = "VT_" + llistVtName;
+      }
+      sb.append("            const args = rt.obj_k_singleton(&").append(llistVtRef).append(");\n");
+      sb.append("            const result = rt.call(entry, ").append(hashExpr).append(", .{args}, @src());\n");
       sb.append("            const str_data = str_rt.deref_str(result);\n");
       sb.append("            _ = std.posix.write(std.posix.STDOUT_FILENO, str_data) catch {};\n");
       sb.append("            _ = std.posix.write(std.posix.STDOUT_FILENO, \"\\n\") catch {};\n");

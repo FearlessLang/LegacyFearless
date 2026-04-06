@@ -44,22 +44,21 @@ public final class ZigSigStringBuilder {
   }
 
   /**
-   * Generate a Zig hash constant name for a signature.
-   * e.g. "H_mut__Zhash_1" for "mut #(Nat): Nat"
+   * Generate a hash expression for a signature, without comptime prefix.
+   * Use in comptime contexts (VTable const decls).
+   * e.g. rt.hash_signature("mut #/1")
    */
-  public String hashConstName(MIR.Sig sig, ZigStringIds ids) {
-    // Include hash of sig string to disambiguate methods with same name/arity/mdf but different types
-    long h = fnv1a(sigString(sig));
-    return "H_" + ids.getMName(sig.mdf(), sig.name()) + "_" + Long.toHexString(h);
+  public String hashExpr(MIR.Sig sig) {
+    return "rt.hash_signature(\"" + escapeZigString(sigString(sig)) + "\")";
   }
 
   /**
-   * Generate a Zig hash constant declaration.
-   * e.g. const H_mut__Zhash_1 = rt.hash_signature("mut #(Nat): Nat");
+   * Generate an inline comptime hash expression for a signature.
+   * Use in runtime contexts (function bodies).
+   * e.g. comptime rt.hash_signature("mut #/1")
    */
-  public String hashConstDecl(MIR.Sig sig, ZigStringIds ids) {
-    return "const " + hashConstName(sig, ids)
-      + " = rt.hash_signature(\"" + escapeZigString(sigString(sig)) + "\");";
+  public String inlineHash(MIR.Sig sig) {
+    return "comptime " + hashExpr(sig);
   }
 
   private static String escapeZigString(String s) {

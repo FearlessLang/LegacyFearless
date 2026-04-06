@@ -18,14 +18,24 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   public final ZigStringIds id = new ZigStringIds();
   final ZigSigStringBuilder sigBuilder;
 
-  // Accumulated output sections
-  public final LinkedHashSet<String> hashConstants = new LinkedHashSet<>();
-  public final LinkedHashMap<DecId, String> captureStructs = new LinkedHashMap<>();
-  public final LinkedHashMap<DecId, String> vtableDefs = new LinkedHashMap<>();
-  public final List<String> functions = new ArrayList<>();
+  // Per-package accumulated output
+  static class PackageState {
+    final String packageName;
+    final List<String> functions = new ArrayList<>();
+    final LinkedHashMap<DecId, String> captureStructs = new LinkedHashMap<>();
+    final LinkedHashMap<DecId, String> vtableDefs = new LinkedHashMap<>();
+    PackageState(String packageName) { this.packageName = packageName; }
+  }
+
+  public final Map<String, PackageState> packageStates = new LinkedHashMap<>();
   // freshRecords equivalent: tracks which CreateObj types we've already emitted
   public final LinkedHashMap<DecId, Boolean> emittedTypes = new LinkedHashMap<>();
 
+  // Map from type DecId -> owning package name
+  final Map<DecId, String> typeToPackage = new HashMap<>();
+
+  // The package currently being emitted into
+  private String emitTargetPkg;
   private String pkg;
 
   public ZigSingleCodegen(MIR.Program p) {
@@ -35,6 +45,51 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     this.funMap = p.pkgs().stream()
       .flatMap(pkg -> pkg.funs().stream())
       .collect(Collectors.toMap(MIR.Fun::name, f -> f));
+
+    // Build typeToPackage map
+    for (var mpkg : p.pkgs()) {
+      for (var defId : mpkg.defs().keySet()) {
+        typeToPackage.put(defId, mpkg.name());
+      }
+    }
+  }
+
+  PackageState getOrCreatePackageState(String pkgName) {
+    return packageStates.computeIfAbsent(pkgName, PackageState::new);
+  }
+
+  PackageState currentState() {
+    return getOrCreatePackageState(emitTargetPkg);
+  }
+
+  /** Get a VTable reference, qualified with root.pkg_ prefix if cross-package. */
+  public String vtableRef(DecId objId) {
+    var typeName = id.getSimpleName(objId);
+    var owningPkg = typeToPackage.get(objId);
+    if (owningPkg != null && !owningPkg.equals(emitTargetPkg)) {
+      return "root.pkg_" + owningPkg.replace(".", "_") + ".VT_" + typeName;
+    }
+    return "VT_" + typeName;
+  }
+
+  /** Get a Captures struct reference, qualified with root.pkg_ prefix if cross-package. */
+  public String capturesRef(DecId objId) {
+    var typeName = id.getSimpleName(objId);
+    var owningPkg = typeToPackage.get(objId);
+    if (owningPkg != null && !owningPkg.equals(emitTargetPkg)) {
+      return "root.pkg_" + owningPkg.replace(".", "_") + "." + typeName + "_Captures";
+    }
+    return typeName + "_Captures";
+  }
+
+  /** Get a static function reference, qualified with root.pkg_ prefix if cross-package. */
+  public String funRef(MIR.FName fName) {
+    var zigName = id.getFName(fName);
+    var owningPkg = typeToPackage.get(fName.d());
+    if (owningPkg != null && !owningPkg.equals(emitTargetPkg)) {
+      return "root.pkg_" + owningPkg.replace(".", "_") + "." + zigName;
+    }
+    return zigName;
   }
 
   public boolean isLiteral(DecId d) {
@@ -43,14 +98,10 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   public String visitTypeDef(String pkg, MIR.TypeDef def, List<MIR.Fun> funs) {
     this.pkg = pkg;
+    this.emitTargetPkg = pkg;
     var isMagic = pkg.equals("base") && def.name().name().endsWith("Instance");
     var isLiteral = isLiteral(def.name());
     if (isMagic || isLiteral) { return ""; }
-
-    // Emit hash constants for all signatures
-    for (var sig : def.sigs()) {
-      addHashConstant(sig);
-    }
 
     // Emit VTable for singleton types
     var leastSpecific = ParentWalker.leastSpecificSigs(p, def);
@@ -68,10 +119,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return ""; // All output accumulated in state
   }
 
-  void addHashConstant(MIR.Sig sig) {
-    hashConstants.add(sigBuilder.hashConstDecl(sig, id));
-  }
-
   public void emitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
     if (magic.isMagic(Magic.Str, createObj.concreteT().id())) { return; }
 
@@ -84,6 +131,16 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var objId = createObj.concreteT().id();
     if (emittedTypes.containsKey(objId)) { return; }
     emittedTypes.put(objId, true);
+
+    // Route emission to the owning package
+    var savedEmitTarget = this.emitTargetPkg;
+    var owningPkg = typeToPackage.get(objId);
+    if (owningPkg != null) {
+      this.emitTargetPkg = owningPkg;
+    } else {
+      // Type not in any package's defs (anonymous/literal) — record where we emit it
+      typeToPackage.put(objId, this.emitTargetPkg);
+    }
 
     var typeDef = p.pkgs().stream()
       .filter(pkg -> pkg.defs().containsKey(objId))
@@ -99,7 +156,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       var fields = createObj.captures().stream()
         .map(x -> id.varName(x.name()) + ": rt.FatPtr,")
         .collect(Collectors.joining("\n"));
-      captureStructs.put(objId,
+      currentState().captureStructs.put(objId,
         "const " + id.getSimpleName(objId) + "_Captures = extern struct {\n"
         + fields + "\n};");
     }
@@ -135,6 +192,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
     // Emit VTable
     emitVTable(allMeths, objId);
+
+    // Restore emit target
+    this.emitTargetPkg = savedEmitTarget;
   }
 
   private MIR.FName findFunForSig(DecId objId, MIR.Sig sig, MIR.TypeDef typeDef) {
@@ -156,7 +216,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   private void emitMeth(MIR.Meth meth, DecId objId, boolean isUnreachable,
                          Map<Id.MethName, MIR.Sig> leastSpecific) {
     var sig = meth.sig();
-    addHashConstant(sig);
 
     var methName = id.getMName(sig.mdf(), sig.name());
     var typeName = id.getSimpleName(objId);
@@ -174,13 +233,13 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var paramDiscard = "_ = .{ " + params.stream().map(p -> p.split(":")[0].trim()).collect(Collectors.joining(", ")) + " };\n";
     if (isUnreachable || meth.fName().isEmpty()) {
       // Unreachable method
-      functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
+      currentState().functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
         + paramDiscard
         + "unreachable;\n"
         + "}");
     } else {
       // Real method: delegate to the static Fun
-      var fName = id.getFName(meth.fName().get());
+      var fRef = funRef(meth.fName().get());
       var fun = funMap.get(meth.fName().get());
       if (fun != null) {
         var simpleArgs = new ArrayList<String>();
@@ -194,17 +253,17 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
             simpleArgs.add("self_m"); // no captures, pass self as placeholder
           } else {
             simpleArgs.add(
-              "rt.deref(" + id.getSimpleName(objId) + "_Captures, self_m)." + id.varName(capture));
+              "rt.deref(" + capturesRef(objId) + ", self_m)." + id.varName(capture));
           }
         }
 
-        functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
+        currentState().functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
           + paramDiscard
-          + "return " + fName + "(" + String.join(", ", simpleArgs) + ");\n"
+          + "return " + fRef + "(" + String.join(", ", simpleArgs) + ");\n"
           + "}");
       } else {
         // Fun not found, make unreachable
-        functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
+        currentState().functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
           + "_ = .{ " + params.stream().map(p -> p.split(":")[0].trim()).collect(Collectors.joining(", ")) + " };\n"
           + "unreachable;\n"
           + "}");
@@ -223,13 +282,18 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       thunkCallArgs.add(id.varName(x.name()));
     }
 
-    functions.add("fn " + tName + "(" + String.join(", ", thunkParams) + ") callconv(.c) rt.FatPtr {\n"
+    currentState().functions.add("fn " + tName + "(" + String.join(", ", thunkParams) + ") callconv(.c) rt.FatPtr {\n"
       + "return " + mfName + "(" + String.join(", ", thunkCallArgs) + ");\n"
       + "}");
   }
 
   private boolean createObjHasCaptures(DecId objId) {
-    return captureStructs.containsKey(objId);
+    var owningPkg = typeToPackage.get(objId);
+    if (owningPkg != null) {
+      var state = packageStates.get(owningPkg);
+      if (state != null) { return state.captureStructs.containsKey(objId); }
+    }
+    return false;
   }
 
   private void emitVTable(List<MIR.Meth> allMeths, DecId objId) {
@@ -239,7 +303,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
     for (var meth : allMeths) {
       var sig = meth.sig();
-      hashes.add(sigBuilder.hashConstName(sig, id));
+      hashes.add(sigBuilder.hashExpr(sig));
       methods.add("&T_" + typeName + "_" + id.getMName(sig.mdf(), sig.name()));
     }
 
@@ -248,7 +312,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var methodsStr = methods.isEmpty() ? "&.{}" :
       "&[_]*const anyopaque{ " + String.join(", ", methods) + " }";
 
-    vtableDefs.put(objId,
+    currentState().vtableDefs.put(objId,
       "pub const VT_" + typeName + ": rt.VTable = .{\n"
       + "    .type_name = \"" + objId.name() + "/" + objId.gen() + "\",\n"
       + "    .hashes = " + hashesStr + ",\n"
@@ -277,7 +341,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
     var body = fun.body().accept(this, true);
     var sb = new StringBuilder();
-    sb.append("fn ").append(name).append("(").append(params).append(") rt.FatPtr {\n");
+    sb.append("pub fn ").append(name).append("(").append(params).append(") rt.FatPtr {\n");
     // Discard all params to avoid unused-parameter errors
     if (!paramNames.isEmpty()) {
       sb.append("_ = .{ ");
@@ -291,7 +355,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       sb.append("return ").append(body).append(";\n");
     }
     sb.append("}");
-    functions.add(sb.toString());
+    currentState().functions.add(sb.toString());
   }
 
   @Override
@@ -310,21 +374,17 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
     // Normal dispatch via rt.call
     var recv = call.recv().accept(this, checkMagic);
-    var hashName = sigBuilder.hashConstName(
-      new MIR.Sig(call.name(), call.args().stream().map(a -> new MIR.X("_", a.t())).toList(), call.originalRet()),
-      id);
-
-    // Build the original sig to get the hash
-    addHashConstant(new MIR.Sig(call.name(),
+    var sig = new MIR.Sig(call.name(),
       call.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
-      call.originalRet()));
+      call.originalRet());
+    var hashExpr = sigBuilder.inlineHash(sig);
 
     var args = call.args().stream()
       .map(a -> a.accept(this, checkMagic))
       .collect(Collectors.joining(", "));
 
     var argsTuple = args.isEmpty() ? ".{}" : ".{ " + args + " }";
-    return "rt.call(" + recv + ", " + hashName + ", " + argsTuple + ", @src())";
+    return "rt.call(" + recv + ", " + hashExpr + ", " + argsTuple + ", @src())";
   }
 
   @Override
@@ -344,27 +404,25 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     if (typeDef == null) {
       // Type not found in MIR — treat as singleton with empty vtable
       emitCreateObj(createObj, checkMagic);
-      var typeName = id.getSimpleName(objId);
-      return "rt.obj_k_singleton(&VT_" + typeName + ")";
+      return "rt.obj_k_singleton(&" + vtableRef(objId) + ")";
     }
     var singleton = typeDef.singletonInstance().isPresent();
 
     // Make sure this type's struct/vtable/methods have been emitted
     emitCreateObj(createObj, checkMagic);
 
-    var typeName = id.getSimpleName(objId);
     if (singleton) {
-      return "rt.obj_k_singleton(&VT_" + typeName + ")";
+      return "rt.obj_k_singleton(&" + vtableRef(objId) + ")";
     }
 
     if (createObj.captures().isEmpty()) {
-      return "rt.obj_k_singleton(&VT_" + typeName + ")";
+      return "rt.obj_k_singleton(&" + vtableRef(objId) + ")";
     }
 
     var captures = createObj.captures().stream()
       .map(x -> "." + id.varName(x.name()) + " = " + visitX(x, checkMagic))
       .collect(Collectors.joining(", "));
-    return "rt.obj_k(" + typeName + "_Captures, &VT_" + typeName + ", .{ " + captures + " })";
+    return "rt.obj_k(" + capturesRef(objId) + ", &" + vtableRef(objId) + ", .{ " + captures + " })";
   }
 
   @Override
@@ -380,7 +438,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       case MIR.E e -> e.accept(this, checkMagic);
     };
 
-    return "(if (" + recv + ".vt == &VT_True_0) " + thenBody + " else " + elseBody + ")";
+    return "(if (" + recv + ".vt == &" + vtableRef(new DecId("base.True", 0)) + ") " + thenBody + " else " + elseBody + ")";
   }
 
   private String inlineBlock(MIR.Block block) {
@@ -447,11 +505,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   @Override
   public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
-    var fName = id.getFName(call.fun());
+    var fRef = funRef(call.fun());
     var args = call.args().stream()
       .map(a -> a.accept(this, checkMagic))
       .collect(Collectors.joining(", "));
-    return fName + "(" + args + ")";
+    return fRef + "(" + args + ")";
   }
 
 
