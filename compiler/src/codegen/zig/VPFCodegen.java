@@ -293,12 +293,19 @@ class VPFCodegen {
     var thiefGen = new ThiefCodegen(parent, funParamNames);
     int fwdCount = forwardedChildOblFields.size();
 
+    // Generate the body first, then conditionally emit locals decl
+    var body = new StringBuilder();
+    emitThiefTail(body, thiefGen, frameAddingExprs.subList(fwdCount + 1, frameAddingExprs.size()),
+      frameAddingExprs, vpf, fwdCount, -1, forwardedChildOblFields);
+
     var sb = new StringBuilder();
     sb.append("fn ").append(thiefName).append("(locals_ptr: *anyopaque, child_obl_opt: ?*JoinObligation) rt.FatPtr {\n");
-    sb.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
-
-    emitThiefTail(sb, thiefGen, frameAddingExprs.subList(fwdCount + 1, frameAddingExprs.size()),
-      frameAddingExprs, vpf, fwdCount, -1, forwardedChildOblFields);
+    if (body.toString().contains("locals.")) {
+      sb.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
+    } else {
+      sb.append("_ = locals_ptr;\n");
+    }
+    sb.append(body);
 
     sb.append("}");
     parent.functions.add(sb.toString());
@@ -439,7 +446,21 @@ class VPFCodegen {
       return "rt.call(" + recv + ", " + hashName + ", " + argsTuple + ", @src())";
     }
     @Override public String visitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
-      return delegate.visitCreateObj(createObj, checkMagic);
+      // Let parent handle side effects (type/vtable emission) and magic
+      String parentResult = delegate.visitCreateObj(createObj, checkMagic);
+
+      // If no captures, parent result is correct (singleton or magic)
+      if (createObj.captures().isEmpty()) { return parentResult; }
+      // If parent returned a singleton or magic result, keep it
+      if (parentResult.contains("obj_k_singleton") || !parentResult.contains("obj_k(")) { return parentResult; }
+
+      // Re-generate with our visitX so captures get the locals. prefix
+      var objId = createObj.concreteT().id();
+      var typeName = delegate.id.getSimpleName(objId);
+      var captures = createObj.captures().stream()
+        .map(x -> "." + delegate.id.varName(x.name()) + " = " + this.visitX(x, checkMagic))
+        .collect(Collectors.joining(", "));
+      return "rt.obj_k(" + typeName + "_Captures, &VT_" + typeName + ", .{ " + captures + " })";
     }
     @Override public String visitBoolExpr(MIR.BoolExpr expr, boolean checkMagic) {
       return delegate.visitBoolExpr(expr, checkMagic);
@@ -447,8 +468,6 @@ class VPFCodegen {
     @Override public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
       return delegate.visitStaticCall(call, checkMagic);
     }
-    @Override public String visitUpdatableListAsIdFnCall(MIR.UpdatableListAsIdFnCall call, boolean checkMagic) {
-      return delegate.visitUpdatableListAsIdFnCall(call, checkMagic);
-    }
+
   }
 }

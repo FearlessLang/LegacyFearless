@@ -14,6 +14,7 @@ public interface MagicImpls<R> {
     if (isMagic(Magic.Str, e)) { return Optional.ofNullable(str(e)); }
     if (isMagic(Magic.Bool, e)) { return Optional.ofNullable(bool(e)); }
     if (isMagic(Magic.Debug, e)) { return Optional.ofNullable(debug(e)); }
+    if (isMagic(Magic.Vars, e)) { return Optional.ofNullable(vars(e)); }
     if (isMagic(Magic.RefK, e)) { return Optional.ofNullable(refK(e)); }
     if (isMagic(Magic.IsoPodK, e)) { return Optional.ofNullable(isoPodK(e)); }
     if (isMagic(Magic.Assert, e)) { return Optional.ofNullable(assert_(e)); }
@@ -61,6 +62,7 @@ public interface MagicImpls<R> {
   default MagicTrait<MIR.E,R> utf8(MIR.E e) { return null; }
   default MagicTrait<MIR.E,R> utf16(MIR.E e) { return null; }
   default MagicTrait<MIR.E,R> bool(MIR.E e) { return null; }
+  default MagicTrait<MIR.E,R> vars(MIR.E e) { return null; }
   default MagicTrait<MIR.E,R> abort(MIR.E e) { return null; }
   default MagicTrait<MIR.E,R> magicAbort(MIR.E e) { return null; }
   default MagicTrait<MIR.E,R> errorK(MIR.E e) { return null; }

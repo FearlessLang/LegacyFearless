@@ -38,6 +38,7 @@ public class Magic {
   public static final Id.DecId Continuation = new Id.DecId("base.Continuation", 3);
 
 
+  public static final Id.DecId Vars = new Id.DecId("base.Vars", 0);
   public static final Id.DecId RefK = new Id.DecId("base._MagicVarImpl", 0);
   public static final Id.DecId IsoPodK = new Id.DecId("base._MagicIsoPodImpl", 0);
   public static final Id.DecId Assert = new Id.DecId("base.Assert", 0);

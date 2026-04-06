@@ -3,8 +3,6 @@ package codegen.zig;
 import codegen.MIR;
 import id.Id;
 
-import java.util.List;
-
 public record ZigProgram(String generatedCode, String entryPoint) {
   public ZigProgram(ZigProgramBuilder builder) {
     this(builder.build(), builder.entryPoint);
@@ -49,6 +47,8 @@ class ZigProgramBuilder {
     sb.append("const int_rt = @import(\"runtime/intrinsics/int.zig\");\n");
     sb.append("const gc = @import(\"runtime/gc.zig\");\n");
     sb.append("const str_rt = @import(\"runtime/intrinsics/str.zig\");\n");
+    sb.append("const var_rt = @import(\"runtime/intrinsics/var.zig\");\n");
+    sb.append("const sys_rt = @import(\"runtime/intrinsics/sys.zig\");\n");
     // VPF runtime imports
     sb.append("const shadow_stack_mod = @import(\"runtime/shadow_stack.zig\");\n");
     sb.append("const worker_mod = @import(\"runtime/worker.zig\");\n");
@@ -102,6 +102,10 @@ class ZigProgramBuilder {
     return sb.toString();
   }
 
+  private boolean isBaseMain() {
+    return program.pkgs().stream().anyMatch(pkg -> pkg.name().equals("base.caps"));
+  }
+
   private String generateMain(ZigSingleCodegen gen) {
     // Parse the entry point name like "test.App" → DecId("App", "test", 0)
     var lastDot = entryPoint.lastIndexOf('.');
@@ -110,7 +114,7 @@ class ZigProgramBuilder {
     var entryDecId = new Id.DecId(pkg + "." + typeName, 0);
     var entryVtName = "VT_" + gen.id.getSimpleName(entryDecId);
 
-    // immBase Main: { #(args: LList[Str]): Str }
+    // Both Main signatures hash to "imm #/1"
     var sigStr = "imm #/1";
     var hashSuffix = Long.toHexString(ZigSigStringBuilder.fnv1a(sigStr));
     var hashMethName = gen.id.getMName(id.Mdf.imm, new Id.MethName("#", 1));
@@ -118,10 +122,6 @@ class ZigProgramBuilder {
 
     // Add the hash constant declaration if not already present
     gen.hashConstants.add("const " + hashConstName + " = rt.hash_signature(\"" + sigStr + "\");");
-
-    // LList[Str] empty singleton — LList is generic (gen=1)
-    var llistDecId = new Id.DecId("base.LList", 1);
-    var llistVtName = "VT_" + gen.id.getSimpleName(llistDecId);
 
     var sb = new StringBuilder();
     sb.append("// === Entry Point ===\n");
@@ -133,11 +133,22 @@ class ZigProgramBuilder {
     sb.append("    const main_fiber = Fiber.create(struct {\n");
     sb.append("        fn run(_: *Fiber) void {\n");
     sb.append("            const entry = rt.obj_k_singleton(&").append(entryVtName).append(");\n");
-    sb.append("            const args = rt.obj_k_singleton(&").append(llistVtName).append(");\n");
-    sb.append("            const result = rt.call(entry, ").append(hashConstName).append(", .{args}, @src());\n");
-    sb.append("            const str_data = str_rt.deref_str(result);\n");
-    sb.append("            _ = std.posix.write(std.posix.STDOUT_FILENO, str_data) catch {};\n");
-    sb.append("            _ = std.posix.write(std.posix.STDOUT_FILENO, \"\\n\") catch {};\n");
+
+    if (isBaseMain()) {
+      // base Main: { #(s: mut System): Void }
+      sb.append("            const sys = sys_rt.make_system();\n");
+      sb.append("            _ = rt.call(entry, ").append(hashConstName).append(", .{sys}, @src());\n");
+    } else {
+      // immBase Main: { #(args: LList[Str]): Str }
+      var llistDecId = new Id.DecId("base.LList", 1);
+      var llistVtName = "VT_" + gen.id.getSimpleName(llistDecId);
+      sb.append("            const args = rt.obj_k_singleton(&").append(llistVtName).append(");\n");
+      sb.append("            const result = rt.call(entry, ").append(hashConstName).append(", .{args}, @src());\n");
+      sb.append("            const str_data = str_rt.deref_str(result);\n");
+      sb.append("            _ = std.posix.write(std.posix.STDOUT_FILENO, str_data) catch {};\n");
+      sb.append("            _ = std.posix.write(std.posix.STDOUT_FILENO, \"\\n\") catch {};\n");
+    }
+
     sb.append("            worker_mod.global_done.store(true, .release);\n");
     sb.append("        }\n");
     sb.append("    }.run, null) catch @panic(\"OOM\");\n");

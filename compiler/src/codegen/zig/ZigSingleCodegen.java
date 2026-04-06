@@ -112,8 +112,45 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       emitMeth(meth, objId, true, leastSpecific);
     }
 
+    // Supplement with inherited methods from TypeDef that aren't in the CreateObj
+    var allMeths = new ArrayList<>(createObj.meths());
+    allMeths.addAll(createObj.unreachableMs());
+    var coveredNames = allMeths.stream()
+      .map(m -> m.sig().name())
+      .collect(Collectors.toCollection(HashSet::new));
+
+    if (typeDef != null) {
+      for (var sig : leastSpecific.values()) {
+        if (coveredNames.contains(sig.name())) { continue; }
+        var fName = findFunForSig(objId, sig, typeDef);
+        if (fName != null) {
+          var meth = new MIR.Meth(objId, sig, fName.capturesSelf(),
+            new TreeSet<>(), Optional.of(fName));
+          emitMeth(meth, objId, false, leastSpecific);
+          allMeths.add(meth);
+          coveredNames.add(sig.name());
+        }
+      }
+    }
+
     // Emit VTable
-    emitVTable(createObj, objId);
+    emitVTable(allMeths, objId);
+  }
+
+  private MIR.FName findFunForSig(DecId objId, MIR.Sig sig, MIR.TypeDef typeDef) {
+    // Try current type with both capturesSelf values
+    for (boolean capturesSelf : new boolean[]{false, true}) {
+      var fName = new MIR.FName(objId, sig.name(), capturesSelf, sig.mdf());
+      if (funMap.containsKey(fName)) { return fName; }
+    }
+    // Walk parent types
+    for (var parent : ParentWalker.of(p, typeDef).skip(1).toList()) {
+      for (boolean capturesSelf : new boolean[]{false, true}) {
+        var fName = new MIR.FName(parent.name(), sig.name(), capturesSelf, sig.mdf());
+        if (funMap.containsKey(fName)) { return fName; }
+      }
+    }
+    return null;
   }
 
   private void emitMeth(MIR.Meth meth, DecId objId, boolean isUnreachable,
@@ -195,15 +232,12 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return captureStructs.containsKey(objId);
   }
 
-  private void emitVTable(MIR.CreateObj createObj, DecId objId) {
-    var meths = new ArrayList<>(createObj.meths());
-    meths.addAll(createObj.unreachableMs());
-
+  private void emitVTable(List<MIR.Meth> allMeths, DecId objId) {
     var typeName = id.getSimpleName(objId);
     var hashes = new ArrayList<String>();
     var methods = new ArrayList<String>();
 
-    for (var meth : meths) {
+    for (var meth : allMeths) {
       var sig = meth.sig();
       hashes.add(sigBuilder.hashConstName(sig, id));
       methods.add("&T_" + typeName + "_" + id.getMName(sig.mdf(), sig.name()));
@@ -420,10 +454,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return fName + "(" + args + ")";
   }
 
-  @Override
-  public String visitUpdatableListAsIdFnCall(MIR.UpdatableListAsIdFnCall call, boolean checkMagic) {
-    return "(rt.FatPtr{ .data = .{ .int = 0xDEAD }, .vt = @ptrFromInt(0) })"; // Lists not supported yet
-  }
 
   // Not used directly - output is accumulated in state
   public String visitProgram(DecId entry) { throw Bug.unreachable(); }
