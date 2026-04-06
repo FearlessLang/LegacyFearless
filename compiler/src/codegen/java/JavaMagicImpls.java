@@ -632,8 +632,6 @@ public record JavaMagicImpls(
 //          return Optional.of(parFlow);
 //        }
 //      }
-
-      System.err.println("Warning: No magic handler found for: "+e+"\nFalling back to Fearless implementation.");
       return Optional.empty();
     };
   }

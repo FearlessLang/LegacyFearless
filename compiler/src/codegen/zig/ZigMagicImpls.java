@@ -7,172 +7,80 @@ import magic.FearlessStringHandler;
 import magic.MagicTrait;
 import visitors.MIRVisitor;
 
-import java.util.*;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Optional;
 import java.util.function.Function;
 
 import static magic.Magic.getLiteral;
-
-// TODO: Most (maybe all) of this code can go, I'm using overrides in the [call] fn in objs.zig to handle intrinsic calls
-
-record ZigNumOps(ZigNumOps.NumOp onNat) {
-  interface NumOp { String apply(String[] args); }
-
-  private static final Map<Id.MethName, ZigNumOps> numOps = new LinkedHashMap<>();
-  private static Id.MethName m(String name, int arity) { return new Id.MethName(name, arity); }
-  private static void put(String name, int arity, NumOp nat) {
-    assert !numOps.containsKey(m(name, arity));
-    numOps.put(m(name, arity), new ZigNumOps(nat));
-  }
-  static String zigBool(String condition) {
-    return "(if (" + condition + ") rt.obj_k_singleton(&VT_True_0) else rt.obj_k_singleton(&VT_False_0))";
-  }
-
-  static {
-    // conversions
-    put(".int", 0, a -> "int_rt.make(@bitCast(nat_rt.deref(" + a[0] + ")))"); // Nat→Int conversion
-    put(".nat", 0, a -> a[0]); // identity
-    put(".str", 0, a -> "str_rt.int_to_str(" + a[0] + ")");
-
-    // arithmetic
-    put("+", 1, a -> "nat_rt.add(" + a[0] + ", " + a[1] + ")");
-    put("-", 1, a -> "nat_rt.sub(" + a[0] + ", " + a[1] + ")");
-    put("*", 1, a -> "nat_rt.mul(" + a[0] + ", " + a[1] + ")");
-    put("/", 1, a -> "nat_rt.div(" + a[0] + ", " + a[1] + ")");
-    put("%", 1, a -> "nat_rt.mod(" + a[0] + ", " + a[1] + ")");
-    put(".abs", 0, a -> "nat_rt.abs(" + a[0] + ")");
-
-    // bitwise
-    put(".shiftLeft", 1, a -> "nat_rt.shift_left(" + a[0] + ", " + a[1] + ")");
-    put(".shiftRight", 1, a -> "nat_rt.shift_right(" + a[0] + ", " + a[1] + ")");
-    put(".xor", 1, a -> "nat_rt.bitwise_xor(" + a[0] + ", " + a[1] + ")");
-    put(".bitwiseAnd", 1, a -> "nat_rt.bitwise_and(" + a[0] + ", " + a[1] + ")");
-    put(".bitwiseOr", 1, a -> "nat_rt.bitwise_or(" + a[0] + ", " + a[1] + ")");
-
-    // comparisons
-    put(">", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") > nat_rt.deref(" + a[1] + ")"));
-    put("<", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") < nat_rt.deref(" + a[1] + ")"));
-    put(">=", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") >= nat_rt.deref(" + a[1] + ")"));
-    put("<=", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") <= nat_rt.deref(" + a[1] + ")"));
-    put("==", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") == nat_rt.deref(" + a[1] + ")"));
-    put("!=", 1, a -> zigBool("nat_rt.deref(" + a[0] + ") != nat_rt.deref(" + a[1] + ")"));
-
-    // offset (Nat-specific)
-    put(".offset", 1, a -> "nat_rt.add(" + a[0] + ", " + a[1] + ")");
-  }
-}
-
-class ZigStrOps {
-  interface StrOp { String apply(String[] args); }
-  private static final Map<Id.MethName, StrOp> strOps = new LinkedHashMap<>();
-  private static Id.MethName m(String name, int arity) { return new Id.MethName(name, arity); }
-  private static void put(String name, int arity, StrOp op) {
-    strOps.put(m(name, arity), op);
-  }
-  /** Try to emit a Str magic operation; returns empty if the method is not in the table. */
-  static Optional<String> tryEmit(Id.MethName m, String... args) {
-    return Optional.ofNullable(strOps.get(m)).map(op -> op.apply(args));
-  }
-  static {
-    put(".str", 0, a -> a[0]); // identity: Str.str returns self
-    put(".size", 0, a -> "str_rt.str_size(" + a[0] + ")");
-    put(".isEmpty", 0, a -> ZigNumOps.zigBool("str_rt.deref_str(" + a[0] + ").len == 0"));
-    put("+", 1, a -> "str_rt.str_concat(" + a[0] + ", " + a[1] + ")");
-    put("==", 1, a -> ZigNumOps.zigBool("std.mem.eql(u8, str_rt.deref_str(" + a[0] + "), str_rt.deref_str(" + a[1] + "))"));
-    put("!=", 1, a -> ZigNumOps.zigBool("!std.mem.eql(u8, str_rt.deref_str(" + a[0] + "), str_rt.deref_str(" + a[1] + "))"));
-  }
-}
 
 public record ZigMagicImpls(
     MIRVisitor<String> gen,
     Function<MIR.MT, String> getTName,
     ast.Program p) implements magic.MagicImpls<String> {
 
+  private static final MagicTrait<MIR.E, String> EMPTY = new MagicTrait<>() {
+    @Override public Optional<String> instantiate() { return Optional.empty(); }
+    @Override public Optional<String> call(Id.MethName m, List<? extends MIR.E> args, EnumSet<MIR.MCall.CallVariant> variants, MIR.MT expectedT) {
+      return Optional.empty();
+    }
+  };
+
   @Override public MagicTrait<MIR.E, String> nat(MIR.E e) {
     var name = e.t().name().orElseThrow();
-    return new MagicTrait<>() {
-      @Override public Optional<String> instantiate() {
-        var lit = getLiteral(p, name);
-        try {
-          return lit
-            .map(lambdaName -> "nat_rt.make(" + Long.parseUnsignedLong(lambdaName.replace("_", ""), 10) + ")")
-            .orElseGet(() -> e.accept(gen, true)).describeConstable();
-        } catch (NumberFormatException ignored) {
-          throw Fail.invalidNum(lit.orElse(name.toString()), "Nat");
-        }
-      }
-      @Override public Optional<String> call(Id.MethName m, List<? extends MIR.E> args, EnumSet<MIR.MCall.CallVariant> variants, MIR.MT expectedT) {
-        return Optional.empty(); // Handled by runtime dispatch in objs.zig
+    return () -> {
+      var lit = getLiteral(p, name);
+      try {
+        return lit
+          .map(lambdaName -> "nat_rt.make(" + Long.parseUnsignedLong(lambdaName.replace("_", ""), 10) + ")")
+          .orElseGet(() -> e.accept(gen, true)).describeConstable();
+      } catch (NumberFormatException ignored) {
+        throw Fail.invalidNum(lit.orElse(name.toString()), "Nat");
       }
     };
   }
 
   @Override public MagicTrait<MIR.E, String> int_(MIR.E e) {
     var name = e.t().name().orElseThrow();
-    return new MagicTrait<>() {
-      @Override public Optional<String> instantiate() {
-        var lit = getLiteral(p, name);
-        try {
-          return lit
-            .map(lambdaName -> lambdaName.startsWith("+") ? lambdaName.substring(1) : lambdaName)
-            .map(lambdaName -> "int_rt.make(" + Long.parseLong(lambdaName.replace("_", ""), 10) + ")")
-            .orElseGet(() -> e.accept(gen, true)).describeConstable();
-        } catch (NumberFormatException ignored) {
-          throw Fail.invalidNum(lit.orElse(name.toString()), "Int");
-        }
-      }
-      @Override public Optional<String> call(Id.MethName m, List<? extends MIR.E> args, EnumSet<MIR.MCall.CallVariant> variants, MIR.MT expectedT) {
-        return Optional.empty(); // Handled by runtime dispatch in objs.zig
+    return () -> {
+      var lit = getLiteral(p, name);
+      try {
+        return lit
+          .map(lambdaName -> lambdaName.startsWith("+") ? lambdaName.substring(1) : lambdaName)
+          .map(lambdaName -> "int_rt.make(" + Long.parseLong(lambdaName.replace("_", ""), 10) + ")")
+          .orElseGet(() -> e.accept(gen, true)).describeConstable();
+      } catch (NumberFormatException ignored) {
+        throw Fail.invalidNum(lit.orElse(name.toString()), "Int");
       }
     };
   }
 
-  // All other magic types: fall through to normal codegen (will stack overflow at runtime like Magic!)
-  private MagicTrait<MIR.E, String> crashMagic(MIR.E e) {
-    return new MagicTrait<>() {
-      @Override public Optional<String> instantiate() { return Optional.empty(); }
-      @Override public Optional<String> call(Id.MethName m, List<? extends MIR.E> args, EnumSet<MIR.MCall.CallVariant> variants, MIR.MT expectedT) {
-        return Optional.empty();
-      }
-    };
-  }
-
-  @Override public MagicTrait<MIR.E, String> float_(MIR.E e) { return crashMagic(e); }
-  @Override public MagicTrait<MIR.E, String> byte_(MIR.E e) { return crashMagic(e); }
   @Override public MagicTrait<MIR.E, String> str(MIR.E e) {
     var name = e.t().name().orElseThrow();
-    return new MagicTrait<>() {
-      @Override public Optional<String> instantiate() {
-        var lit = getLiteral(p, name);
-        if (lit.isPresent()) {
-          var decoded = new FearlessStringHandler(FearlessStringHandler.StringKind.Unicode)
-            .toJavaString(lit.get()).get();
-          return Optional.of("str_rt.make_str_from_literal(\"" + escapeZigStr(decoded) + "\")");
-        }
-        return e.accept(gen, true).describeConstable();
+    return () -> {
+      var lit = getLiteral(p, name);
+      if (lit.isPresent()) {
+        var decoded = new FearlessStringHandler(FearlessStringHandler.StringKind.Unicode)
+          .toJavaString(lit.get()).get();
+        return Optional.of("str_rt.make_str_from_literal(\"" + escapeZigStr(decoded) + "\")");
       }
-      @Override public Optional<String> call(Id.MethName m, List<? extends MIR.E> args, EnumSet<MIR.MCall.CallVariant> variants, MIR.MT expectedT) {
-        return Optional.empty(); // Handled by runtime dispatch in objs.zig
-      }
+      return e.accept(gen, true).describeConstable();
     };
   }
-  @Override public MagicTrait<MIR.E, String> asciiStr(MIR.E e) { return crashMagic(e); }
-  @Override public MagicTrait<MIR.E, String> debug(MIR.E e) { return crashMagic(e); }
+
   @Override public MagicTrait<MIR.E, String> vars(MIR.E e) {
-    return new MagicTrait<>() {
-      @Override public Optional<String> instantiate() { return Optional.empty(); }
-      @Override public Optional<String> call(Id.MethName m, List<? extends MIR.E> args, EnumSet<MIR.MCall.CallVariant> variants, MIR.MT expectedT) {
-        if (m.name().equals("#") && m.num() == 1) {
-          return Optional.of("var_rt.make(" + args.getFirst().accept(gen, true) + ")");
-        }
-        return Optional.empty();
-      }
-    };
+    return () -> Optional.of("rt.obj_k_singleton(&var_rt.VT_Vars)");
   }
-  @Override public MagicTrait<MIR.E, String> refK(MIR.E e) { return crashMagic(e); }
-  @Override public MagicTrait<MIR.E, String> isoPodK(MIR.E e) { return crashMagic(e); }
-  @Override public MagicTrait<MIR.E, String> assert_(MIR.E e) { return crashMagic(e); }
-  @Override public MagicTrait<MIR.E, String> cheapHash(MIR.E e) { return crashMagic(e); }
-  @Override public MagicTrait<MIR.E, String> regexK(MIR.E e) { return crashMagic(e); }
+
+  @Override public MagicTrait<MIR.E, String> float_(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> byte_(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> asciiStr(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> debug(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> refK(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> isoPodK(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> assert_(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> cheapHash(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> regexK(MIR.E e) { return EMPTY; }
 
   private static String escapeZigStr(String s) {
     var sb = new StringBuilder();

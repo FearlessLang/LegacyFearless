@@ -43,11 +43,6 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
 
       // 2. Write generated code
       Files.writeString(srcDir.resolve("main.zig"), program.generatedCode());
-      if (verbosity.printCodegen()) {
-        System.out.println("--- Generated Zig ---");
-        System.out.println(program.generatedCode());
-        System.out.println("--- End Generated Zig ---");
-      }
 
       // 3. Write build.zig (trace/safety logging enabled when verbose)
       Files.writeString(workDir.resolve("build.zig"), buildZig(verbosity.printCodegen()));
