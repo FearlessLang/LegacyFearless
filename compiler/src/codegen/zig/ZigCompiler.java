@@ -1,5 +1,6 @@
 package codegen.zig;
 
+import codegen.MIR;
 import main.CompilerFrontEnd;
 import main.InputOutput;
 import utils.Bug;
@@ -8,8 +9,35 @@ import utils.IoErr;
 
 import java.io.IOException;
 import java.nio.file.*;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Map;
 
 public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) {
+  static final int ZIG_CACHE_VERSION = 1;
+
+  private Path cacheBaseDir() { return io.cachedBase().resolve("zig-cache"); }
+  public Path versionedCacheDir() { return cacheBaseDir().resolve("v" + ZIG_CACHE_VERSION); }
+  private Path zigCacheDir() { return cacheBaseDir().resolve("zig-cache"); }
+
+  /** Load cached .zig content for base packages. Returns pkgName→zigContent for cache hits. */
+  public Map<String, String> loadCachedPackages(MIR.Program program) {
+    var dir = versionedCacheDir();
+    if (!Files.isDirectory(dir)) { return Map.of(); }
+    var cached = new HashMap<String, String>();
+    for (var pkg : program.pkgs()) {
+      var name = pkg.name();
+      if (!(name.equals("base") || name.startsWith("base."))) { continue; }
+      var file = dir.resolve(name.replace(".", "_") + ".zig");
+      if (Files.exists(file)) {
+        cached.put(name, IoErr.of(() -> Files.readString(file)));
+      }
+    }
+    if (verbosity.printCodegen() && !cached.isEmpty()) {
+      System.out.println("Zig codegen cache hit for: " + cached.keySet());
+    }
+    return cached;
+  }
   /** The absolute path to the feart runtime source tree (the experiments/feart directory). */
   private static Path feartRoot() {
     // Resolve from the location of this class or use an env var
@@ -39,27 +67,35 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
       var genDir = srcDir.resolve("generated");
       Files.createDirectories(genDir);
 
-      // 1. Copy runtime files
       copyRuntime(workDir);
 
-      // 2. Write per-package generated files
       for (var entry : program.packageFiles().entrySet()) {
         var fileName = entry.getKey().replace(".", "_") + ".zig";
         Files.writeString(genDir.resolve(fileName), entry.getValue());
       }
 
-      // 3. Write main.zig
       Files.writeString(srcDir.resolve("main.zig"), program.mainFile());
-
-      // 3. Write build.zig (trace/safety logging enabled when verbose)
       Files.writeString(workDir.resolve("build.zig"), buildZig(verbosity.printCodegen()));
-
-      // 4. Write build.zig.zon
       Files.writeString(workDir.resolve("build.zig.zon"), buildZigZon());
 
-      // 5. Fetch dependencies, then build
+      // Reuse Zig's own build cache if available
+      var zigCache = zigCacheDir();
+      if (Files.isDirectory(zigCache)) {
+        copyTree(zigCache, workDir.resolve(".zig-cache"));
+      }
+
       runZigFetch(workDir);
       runZigBuild(workDir);
+
+      // Save base package files to versioned cache dir
+      saveCachedPackages(program);
+
+      // Persist Zig's build cache for next run
+      var builtZigCache = workDir.resolve(".zig-cache");
+      if (Files.isDirectory(builtZigCache)) {
+        Files.createDirectories(zigCache);
+        copyTree(builtZigCache, zigCache);
+      }
 
       return null;
     });
@@ -67,6 +103,37 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
       DeleteOnExit.of(workDir);
     }
     return workDir.resolve("zig-out/bin/fearless-app");
+  }
+
+  public static void cleanOldVersions(Path cacheBase, Path keep) {
+    if (!Files.isDirectory(cacheBase)) { return; }
+    IoErr.of(() -> {
+      try (var dirs = Files.list(cacheBase)) {
+        dirs.filter(Files::isDirectory)
+          .filter(d -> d.getFileName().toString().matches("v\\d+"))
+          .filter(d -> !d.equals(keep))
+          .forEach(ZigCompiler::deleteTree);
+      }
+    });
+  }
+
+  private static void deleteTree(Path root) {
+    IoErr.of(() -> {
+      try (var walk = Files.walk(root)) {
+        walk.sorted(Comparator.reverseOrder())
+          .forEach(f -> IoErr.of(() -> Files.deleteIfExists(f)));
+      }
+    });
+  }
+
+  private void saveCachedPackages(ZigProgram program) {
+    var dir = versionedCacheDir();
+    IoErr.of(() -> Files.createDirectories(dir));
+    for (var entry : program.packageFiles().entrySet()) {
+      if (!(entry.getKey().equals("base") || entry.getKey().startsWith("base."))) { continue; }
+      var fileName = entry.getKey().replace(".", "_") + ".zig";
+      IoErr.of(() -> Files.writeString(dir.resolve(fileName), entry.getValue()));
+    }
   }
 
   private void copyRuntime(Path workDir) throws IOException {

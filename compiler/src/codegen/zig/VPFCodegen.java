@@ -132,11 +132,15 @@ class VPFCodegen {
       sb.append("locals.r1 = ").append(firstExprCode).append(";\n");
     }
 
-    // Pop and claim the frame using helper
-    sb.append("if (shadow_stack_mod.popAndClaim(frame_idx)) |obligation| {\n");
+    // Pop and claim the frame (if we managed to push one)
+    sb.append("if (frame_idx_opt) |frame_idx| {\n");
+    sb.append("    if (shadow_stack_mod.popAndClaim(frame_idx)) |obligation| {\n");
     // Promoted path: deliver r1 to thief, wait for thief result
-    sb.append("    shadow_stack_mod.fulfillChildObligation(frame_idx, locals.r1);\n");
-    sb.append("    return obligation.wait(worker_mod.getCurrentWorker().?);\n");
+    sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, locals.r1);\n");
+    sb.append("        const wait_result = obligation.wait(worker_mod.getCurrentWorker().?);\n");
+    sb.append("        shadow_stack_mod.freeObligation(obligation);\n");
+    sb.append("        return wait_result;\n");
+    sb.append("    }\n");
     sb.append("}\n");
 
     // Not-promoted path: compute remaining frame-adding sub-exprs ourselves, call combiner
@@ -267,9 +271,13 @@ class VPFCodegen {
     sb.append("thief_locals.r_thief = ").append(myExpr.expr.accept(thiefGen, true)).append(";\n");
 
     // Stolen path: deliver result to inner thief, wait for inner thief's combined result
-    sb.append("if (shadow_stack_mod.popAndClaim(frame_idx)) |inner_obl| {\n");
-    sb.append("    shadow_stack_mod.fulfillChildObligation(frame_idx, thief_locals.r_thief);\n");
-    sb.append("    return inner_obl.wait(worker_mod.getCurrentWorker().?);\n");
+    sb.append("if (frame_idx_opt) |frame_idx| {\n");
+    sb.append("    if (shadow_stack_mod.popAndClaim(frame_idx)) |inner_obl| {\n");
+    sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, thief_locals.r_thief);\n");
+    sb.append("        const wait_result = inner_obl.wait(worker_mod.getCurrentWorker().?);\n");
+    sb.append("        shadow_stack_mod.freeObligation(inner_obl);\n");
+    sb.append("        return wait_result;\n");
+    sb.append("    }\n");
     sb.append("}\n");
 
     // Not-stolen path
@@ -323,6 +331,7 @@ class VPFCodegen {
         .append(expr.expr.accept(thiefGen, true)).append(";\n");
     }
     sb.append("const r1 = child_obl_opt.?.wait(worker_mod.getCurrentWorker().?);\n");
+    sb.append("shadow_stack_mod.freeObligation(child_obl_opt.?);\n");
     emitWaitForwardedObligations(sb, forwardedChildOblFields);
     var resultMap = buildThiefCombinerMap(allFrameAdding, fwdCount, myGlobalIdx);
     sb.append("return ").append(emitCombinerFromMap(vpf, resultMap)).append(";\n");
@@ -331,7 +340,7 @@ class VPFCodegen {
   private void emitPushFrame(StringBuilder sb, String hashName,
                               String localsVar, String localsTypeName,
                               String thiefFnName) {
-    sb.append("const frame_idx = shadow_stack_mod.pushFrame(.{\n");
+    sb.append("const frame_idx_opt = shadow_stack_mod.pushFrame(.{\n");
     sb.append("    .target_method = ").append(hashName).append(",\n");
     sb.append("    .join_obligation = std.atomic.Value(?*JoinObligation).init(null),\n");
     sb.append("    .child_obligation = std.atomic.Value(?*JoinObligation).init(null),\n");

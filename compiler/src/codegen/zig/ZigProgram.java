@@ -11,8 +11,8 @@ public record ZigProgram(Map<String, String> packageFiles, String mainFile, Stri
     this(builder.packageFiles, builder.mainFile, builder.entryPoint);
   }
 
-  public static ZigProgram of(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg) {
-    return new ZigProgram(new ZigProgramBuilder(entryPoint, program, cachedPkg));
+  public static ZigProgram of(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent) {
+    return new ZigProgram(new ZigProgramBuilder(entryPoint, program, cachedPkg, cachedContent));
   }
 }
 
@@ -23,14 +23,13 @@ class ZigProgramBuilder {
   private final MIR.Program program;
   private final java.util.Set<String> cachedPkg;
 
-  ZigProgramBuilder(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg) {
+  ZigProgramBuilder(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent) {
     this.entryPoint = entryPoint;
     this.program = program;
     this.cachedPkg = cachedPkg;
 
     var gen = new ZigSingleCodegen(program);
 
-    // Visit all types in all packages
     for (MIR.Package pkg : program.pkgs()) {
       if (cachedPkg.contains(pkg.name())) { continue; }
       for (MIR.TypeDef def : pkg.defs().values()) {
@@ -41,10 +40,9 @@ class ZigProgramBuilder {
       }
     }
 
-    // Build per-package files
     this.packageFiles = buildPackageFiles(gen);
+    this.packageFiles.putAll(cachedContent);
 
-    // Build main.zig
     this.mainFile = buildMainFile(gen);
   }
 
@@ -147,7 +145,7 @@ class ZigProgramBuilder {
     var owningPkg = gen.typeToPackage.get(decId);
     if (owningPkg != null && packageFiles.containsKey(owningPkg)) {
       var fieldName = "pkg_" + owningPkg.replace(".", "_");
-      sb.append("pub const ").append(vtName).append(" = ").append(fieldName).append(".").append(vtName).append(";\n");
+      sb.append("pub const ").append(vtName).append(" = &").append(fieldName).append(".").append(vtName).append(";\n");
     }
   }
 

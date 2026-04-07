@@ -9,11 +9,12 @@ import java.util.stream.Collectors;
 
 import ast.T.Dec;
 import codegen.MIR;
+import main.LogicMain;
 import utils.IoErr;
 import ast.T;
 
 public record HDCache(Path code, ast.Program program) {
-  public static void cachePackageTypes(LogicMainJava main, ast.Program program) {
+  public static void cachePackageTypes(LogicMain main, ast.Program program) {
     Map<String,List<T.Dec>> mapped= program.ds().values().stream()
      .filter(d->!main.cachedPkg().contains(d.name().pkg()))
      .collect(Collectors.groupingBy(d->d.name().pkg()));
@@ -37,7 +38,7 @@ public record HDCache(Path code, ast.Program program) {
   }
   public void cacheTypeInfo(String pkgName, List<Dec> decs) {
     var pkg = code.resolve(pkgName.replace(".","/"));
-    assert Files.exists(pkg) && Files.isDirectory(pkg):pkg;
+    IoErr.of(() -> Files.createDirectories(pkg));
     var file=decs.stream().map(d->new DecTypeInfo().visitDec(d)).toList();
     String tot="package "+pkgName+"\n"+String.join("", file);
     IoErr.of(()->Files.writeString(pkg.resolve("pkgInfo.txt"),tot));

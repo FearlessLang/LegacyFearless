@@ -34,7 +34,7 @@ public interface TestInputOutputs {
 			args,
 			files,
 			workingDir,
-			workingDir
+			ResolveResource.artefact("/cachedBase")
 		);
 	}
 }
