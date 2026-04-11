@@ -22,7 +22,7 @@ public class RunZigProgramTests {
   public static void okWithArgs(Res expected, List<String> args, String... content) {
     assert content.length > 0;
     Main.resetAll();
-    var verbosity = new CompilerFrontEnd.Verbosity(true, true, CompilerFrontEnd.ProgressVerbosity.None);
+    var verbosity = new CompilerFrontEnd.Verbosity(true, false, CompilerFrontEnd.ProgressVerbosity.None);
     var logicMain = LogicMainZig.of(TestInputOutputs.programmaticImm(Arrays.asList(content), args), verbosity);
     assertResMatch(logicMain.run(), expected);
   }
@@ -32,7 +32,7 @@ public class RunZigProgramTests {
     var workingDir = ResolveResource.freshTmpPath();
     IoErr.of(() -> Files.createDirectories(workingDir));
     var io = InputOutput.programmatic("test.Test", List.of(),
-      List.of(content, aliases), workingDir, workingDir);
+      List.of(content, aliases), workingDir, ResolveResource.artefact("/cachedBase"));
     var logicMain = LogicMainZig.of(io, verbosity);
     assertResMatch(logicMain.run(), expected);
   }

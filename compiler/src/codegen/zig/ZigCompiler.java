@@ -18,7 +18,10 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
 
   private Path cacheBaseDir() { return io.cachedBase().resolve("zig-cache"); }
   public Path versionedCacheDir() { return cacheBaseDir().resolve("v" + ZIG_CACHE_VERSION); }
-  private Path zigCacheDir() { return cacheBaseDir().resolve("zig-cache"); }
+  private Path zigCacheDir() { return cacheBaseDir().resolve("zig-cache/local"); }
+  private Path zigGlobalCacheDir() { return cacheBaseDir().resolve("zig-cache/global"); }
+  private Path zigOutDir() { return cacheBaseDir().resolve("zig-out"); }
+  private Path stableWorkDir() { return cacheBaseDir().resolve("zig-build"); }
 
   /** Load cached .zig content for base packages. Returns pkgName→zigContent for cache hits. */
   public Map<String, String> loadCachedPackages(MIR.Program program) {
@@ -58,11 +61,12 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
   }
 
   public Path compile(ZigProgram program) {
-    var workDir = IoErr.of(() -> Files.createTempDirectory("fearless-zig-"));
+    var workDir = stableWorkDir();
     if (verbosity.printCodegen()) {
       System.out.println("Zig build directory: " + workDir);
     }
     IoErr.of(() -> {
+      Files.createDirectories(workDir);
       var srcDir = workDir.resolve("src");
       var genDir = srcDir.resolve("generated");
       Files.createDirectories(genDir);
@@ -78,31 +82,14 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
       Files.writeString(workDir.resolve("build.zig"), buildZig(verbosity.printCodegen()));
       Files.writeString(workDir.resolve("build.zig.zon"), buildZigZon());
 
-      // Reuse Zig's own build cache if available
-      var zigCache = zigCacheDir();
-      if (Files.isDirectory(zigCache)) {
-        copyTree(zigCache, workDir.resolve(".zig-cache"));
-      }
-
-      runZigFetch(workDir);
-      runZigBuild(workDir);
+      runZigBuild(workDir, zigCacheDir(), zigGlobalCacheDir(), zigOutDir());
 
       // Save base package files to versioned cache dir
       saveCachedPackages(program);
 
-      // Persist Zig's build cache for next run
-      var builtZigCache = workDir.resolve(".zig-cache");
-      if (Files.isDirectory(builtZigCache)) {
-        Files.createDirectories(zigCache);
-        copyTree(builtZigCache, zigCache);
-      }
-
       return null;
     });
-    if (!verbosity.printCodegen()) {
-      DeleteOnExit.of(workDir);
-    }
-    return workDir.resolve("zig-out/bin/fearless-app");
+    return zigOutDir().resolve("bin/fearless-app");
   }
 
   public static void cleanOldVersions(Path cacheBase, Path keep) {
@@ -166,25 +153,14 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
     }
   }
 
-  private void runZigFetch(Path workDir) throws IOException {
-    var pb = new ProcessBuilder("zig", "build", "--fetch")
-      .directory(workDir.toFile())
-      .redirectErrorStream(true);
-    var process = pb.start();
-    var output = new String(process.getInputStream().readAllBytes());
-    int exitCode;
-    try {
-      exitCode = process.waitFor();
-    } catch (InterruptedException e) {
-      throw new RuntimeException(e);
-    }
-    if (exitCode != 0) {
-      throw Bug.of("zig build --fetch failed (exit " + exitCode + "):\n" + output);
-    }
-  }
-
-  private void runZigBuild(Path workDir) throws IOException {
-    var pb = new ProcessBuilder("zig", "build", "-Doptimize=ReleaseFast")
+  private void runZigBuild(Path workDir, Path localCache, Path globalCache, Path outDir) throws IOException {
+    var pb = new ProcessBuilder(
+      "zig", "build",
+      "-Doptimize=ReleaseFast",
+      "--cache-dir", localCache.toAbsolutePath().toString(),
+      "--global-cache-dir", globalCache.toAbsolutePath().toString(),
+      "--prefix", outDir.toAbsolutePath().toString()
+    )
       .directory(workDir.toFile())
       .redirectErrorStream(true);
     var process = pb.start();

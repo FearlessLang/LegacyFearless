@@ -19,6 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Stream;
 
 public interface LogicMainJava extends FullLogicMain<JavaProgram> {
+  @Override default String backendName() { return "java"; }
   @Override default void cachePackageTypes(ast.Program program) {
     HDCache.cachePackageTypes(this, program);
   }

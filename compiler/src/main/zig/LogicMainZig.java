@@ -20,16 +20,20 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public interface LogicMainZig extends FullLogicMain<ZigProgram> {
+  @Override default String backendName() { return "zig"; }
   Path executablePath();
   void setExecutablePath(Path path);
 
   @Override default void cachePackageTypes(Program program) {
     var versionedDir = new ZigCompiler(verbosity(), io()).versionedCacheDir();
     var baseDecs = program.ds().values().stream()
-      .filter(d -> d.name().pkg().equals("base") || d.name().pkg().startsWith("base."))
+      .filter(d -> {
+        var pkg = d.name().pkg();
+        return pkg.equals("base") || pkg.startsWith("base.");
+      })
       .collect(Collectors.groupingBy(d -> d.name().pkg()));
     baseDecs.forEach((pkg, decs) ->
-      new HDCache(versionedDir, program).cacheTypeInfo(pkg, decs));
+      new HDCache(versionedDir, program, backendName()).cacheTypeInfo(pkg, decs));
     ZigCompiler.cleanOldVersions(versionedDir.getParent(), versionedDir);
   }
 

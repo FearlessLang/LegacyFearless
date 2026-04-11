@@ -162,7 +162,7 @@ class InputOutputHelper{
   }
   static List<Parser> loadCachedFiles(Path root) {
     IoErr.of(()->Files.createDirectories(root));
-    return loadFiles(root,"pkgInfo.txt");
+    return loadFiles(root,".txt");
   }
   static List<Parser> loadFiles(Path root,String endsWith) {
     return IoErr.of(()->{try(var fs = Files.walk(root)) {

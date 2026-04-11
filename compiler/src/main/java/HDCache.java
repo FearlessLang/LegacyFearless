@@ -13,13 +13,13 @@ import main.LogicMain;
 import utils.IoErr;
 import ast.T;
 
-public record HDCache(Path code, ast.Program program) {
+public record HDCache(Path code, ast.Program program, String backend) {
   public static void cachePackageTypes(LogicMain main, ast.Program program) {
     Map<String,List<T.Dec>> mapped= program.ds().values().stream()
      .filter(d->!main.cachedPkg().contains(d.name().pkg()))
      .collect(Collectors.groupingBy(d->d.name().pkg()));
-    mapped.forEach((key, value)->new HDCache(main.io().output(), program).cacheTypeInfo(key, value));
-    new HDCache(main.io().output(), program).cacheBase(main.io().cachedBase());
+    mapped.forEach((key, value)->new HDCache(main.io().output(), program, main.backendName()).cacheTypeInfo(key, value));
+    new HDCache(main.io().output(), program, main.backendName()).cacheBase(main.io().cachedBase());
   }
   
   public HDCache{ assert Files.exists(code) && Files.isDirectory(code):code; }
@@ -41,7 +41,7 @@ public record HDCache(Path code, ast.Program program) {
     IoErr.of(() -> Files.createDirectories(pkg));
     var file=decs.stream().map(d->new DecTypeInfo().visitDec(d)).toList();
     String tot="package "+pkgName+"\n"+String.join("", file);
-    IoErr.of(()->Files.writeString(pkg.resolve("pkgInfo.txt"),tot));
+    IoErr.of(()->Files.writeString(pkg.resolve("pkgInfo." + backend + ".txt"),tot));
   }
 }
 

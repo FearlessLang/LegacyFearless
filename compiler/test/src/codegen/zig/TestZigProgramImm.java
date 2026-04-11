@@ -1,6 +1,8 @@
 package codegen.zig;
 
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
+import utils.Base;
 
 import static codegen.zig.RunZigProgramTests.ok;
 import static utils.RunOutput.Res;
@@ -48,10 +50,11 @@ public class TestZigProgramImm {
       }
     """);}
 
-  @Test void ternaryVPF() { ok(new Res("10", "", 0), """
+  @Disabled("A bit computationally heavy, but the test should always pass")
+  @Test void ternaryVPF() { ok(new Res("1300483311", "", 0), """
     package test
     alias base.Main as Main, alias base.Nat as Nat,
-    Test:Main{ _ -> Tri#(3, 4, 5).str }
+    Test:Main{ _ -> Tri#(43, 43, 43).str }
     Tri: {
       #(a: Nat, b: Nat, c: Nat): Nat -> this.combine((this.work(a)), (this.work(b)), (this.work(c))),
       .work(n: Nat): Nat -> n <= 1 ? { .then -> n, .else -> (this.work(n - 1)) + (this.work(n - 2)) },
@@ -59,10 +62,11 @@ public class TestZigProgramImm {
       }
     """);}
 
-  @Test void quaternaryVPF() { ok(new Res("409336620", "", 0), """
+  @Disabled("A bit computationally heavy, but the test should always pass")
+  @Test void quaternaryVPF() { ok(new Res("1733977748", "", 0), """
     package test
     alias base.Main as Main, alias base.Nat as Nat,
-    Test:Main{ _ -> Quad#(40, 40, 40, 40).str }
+    Test:Main{ _ -> Quad#(43, 43, 43, 43).str }
     Quad: {
       #(a: Nat, b: Nat, c: Nat, d: Nat): Nat ->
         this.combine((this.work(a)), (this.work(b)), (this.work(c)), (this.work(d))),

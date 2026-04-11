@@ -7,7 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 public record ZigProgram(Map<String, String> packageFiles, String mainFile, String entryPoint) {
-  public ZigProgram(ZigProgramBuilder builder) {
+  ZigProgram(ZigProgramBuilder builder) {
     this(builder.packageFiles, builder.mainFile, builder.entryPoint);
   }
 
@@ -176,17 +176,17 @@ class ZigProgramBuilder {
     var sb = new StringBuilder();
     sb.append("// === Entry Point ===\n");
     sb.append("pub fn main() void {\n");
-    sb.append("    log.installCrashHandler();\n");
-    sb.append("    gc.init_gc();\n");
-    sb.append("    const cpu_count = std.Thread.getCpuCount() catch 1;\n");
-    sb.append("    const pool = worker_mod.WorkerPool.init(cpu_count) catch @panic(\"OOM\");\n");
-    sb.append("    const main_fiber = Fiber.create(struct {\n");
-    sb.append("        fn run(_: *Fiber) void {\n");
-    sb.append("            const entry = rt.obj_k_singleton(&").append(entryVtRef).append(");\n");
+    sb.append("log.installCrashHandler();\n");
+    sb.append("gc.init_gc();\n");
+    sb.append("const cpu_count = std.Thread.getCpuCount() catch 1;\n");
+    sb.append("const pool = worker_mod.WorkerPool.init(cpu_count) catch @panic(\"OOM\");\n");
+    sb.append("const main_fiber = Fiber.create(struct {\n");
+    sb.append("fn run(_: *Fiber) void {\n");
+    sb.append("const entry = rt.obj_k_singleton(&").append(entryVtRef).append(");\n");
 
     if (isBaseMain()) {
-      sb.append("            const sys = sys_rt.make_system();\n");
-      sb.append("            _ = rt.call(entry, ").append(hashExpr).append(", .{sys}, @src());\n");
+      sb.append("const sys = sys_rt.make_system();\n");
+      sb.append("_ = rt.call(entry, ").append(hashExpr).append(", .{sys}, @src());\n");
     } else {
       var llistDecId = new Id.DecId("base.LList", 1);
       var llistVtName = gen.id.getSimpleName(llistDecId);
@@ -197,19 +197,19 @@ class ZigProgramBuilder {
       } else {
         llistVtRef = "VT_" + llistVtName;
       }
-      sb.append("            const args = rt.obj_k_singleton(&").append(llistVtRef).append(");\n");
-      sb.append("            const result = rt.call(entry, ").append(hashExpr).append(", .{args}, @src());\n");
-      sb.append("            const str_data = str_rt.deref_str(result);\n");
-      sb.append("            _ = std.posix.write(std.posix.STDOUT_FILENO, str_data) catch {};\n");
-      sb.append("            _ = std.posix.write(std.posix.STDOUT_FILENO, \"\\n\") catch {};\n");
+      sb.append("const args = rt.obj_k_singleton(&").append(llistVtRef).append(");\n");
+      sb.append("const result = rt.call(entry, ").append(hashExpr).append(", .{args}, @src());\n");
+      sb.append("const str_data = str_rt.deref_str(result);\n");
+      sb.append("_ = std.posix.write(std.posix.STDOUT_FILENO, str_data) catch {};\n");
+      sb.append("_ = std.posix.write(std.posix.STDOUT_FILENO, \"\\n\") catch {};\n");
     }
 
-    sb.append("            worker_mod.global_done.store(true, .release);\n");
-    sb.append("        }\n");
-    sb.append("    }.run, null) catch @panic(\"OOM\");\n");
-    sb.append("    pool.enqueueFiber(main_fiber);\n");
-    sb.append("    pool.run();\n");
-    sb.append("    log.dumpAllTraceBuffers();\n");
+    sb.append("worker_mod.global_done.store(true, .release);\n");
+    sb.append("}\n");
+    sb.append("}.run, null) catch @panic(\"OOM\");\n");
+    sb.append("pool.enqueueFiber(main_fiber);\n");
+    sb.append("pool.run();\n");
+    sb.append("log.dumpAllTraceBuffers();\n");
     sb.append("}\n");
     return sb.toString();
   }

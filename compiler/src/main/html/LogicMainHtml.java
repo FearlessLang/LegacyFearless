@@ -16,6 +16,7 @@ public interface LogicMainHtml extends LogicMain {
     return new LogicMainHtml(){
       public InputOutput io(){ return io; }
       public HashSet<String> cachedPkg(){ return cachedPkg; }
+      @Override public String backendName() { return "html"; }
     };
   }
 

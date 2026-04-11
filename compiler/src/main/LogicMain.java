@@ -29,8 +29,12 @@ public interface LogicMain {
   }
 
   void cachePackageTypes(ast.Program program);
+  String backendName();
+
   default astFull.Program parse() {
-    var cache = load(io().cachedFiles());
+    var cache = load(io().cachedFiles().stream()
+      .filter(p -> p.fileName().getFileName().toString().equals("pkgInfo." + backendName() + ".txt"))
+      .toList());
     cachedPkg().addAll(cache.keySet());
     var app = load(io().inputFiles());
     var standardLibOverriden = app.entrySet().stream()
