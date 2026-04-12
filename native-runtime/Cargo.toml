@@ -15,7 +15,7 @@ runtime-only = []
 
 [dependencies]
 # Common
-jni = { version = "0.21.1" }
+jni = { version = "0.22.4" }
 unicode-segmentation = { version = "1.11.0" }
 unicode-normalization = { version = "0.1.23" }
 regex = "1.10.6"

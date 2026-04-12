@@ -1,4 +1,4 @@
-use jni::JNIEnv;
+use jni::Env;
 use std::slice;
 use std::str::Utf8Error;
 
@@ -9,7 +9,7 @@ pub struct FearlessStr<'array_local> {
     slice: &'array_local [u8],
 }
 impl<'array_local> FearlessStr<'array_local> {
-    pub fn new<'local, 'array>(env: &mut JNIEnv<'local>, utf8_str: &'array JByteBuffer<'array_local>) -> FearlessStr<'array_local> {
+    pub fn new<'local, 'array>(env: &mut Env<'local>, utf8_str: &'array JByteBuffer<'array_local>) -> FearlessStr<'array_local> {
         // Safety: Lifetimes bind the data here. Making this critical would be safe too,
         // but we don't need to do that unless this is becoming a perf issue (making it critical
         // has stalling risks on other threads because it locks the allocator)
