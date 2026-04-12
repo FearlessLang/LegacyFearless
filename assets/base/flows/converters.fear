@@ -123,8 +123,8 @@ _SafeSource: {
 //        }
 //      }},
 
-  .fromList[E:*](list: mut List[E]): mut Flow[E] -> Flow.fromOp[E](this.fromList'[E](list, 0, list.size), list.size),
-  .fromList'[E:*](list: mut List[E], start: Nat, end: Nat): mut FlowOp[E] -> Block#
+  .fromList[E:*](list: mut UList[E]): mut Flow[E] -> Flow.fromOp[E](this.fromList'[E](list, 0, list.size), list.size),
+  .fromList'[E:*](list: mut UList[E], start: Nat, end: Nat): mut FlowOp[E] -> Block#
     .let[mut Count[Nat]] cursor = {Count.nat(start)}
     .let[mut Count[Nat]] endCursor = {Count.nat(end)}
     .return {{'self

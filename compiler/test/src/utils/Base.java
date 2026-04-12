@@ -110,6 +110,7 @@ public interface Base {
     
     alias base.LList as LList,
     alias base.List as List,
+    alias base.UList as UList,
     alias base.ListViews as ListViews,
     alias base.Collection as Collection,
     

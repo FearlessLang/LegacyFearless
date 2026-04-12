@@ -308,7 +308,20 @@ public class TestJavaOptimisations {
     Test_0 $self = new Test_0Impl();
     base.Void_0 $hash$imm(base.caps.System_0 sys_m$);
     static base.Void_0 $hash$imm$fun(base.caps.System_0 sys_m$, test.Test_0 $this) {
-      return base.Block_0.$self.$hash$imm(rt.ListK.asShallowClone(((base.List_1)rt.ListK.$self.$hash$imm()), test.Fear[###]$_0.$self));
+      return base.Block_0.$self.$hash$imm(rt.UListK.asShallowClone(((base.UList_1)rt.UListK.$self.$hash$imm()), test.Fear[###]$_0.$self));
+    }
+    }
+    """, "/test/Test_0.java", """
+    package test
+    Test: Main{sys -> Block#(UList#[Nat].as{x->x})}
+    """, Base.mutBaseAliases);}
+  @Test void asIdFnList() {ok("""
+    package test;
+    public interface Test_0 extends base.Main_0{
+    Test_0 $self = new Test_0Impl();
+    base.Void_0 $hash$imm(base.caps.System_0 sys_m$);
+    static base.Void_0 $hash$imm$fun(base.caps.System_0 sys_m$, test.Test_0 $this) {
+      return base.Block_0.$self.$hash$imm(((base.List_1)rt.ListK.$self.$hash$imm()));
     }
     }
     """, "/test/Test_0.java", """

@@ -268,7 +268,7 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
         }
         return EnumSet.of(MIR.MCall.CallVariant.Standard);
       }
-      if (recvIT.name().equals(Magic.FList)) {
+      if (recvIT.name().equals(Magic.UList)) {
         var flowElem = recvIT.ts().getFirst();
         if (recvT.mdf().is(Mdf.read, Mdf.imm)) {
           return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
@@ -277,6 +277,16 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
           return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
         }
 //        if (flowElem.mdf().is(Mdf.read, Mdf.imm)) { return EnumSet.of(MIR.MCall.CallVariant.SafeMutSourceFlow); }
+        return EnumSet.of(MIR.MCall.CallVariant.Standard);
+      }
+      if (recvIT.name().equals(Magic.FList)) {
+        var flowElem = recvIT.ts().getFirst();
+        if (recvT.mdf().is(Mdf.read, Mdf.imm)) {
+          return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
+        }
+        if (flowElem.mdf().is(Mdf.read, Mdf.imm)) {
+          return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
+        }
         return EnumSet.of(MIR.MCall.CallVariant.Standard);
       }
     }

@@ -38,7 +38,7 @@ LexStringEscapes: Actor[mut _LexerCtx,Str,Token]{downstream, ctx, e -> Block#
 
 LexUnicodeEscapes: {
   #(ctx: mut _LexerCtx,
-    buffer: mut List[Str],
+    buffer: mut UList[Str],
     e: Str
   ): ActorRes -> Block#
     .do {Block#(ctx.col++)}
@@ -64,7 +64,7 @@ LexUnicodeEscapes: {
   }
 
 _ParseHex: {
-  #(chars: read List[Str]): Nat -> chars.flow
+  #(chars: read UList[Str]): Nat -> chars.flow
     .map{ch -> this.encoding(ch)}
     #(Flow.enumerate[Nat])
     .fold[Nat]({0}, {acc, ni -> Block#

@@ -116,7 +116,7 @@ public class ThesisExamplesTest {
   @Test void flowSemanticD1List() {ok(new Res("a,b,c", "", 0), """
     package test
     alias base.Debug as D,
-    Only3: {#(list: read List[Str]): Str -> list
+    Only3: {#(list: read UList[Str]): Str -> list
       .flow
       .limit(3)
       .peek{e -> e == "d" ? {
@@ -126,7 +126,7 @@ public class ThesisExamplesTest {
       .join ","
     }
     Test: Main{sys -> Block#
-      .let[mut List[Str]] list = {List#}
+      .let[mut UList[Str]] list = {UList#}
       .do {list.add "a"}
       .do {list.add "b"}
       .do {list.add "c"}
@@ -197,7 +197,7 @@ public class ThesisExamplesTest {
         .list
     }
     Test: Main{sys -> Block#
-      .let[List[Str]] list = {List#[Str] + "Bob" + "Alice" + "Charlie"}
+      .let[List[Str]] list = {List.consumeUList(UList#[Str] + "Bob" + "Alice" + "Charlie")}
       .let res = {NamesToPlayers#list}
       .do {sys.io.println(res.flow.map{p -> p.name + ":" + (p.score.str)}.join ", ")}
       .return {{}}

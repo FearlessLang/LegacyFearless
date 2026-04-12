@@ -6,17 +6,17 @@ MyApp:Main{ s -> s
   }
 
 Logic:{
-  .peopleList: mut List[mut Person] -> List#(
+  .peopleList: mut UList[mut Person] -> UList#(
     FPerson#("Alice", 150),
     FPerson#("Bob", 30),
     FPerson#("The Wizard in the tower", 456)
     ),
-  .list2: mut List[mut Person] -> Block#
+  .list2: mut UList[mut Person] -> Block#
     .let myList = { this.peopleList }
     .do{ myList.add(FPerson#("Eve", 21)) }
     .return{ myList },
-  .list4: List[mut Person] -> this.list2,
-  .list5: List[Person] -> this.list4,
+  .list4: UList[mut Person] -> this.list2,
+  .list5: List[Person] -> this.list4.list,
   }
 
 IPerson:{ .name: Str, .age: Nat }

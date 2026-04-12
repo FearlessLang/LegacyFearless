@@ -40,7 +40,7 @@ Iter[E:*]:{
     },
 
   mut .count: Nat -> this.fold[Nat](0, mut IterFolder[E, Nat]{ acc, _ -> acc + 1 }),
-  mut .list: mut List[E] -> this.fold(List#[E], { acc, e -> Block#(acc.add(e), acc) }),
+  mut .list: mut List[E] -> (this.fold(UList#[E], { acc, e -> Block#(acc.add(e), acc) })).list,
   mut .llist: mut LList[E] -> this.fold(mut LList[E], { acc, e -> acc +[] e }),
   mut .str(toStr: mut IterMapper[E, Str], joining: Str): Str -> this.map(toStr)
     .fold[Str]("", mut IterFolder[Str, Str]{acc, e -> acc.isEmpty ? {

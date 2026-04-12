@@ -9,9 +9,9 @@ Main: AppMain{
 
 // TODO: When we have maps support nested test suites
 FTestRunner: F[mut System, mut TestRunner]{sys -> Block#
-  .let[mut List[Test]] tests = {List#}
-  .let[mut List[mut TestSuite]] suites = {List#}
-  .let[mut List[mut ResultReporter]] reporters = {List#}
+  .let[mut UList[Test]] tests = {UList#}
+  .let[mut UList[mut TestSuite]] suites = {UList#}
+  .let[mut UList[mut ResultReporter]] reporters = {UList#}
   .let[mut CapTry] try = {sys.try}
   .return {{'self
     .suite(title, registerTests) -> Block#

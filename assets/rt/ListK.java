@@ -11,14 +11,6 @@ import java.util.ArrayList;
 public interface ListK extends base.List_0 {
   ListK $self = new ListK(){};
 
-  static base.List_1 asShallowClone(base.List_1 list, base.MF_2 f) {
-    return switch (list) {
-      case ListImpl<?> impl -> new ListImpl<>(new ArrayList<>(impl.inner));
-      case ByteBufferListImpl impl -> impl;
-      default -> list.as$read(f);
-    };
-  }
-
   @Override default List_1 $hash$imm(Object e1_m$) {
       var res = new ArrayList<>(1);
       res.add(e1_m$);
@@ -248,18 +240,20 @@ public interface ListK extends base.List_0 {
     return new ListImpl<>(res);
   }
 
-  @Override default List_1 withCapacity$imm(long n) {
-    if (n > Integer.MAX_VALUE) {
-      rt.Error.throwFearlessError(base.Infos_0.$self.msg$imm(
-        rt.Str.fromJavaStr("Lists may not have a capacity greater than "+Integer.MAX_VALUE)
-      ));
-    }
-    return new ListImpl<>(new ArrayList<>((int) n));
+  @Override default List_1 consumeUList$imm(base.UList_1 list_m$) {
+    // The iso guarantee means nothing else aliases list_m$, so we can reuse its storage.
+    @SuppressWarnings("unchecked")
+    var impl = (UListK.UListImpl<Object>) list_m$;
+    return new ListImpl<>(impl.inner());
   }
 
   record ListImpl<E>(java.util.List<E> inner) implements base.List_1 {
     @Override public FlowOp_1 _flowimm$imm(long start_m$, long end_m$) {
       return List_1._flowimm$imm$fun(start_m$, end_m$, this);
+    }
+
+    @Override public FlowOp_1 _flowmut$mut(long start_m$, long end_m$) {
+      return List_1._flowmut$mut$fun(start_m$, end_m$, this);
     }
 
     @Override public Object get$imm(long i_m$) {
@@ -272,20 +266,6 @@ public interface ListK extends base.List_0 {
 
     @Override public Object get$mut(long i_m$) {
       return inner.get((int) i_m$);
-    }
-
-    @Override public Void_0 addAll$mut(List_1 other_m$) {
-      @SuppressWarnings("unchecked") // validated by the Fearless type system
-      var other = (ListImpl<E>) other_m$;
-      inner.addAll(other.inner);
-      return Void_0.$self;
-    }
-
-    @Override public base.Opt_1 takeFirst$mut() {
-      if (inner.isEmpty()) {
-        return base.Opt_1.$self;
-      }
-      return base.Opts_0.$self.$hash$imm(inner.removeFirst());
     }
 
     @Override public Opt_1 tryGet$imm(long i_m$) {
@@ -331,28 +311,12 @@ public interface ListK extends base.List_0 {
       return inner.isEmpty() ? True_0.$self : False_0.$self;
     }
 
-    @Override public Void_0 clear$mut() {
-      inner.clear();
-      return Void_0.$self;
-    }
-
     @Override public base.ListView_1 subList$read(long from, long to) {
       return List_1.subList$read$fun(from, to, this);
     }
     @Override public base.List_1 as$read(base.MF_2 f) {
       return List_1.as$read$fun(f, this);
     }
-
-    // TODO: disabled until I fix .with in flows
-//    @Override public Bool_0 $equals$equals$mut(base.F_3 eq, base.List_1 other) {
-//      return List_1.$equals$equals$mut$fun(eq, other, this);
-//    }
-//    @Override public Bool_0 $equals$equals$read(base.F_3 eq, base.List_1 other) {
-//      return List_1.$equals$equals$mut$fun(eq, other, this);
-//    }
-//    @Override public Bool_0 $equals$equals$imm(base.F_3 eq, base.List_1 other) {
-//      return List_1.$equals$equals$mut$fun(eq, other, this);
-//    }
 
     @Override public Long size$read() {
       return (long) inner.size();
@@ -362,23 +326,24 @@ public interface ListK extends base.List_0 {
       return List_1._flowread$read$fun(start_m$, end_m$, this);
     }
 
-    @Override public Void_0 add$mut(Object e_m$) {
-      @SuppressWarnings("unchecked") // validated by the Fearless type system
-      E e = (E) e_m$;
-      inner.add(e);
-      return Void_0.$self;
+    @Override public base.UList_1 uList$imm() {
+      return new UListK.UListImpl<>(new ArrayList<>(this.inner));
     }
-    @Override public ListImpl<E> $plus$mut(Object e_m$) {
-      @SuppressWarnings("unchecked") // validated by the Fearless type system
-      E e = (E) e_m$;
-      inner.add(e);
-      return this;
+    @Override public base.UList_1 uList$read() {
+      return new UListK.UListImpl<>(new ArrayList<>(this.inner));
+    }
+    @Override public base.UList_1 uList$mut() {
+      return new UListK.UListImpl<>(new ArrayList<>(this.inner));
     }
   }
 
   record ByteBufferListImpl(ByteBuffer inner) implements base.List_1 {
     @Override public FlowOp_1 _flowimm$imm(long start_m$, long end_m$) {
       return List_1._flowimm$imm$fun(start_m$, end_m$, this);
+    }
+
+    @Override public FlowOp_1 _flowmut$mut(long start_m$, long end_m$) {
+      throw new RuntimeException("Unreachable code");
     }
 
     @Override public Object get$imm(long i_m$) {
@@ -390,14 +355,6 @@ public interface ListK extends base.List_0 {
     }
 
     @Override public Object get$mut(long i_m$) {
-      throw new RuntimeException("Unreachable code");
-    }
-
-    @Override public Void_0 addAll$mut(List_1 other_m$) {
-      throw new RuntimeException("Unreachable code");
-    }
-
-    @Override public base.Opt_1 takeFirst$mut() {
       throw new RuntimeException("Unreachable code");
     }
 
@@ -443,10 +400,6 @@ public interface ListK extends base.List_0 {
       return inner.capacity() == 0 ? True_0.$self : False_0.$self;
     }
 
-    @Override public Void_0 clear$mut() {
-      throw new RuntimeException("Unreachable code");
-    }
-
     @Override public base.ListView_1 subList$read(long from, long to) {
       return List_1.subList$read$fun(from, to, this);
     }
@@ -454,17 +407,6 @@ public interface ListK extends base.List_0 {
     @Override public base.List_1 as$read(base.MF_2 f) {
       return List_1.as$read$fun(f, this);
     }
-
-    // TODO: disabled until I fix .with in flows
-//    @Override public Bool_0 $equals$equals$mut(base.F_3 eq, base.List_1 other) {
-//      return List_1.$equals$equals$mut$fun(eq, other, this);
-//    }
-//    @Override public Bool_0 $equals$equals$read(base.F_3 eq, base.List_1 other) {
-//      return List_1.$equals$equals$read$fun(eq, other, this);
-//    }
-//    @Override public Bool_0 $equals$equals$imm(base.F_3 eq, base.List_1 other) {
-//      return List_1.$equals$equals$imm$fun(eq, other, this);
-//    }
 
     @Override public Long size$read() {
       return (long) inner.capacity();
@@ -474,10 +416,17 @@ public interface ListK extends base.List_0 {
       return List_1._flowread$read$fun(start_m$, end_m$, this);
     }
 
-    @Override public Void_0 add$mut(Object e_m$) {
-      throw new RuntimeException("Unreachable code");
+    @Override public base.UList_1 uList$imm() {
+      var list = new ArrayList<Byte>(inner.capacity());
+      for (int i = 0; i < inner.capacity(); i++) { list.add(inner.get(i)); }
+      return new UListK.UListImpl<>(list);
     }
-    @Override public ByteBufferListImpl $plus$mut(Object e_m$) {
+    @Override public base.UList_1 uList$read() {
+      var list = new ArrayList<Byte>(inner.capacity());
+      for (int i = 0; i < inner.capacity(); i++) { list.add(inner.get(i)); }
+      return new UListK.UListImpl<>(list);
+    }
+    @Override public base.UList_1 uList$mut() {
       throw new RuntimeException("Unreachable code");
     }
   }

@@ -41,7 +41,7 @@ _LexerCtxs: {#: mut _LexerCtx -> Block#
   .let isNumberStart = {Regexs#"[\\-0-9]"}
   .let isWhitespace = {Regexs#"[ \\n\\r\\t]"}
   .let isChar = {Regexs#"[\\U{0020}-\\U{10FFFF}]"}
-  .let unpairedSurrogate = {List.withCapacity[Nat](1)}
+  .let unpairedSurrogate = {UList.withCapacity[Nat](1)}
   .let line = {Count.nat(1)}
   .let col = {Count.nat(1)}
   .return {mut _LexerCtx: Stringable{'ctx
@@ -55,7 +55,7 @@ _LexerCtxs: {#: mut _LexerCtx -> Block#
     read .isNumberStart(ch: Str): Bool -> isNumberStart.isMatch(ch),
     read .isWhitespace(ch: Str): Bool -> isWhitespace.isMatch(ch),
     read .isChar(ch: Str): Bool -> isChar.isMatch(ch),
-    mut .unpairedSurrogate: mut List[Nat] -> unpairedSurrogate,
+    mut .unpairedSurrogate: mut UList[Nat] -> unpairedSurrogate,
     mut .line: mut Count[Nat] -> line,
     mut .col: mut Count[Nat] -> col,
     }}
@@ -171,7 +171,7 @@ _LexerModeMatch[R:**]: {
   mut .value: R,
   mut .string: R,
   mut .stringEscape: R,
-  mut .unicodeEscape(buffer: mut List[Str]): R,
+  mut .unicodeEscape(buffer: mut UList[Str]): R,
   mut .digits: R,
   }
 _LexerModes: {
@@ -179,7 +179,7 @@ _LexerModes: {
   .string: mut _LexerMode -> {m -> m.string},
   .stringEscape: mut _LexerMode -> {m -> m.stringEscape},
   .unicodeEscape: mut _LexerMode -> Block#
-    .let[mut List[Str]] buffer = {List.withCapacity(4)}
+    .let[mut UList[Str]] buffer = {UList.withCapacity(4)}
     .return {{m -> m.unicodeEscape(buffer)}},
   .digits: mut _LexerMode -> {m -> m.digits},
   }
