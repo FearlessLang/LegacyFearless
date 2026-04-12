@@ -41,9 +41,9 @@ AtomiseStr: {
   /// that make up one valid unicode codepoint. This is useful for tokenising unicode strings where you do not want
   /// joining characters to be significant.
   #(raw: Str): mut Flow[Str] -> raw.utf8.flow
-    .actor[mut List[Byte], Str](List#, {downstream, buffer, byte -> Block#
+    .actor[mut UList[Byte], Str](UList#, {downstream, buffer, byte -> Block#
       .do {buffer.add(byte)}
-      .return {UTF8.fromBytes(buffer).run{
+      .return {UTF8.fromBytes(buffer.list).run{
         .ok(str) -> Block#(buffer.clear, downstream#str, {}),
         .info(_) -> {},
         }}

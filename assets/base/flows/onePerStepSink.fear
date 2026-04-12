@@ -1,7 +1,7 @@
 package base.flows
 
 _OnePerStepSinks: _SinkDecorator{#[E:*](sink: mut _Sink[E]): mut _Sink[E] -> Block#
-  .let buffer = {List#[mut _OnePerStepElement[E]]}
+  .let buffer = {UList#[mut _OnePerStepElement[E]]}
   .return {mut _OnePerStepSink[E:*]: _Sink[E]{
     #(e) -> buffer.add{m -> m.element(e)},
     .stopDown -> buffer.add{m -> m.stop},

@@ -1,5 +1,5 @@
 package base.iter
-alias base.LList as LList, alias base.List as List,
+alias base.LList as LList, alias base.List as List, alias base.UList as UList,
 alias base.Opts as Opts, alias base.Opt as Opt, alias base.OptMap as OptMap, alias base.OptMatch as OptMatch,
 alias base.Void as Void,
 alias base.Bool as Bool, alias base.True as True, alias base.False as False,

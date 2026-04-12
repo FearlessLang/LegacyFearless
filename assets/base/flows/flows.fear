@@ -121,7 +121,7 @@ _TerminalOps[E:*]: Sealed{
     .isEmpty,
   mut .for(f: read F[E, Void]): Void -> this.fold({Void}, {_, e -> f#e}),
   mut .forEffect(f: mut MF[E, Void]): Void -> this.list.iter.for{e -> f#e},
-  mut .list: mut List[E] -> this.fold({List#[E]}, {acc, e -> acc + e}),
+  mut .list: mut List[E] -> this.fold({UList#[E]}, {acc, e -> acc + e}).list,
   mut .max(compare: read F[E, E, Ordering]): mut Opt[E] -> this.fold[mut Opt[E]]({{}}, {max, b -> max.match{
     .empty -> Opts#b,
     .some(a) -> compare#(a, b).match{
@@ -162,6 +162,7 @@ EmptyFlow[E:*]: Flow[E]{//TODO: why the types are repeated?
   .any(p) -> False,
   .all(p) -> False,
   .fold(acc, _) -> acc#,
+  .list -> List#,
   .assumeFinite -> this,
   .size -> Opts#0,
   .count -> 0,

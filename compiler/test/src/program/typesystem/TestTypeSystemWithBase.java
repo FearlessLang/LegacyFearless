@@ -255,13 +255,13 @@ public class TestTypeSystemWithBase {
       }
     """, Base.mutBaseAliases); }
   @Test void unsoundHygienicList() { fail("""
-    In position [###]/Dummy0.fear:9:43
+    In position [###]/Dummy0.fear:9:44
     [E66 invalidMethodArgumentTypes]
-    Method #/2 called in position [###]/Dummy0.fear:9:43 cannot be called with current parameters of types:
-    [iso base.List[read test.Person[]] (base.Collection/0, base.Sealed/0), mut test.Person[] ()]
+    Method #/2 called in position [###]/Dummy0.fear:9:44 cannot be called with current parameters of types:
+    [iso base.UList[read test.Person[]] (base.Collection/0, base.Sealed/0), mut test.Person[] ()]
     Attempted signatures:
-    (iso base.List[read test.Person[]], imm test.Person[]):iso base.List[read test.Person[]] kind: IsoHProm
-    (iso base.List[read test.Person[]], imm test.Person[]):iso base.List[read test.Person[]] kind: IsoProm
+    (iso base.UList[read test.Person[]], imm test.Person[]):iso base.UList[read test.Person[]] kind: IsoHProm
+    (iso base.UList[read test.Person[]], imm test.Person[]):iso base.UList[read test.Person[]] kind: IsoProm
     """, """
     package test
     Person:{ read .age: Nat, mut .age(n: Nat): Void }
@@ -271,14 +271,14 @@ public class TestTypeSystemWithBase {
       }
     Test:Main{ s -> Block#
       .let[mut Person] p = { FPerson#24 }
-      .let[imm List[read Person]] unsound = { A#(iso List#[read Person], p) }
+      .let[imm UList[read Person]] unsound = { A#(iso UList#[read Person], p) }
       .let[imm Person] uhOh = { unsound.get(0) }
       .do{ p.age(25) }
       .assert({ uhOh.age == 24 }, uhOh.age.str)
       .return{{}}
       }
     A:{
-      #(l: mut List[read Person], p: read Person): mut List[read Person] -> Block#(l.add(p), l),
+      #(l: mut UList[read Person], p: read Person): mut UList[read Person] -> Block#(l.add(p), l),
       }
     """, Base.mutBaseAliases); }
   @Test void unsoundHygienicLList() { fail("""

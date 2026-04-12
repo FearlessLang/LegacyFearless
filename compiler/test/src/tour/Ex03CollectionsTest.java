@@ -318,7 +318,7 @@ Many maps are on Str or Int types
   @Test void subList() {ok(new Res("21 vs. 5", "", 0), """
     package test
     Test:Main {sys -> Block#
-      .let[mut List[Nat]] l = {List#[Nat](1, 2, 3, 4) + 5 + 6}
+      .let[List[Nat]] l = {List.consumeUList(UList#[Nat](1, 2, 3, 4) + 5 + 6)}
       .let sum1 = {l.flow#(Flow.uSum)}
       .let sub = {ListViews.subList(l, 1, 3)}
       .let sum2 = {sub.flow#(Flow.uSum)}
@@ -329,9 +329,9 @@ Many maps are on Str or Int types
   @Test void mappedList() {ok(new Res("21 vs. 8", "", 0), """
     package test
     Test:Main {sys -> Block#
-      .let[mut List[Nat]] l = {List#[Nat](1, 2, 3, 4) + 5 + 6}
+      .let[List[Nat]] l = {List.consumeUList(UList#[Nat](1, 2, 3, 4) + 5 + 6)}
       .let sum1 = {l.flow#(Flow.uSum)}
-      .let sub = {ListViews.indexMap(l, List#[Nat] + 0 + 0 + 1 + 1 + 0 + 0)}
+      .let sub = {ListViews.indexMap(l, List.consumeUList(UList#[Nat] + 0 + 0 + 1 + 1 + 0 + 0))}
       .let sum2 = {sub.flow#(Flow.uSum)}
       .return {sys.io.println(sum1.str + " vs. "+ (sum2.str))}
       }
@@ -340,7 +340,7 @@ Many maps are on Str or Int types
   @Test void offsetLookup() {ok(new Res(), """
     package test
     Test:Main {sys -> Block#
-      .let[mut List[Nat]] l = {List#[Nat](1, 2, 3, 4)}
+      .let[List[Nat]] l = {List#[Nat](1, 2, 3, 4)}
       .let[Nat] a = {l.get(5 .offset -2)}
       .let[Nat] b = {l.get(1 .offset +1)}
       .do {4 .assertEq(a)}

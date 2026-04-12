@@ -36,12 +36,12 @@ _ValueParser: {#(collector: mut Consumer[Json], old: mut _ParserActor): mut _Par
   }}
 
 _ArrayParser: {#(collector: mut Consumer[Json], old: mut _ParserActor): mut _ParserActor -> Block#
-  .let[mut IsoPod[List[Json]]] es = {IsoPod#(List#)}
+  .let[mut IsoPod[UList[Json]]] es = {IsoPod#(UList#)}
   .let[mut Consumer[Json]] collector' = {{value -> es.mutate{es' -> es'.add(value)}!}}
   .return {{'parser
     downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
       .mode -> "array", .token -> token,
-      .cs -> Block#(collector#(Jsons.array(es!)), behaviour.set(old), ActorRes.continue),
+      .cs -> Block#(collector#(Jsons.array(List.consumeUList[Json](es!))), behaviour.set(old), ActorRes.continue),
       .default(_) -> _ValueParser
         #(collector', _ArrayCommaParser#(collector', parser))
         #(downstream, behaviour, token),

@@ -344,7 +344,7 @@ public class JavaSingleCodegen implements MIRVisitor<String> {
   @Override public String visitUpdatableListAsIdFnCall(MIR.UpdatableListAsIdFnCall call, boolean checkMagic) {
     var recv = call.e().recv().accept(this, checkMagic);
     var f = call.e().args().getFirst().accept(this, checkMagic);
-    return "rt.ListK.asShallowClone(%s, %s)".formatted(recv, f);
+    return "rt.UListK.asShallowClone(%s, %s)".formatted(recv, f);
   }
 
   private String inlineBlock(MIR.Block block) {

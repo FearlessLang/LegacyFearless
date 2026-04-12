@@ -10,4 +10,5 @@
       <excludeFolder url="file://$MODULE_DIR$/examples/mutBase/simple/out" />
     </content>
   </component>
+  <component name="Go" enabled="true" />
 </module>

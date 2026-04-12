@@ -103,6 +103,7 @@ LList[E:*]:Collection,Sealed{
   read .size: Nat -> 0,
 
   mut .list: mut List[E] -> List.fromLList[E](this),
+  mut .uList: mut UList[E] -> UList.fromLList[E](this),
 
   mut .pushFront(e: E): mut LList[E] -> Let#{
     .var -> this.size + 1,
@@ -175,28 +176,29 @@ LListMatchRead[E:*,R:*]: {
   mut .empty: R,
   }
 
-List: Sealed{
-  #[E:*]: mut List[E] -> Magic!,
-  #[E:*](e1: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E, e14: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E, e14: E, e15: E): mut List[E] -> Magic!,
-  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E, e14: E, e15: E, e16: E): mut List[E] -> Magic!,
-  .fromLList[E:*](list: mut LList[E]): mut List[E] -> Magic!,
-  .withCapacity[E:*](capacity: Nat): mut List[E] -> Magic!,
+UList: Sealed{
+  #[E:*]: mut UList[E] -> Magic!,
+  #[E:*](e1: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E, e14: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E, e14: E, e15: E): mut UList[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E, e14: E, e15: E, e16: E): mut UList[E] -> Magic!,
+  .fromLList[E:*](list: mut LList[E]): mut UList[E] -> Magic!,
+  .withCapacity[E:*](capacity: Nat): mut UList[E] -> Magic!,
+//  .join[E:*]: base.flows.Joinable[E, mut UList[E]] ->
   }
-List[E:*]: Collection,Sealed{
+UList[E:*]: Collection,Sealed{
   mut  .get(i: Nat): E,
   read .get(i: Nat): read/imm E,
   imm  .get(i: Nat): imm E,
@@ -206,13 +208,13 @@ List[E:*]: Collection,Sealed{
   imm  .tryGet(i: Nat): mut Opt[imm E],
 
   mut .add(e: E): Void,
-  mut +(e: E): mut List[E] -> Block#(this.add(e), this),
-  mut .addAll(other: mut List[E]): Void -> other.iter.for{e -> this.add(e)},
+  mut +(e: E): mut UList[E] -> Block#(this.add(e), this),
+  mut .addAll(other: mut UList[E]): Void -> other.iter.for{e -> this.add(e)},
 
   mut .takeFirst: mut Opt[E],
 
-  read .as[R:imm](f: mut MF[read/imm E, R]): List[R] -> Block#
-    .let[mut IsoPod[List[R]]] res = {IsoPod#(List.withCapacity(this.size))}
+  read .as[R:imm](f: mut MF[read/imm E, R]): UList[R] -> Block#
+    .let[mut IsoPod[UList[R]]] res = {IsoPod#(UList.withCapacity(this.size))}
     .do {this.iter
       .map{e -> f#e}
       .for{e -> res.mutate{l -> l.add(e)}!}
@@ -221,25 +223,9 @@ List[E:*]: Collection,Sealed{
 
   mut .clear: Void,
 
-// TODO: disabled until I fix .with
-//  mut  ==(eq: read F[E, E, Bool], other: mut List[E]): Bool ->
-//    this.size == (other.size)
-//    && {this.flow
-//      .with(other.flow)
-//      .all{ab -> eq#(ab.a, ab.b)}
-//      },
-//  read ==(eq: read F[read/imm E, read/imm E, Bool], other: read List[E]): Bool ->
-//    this.size == (other.size)
-//    && {this.flow
-//      .with(other.flow)
-//      .all{ab -> eq#(ab.a, ab.b)}
-//      },
-//  imm  ==(eq: F[imm E, imm E, Bool], other: List[E]): Bool ->
-//    this.size == (other.size)
-//    && {this.flow
-//      .with(other.flow)
-//      .all{ab -> eq#(ab.a, ab.b)}
-//      },
+  imm  .list: imm  List[E],
+  read .list: read List[E],
+  mut  .list: mut  List[E],
 
   mut .flow: mut Flow[E] -> Block#
     .let[mut Count[Nat]] cursor = {Count.nat(0)}
@@ -342,6 +328,163 @@ List[E:*]: Collection,Sealed{
     .var -> Count.nat(0),
     .in(cursor) -> { .next -> this.tryGet(cursor.update{c -> c + 1}) }
     },
+  read .subList(from: Nat, to: Nat): read ListView[E],
+  }
+
+List: Sealed{
+  #[E:*]: mut List[E] -> Magic!,
+  #[E:*](e1: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E, e14: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E, e14: E, e15: E): mut List[E] -> Magic!,
+  #[E:*](e1: E, e2: E, e3: E, e4: E, e5: E, e6: E, e7: E, e8: E, e9: E, e10: E, e11: E, e12: E, e13: E, e14: E, e15: E, e16: E): mut List[E] -> Magic!,
+  .fromLList[E:*](list: mut LList[E]): mut List[E] -> Magic!,
+  .consumeUList[E:*](list: iso UList[E]): mut List[E] -> Magic!,
+  }
+List[E:*]: Collection,Sealed{
+  mut  .get(i: Nat): E,
+  read .get(i: Nat): read/imm E,
+  imm  .get(i: Nat): imm E,
+
+  mut  .tryGet(i: Nat): mut Opt[E],
+  read .tryGet(i: Nat): mut Opt[read/imm E],
+  imm  .tryGet(i: Nat): mut Opt[imm E],
+
+  read .as[R:imm](f: mut MF[read/imm E, R]): List[R] -> Block#
+    .let[mut IsoPod[UList[R]]] res = {IsoPod#(UList.withCapacity(this.size))}
+    .do {this.iter
+      .map{e -> f#e}
+      .for{e -> res.mutate{l -> l.add(e)}!}
+      }
+    .return {List.consumeUList[R](res!)},
+
+  mut  .uList: mut UList[E],
+  read .uList: mut UList[read/imm E],
+  imm  .uList: mut UList[imm E],
+
+  mut .flow: mut Flow[E] -> Flow.fromOp(this._flowmut(0, this.size), this.size),
+  mut ._flowmut(start: Nat, end: Nat): mut FlowOp[E] -> Block#
+    .let[mut Count[Nat]] cursor = {Count.nat(start)}
+    .let[mut Count[Nat]] endCursor = {Count.nat(end)}
+    .return {{'self
+      .isRunning -> cursor.get < (endCursor.get),
+      .stopUp -> cursor := (endCursor.get),
+      .step(downstream) -> Block#
+        .let[Nat] cursor' = {cursor.get}
+        .if {self.isRunning.not} .return{downstream.stopDown}
+        .do {downstream#(this.get(cursor'))}
+        .do {cursor++}
+        .if {self.isRunning.not} .return{downstream.stopDown}
+        .return {{}},
+      .for(downstream) -> Block#[Void]
+        .loop {Block#
+          .let[Nat] cursor' = {cursor.get}
+          .if {self.isRunning.not} .return {Block#(downstream.stopDown, ControlFlow.break)}
+          .do {downstream#(this.get(cursor'))}
+          .do {cursor++}
+          .if {self.isRunning.not} .return {Block#(downstream.stopDown, ControlFlow.break)}
+          .return {ControlFlow.continue}
+          }.return {{}},
+      .split -> self.canSplit ? {
+        .else -> {},
+        .then -> Block#
+          .let cur = {cursor.get}
+          .let[Nat] mid = {cur + ((endCursor.get - cur) / 2)}
+          .let[Nat] end' = {endCursor.swap(mid)}
+          .return {Opts#(this._flowmut(mid, end'))},
+        },
+      .canSplit -> endCursor.get - (cursor.get) > 1,
+      }},
+  read .flow: mut Flow[read/imm E] -> Flow.fromOp(this._flowread(0, this.size), this.size),
+  read ._flowread(start: Nat, end: Nat): mut FlowOp[read/imm E] -> Block#
+    .let[mut Count[Nat]] cursor = {Count.nat(start)}
+    .let[mut Count[Nat]] endCursor = {Count.nat(end)}
+    .return {{'self
+      .isRunning -> cursor.get < (endCursor.get),
+      .stopUp -> cursor := (endCursor.get),
+      .step(downstream) -> Block#
+        .let[Nat] cursor' = {cursor.get}
+        .if {self.isRunning.not} .return{downstream.stopDown}
+        .do {downstream#(this.get(cursor'))}
+        .do {cursor++}
+        .if {self.isRunning.not} .return{downstream.stopDown}
+        .return {{}},
+      .for(downstream) -> Block#[Void]
+        .loop {Block#
+          .let[Nat] cursor' = {cursor.get}
+          .if {self.isRunning.not} .return {Block#(downstream.stopDown, ControlFlow.break)}
+          .do {downstream#(this.get(cursor'))}
+          .do {cursor++}
+          .if {self.isRunning.not} .return {Block#(downstream.stopDown, ControlFlow.break)}
+          .return {ControlFlow.continue}
+          }.return {{}},
+      .split -> self.canSplit ? {
+        .else -> {},
+        .then -> Block#
+          .let cur = {cursor.get}
+          .let[Nat] mid = {cur + ((endCursor.get - cur) / 2)}
+          .let[Nat] end' = {endCursor.swap(mid)}
+          .return {Opts#(this._flowread(mid, end'))},
+        },
+      .canSplit -> endCursor.get - (cursor.get) > 1,
+      }},
+  imm .flow: mut Flow[imm E] -> Flow.fromOp(this._flowimm(0, this.size), this.size),
+  imm ._flowimm(start: Nat, end: Nat): mut FlowOp[imm E] -> Block#
+    .let[mut Count[Nat]] cursor = {Count.nat(start)}
+    .let[mut Count[Nat]] endCursor = {Count.nat(end)}
+    .return {{'self
+      .isRunning -> cursor.get < (endCursor.get),
+      .stopUp -> cursor := (endCursor.get),
+      .step(downstream) -> Block#
+        .let[Nat] cursor' = {cursor.get}
+        .if {self.isRunning.not} .return{downstream.stopDown}
+        .do {downstream#(this.get(cursor'))}
+        .do {cursor++}
+        .if {self.isRunning.not} .return{downstream.stopDown}
+        .return {{}},
+      .for(downstream) -> Block#[Void]
+        .loop {Block#
+          .let[Nat] cursor' = {cursor.get}
+          .if {self.isRunning.not} .return {Block#(downstream.stopDown, ControlFlow.break)}
+          .do {downstream#(this.get(cursor'))}
+          .do {cursor++}
+          .if {self.isRunning.not} .return {Block#(downstream.stopDown, ControlFlow.break)}
+          .return {ControlFlow.continue}
+          }.return {{}},
+      .split -> self.canSplit ? {
+        .else -> {},
+        .then -> Block#
+          .let cur = {cursor.get}
+          .let[Nat] mid = {cur + ((endCursor.get - cur) / 2)}
+          .let[Nat] end' = {endCursor.swap(mid)}
+          .return {Opts#(this._flowimm(mid, end'))},
+        },
+      .canSplit -> endCursor.get - (cursor.get) > 1,
+      }},
+
+  mut .iter: mut Iter[E] -> Let#{
+    .var -> Count.nat(0),
+    .in(cursor) -> { .next -> this.tryGet(cursor.update{c -> c + 1}) }
+    },
+  read .iter: mut Iter[read/imm E] -> Let#{
+    .var -> Count.nat(0),
+    .in(cursor) -> { .next -> this.tryGet(cursor.update{c -> c + 1}) }
+    },
+  imm .iter: mut Iter[imm E] -> Let#{
+    .var -> Count.nat(0),
+    .in(cursor) -> { .next -> this.tryGet(cursor.update{c -> c + 1}) }
+    },
   read .subList(from: Nat, to: Nat): read ListView[E] -> ListViews.subList[E](this, from, to),
   }
 
@@ -362,6 +505,7 @@ ListViews: {
     .get(i) -> list.get(i),
     read .tryGet(i: Nat): mut Opt[read/imm E] -> list.tryGet(i),
     imm  .tryGet(i: Nat): mut Opt[imm E] -> list.tryGet(i),
+    .uList -> list.uList,
     },
 
   .subList[E:*](list: read List[E], from: Nat, to: Nat): read ListView[E] -> Block#
@@ -395,6 +539,8 @@ ListViews: {
         .then -> list.tryGet(from + i),
         .else -> {}
         },
+      read .uList: mut UList[read/imm E] -> Todo!,
+      imm  .uList: mut UList[imm E] -> Todo!,
       }},
 
   .indexMap[E:*](list: read List[E], mappings: List[Nat]): read ListView[E] -> Block#
@@ -411,5 +557,7 @@ ListViews: {
       .get(i) -> list.get(mappings.get(i)),
       read .tryGet(i: Nat): mut Opt[read/imm E] -> mappings.tryGet(i).flatMap{i' -> list.tryGet(i')},
       imm  .tryGet(i: Nat): mut Opt[imm E] -> mappings.tryGet(i).flatMap{i' -> list.tryGet(i')},
+      read .uList: mut UList[read/imm E] -> Todo!,
+      imm  .uList: mut UList[imm E] -> Todo!,
       }},
   }

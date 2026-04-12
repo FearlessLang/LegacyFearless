@@ -105,7 +105,7 @@ public class TestFlowSemantics {
   @Test void throwMultipleActorFromDP() {ok(new Res("", "Program crashed with: \"5\"[###]", 1), """
     package test
     Test: Main{sys -> Block#
-      .let[List[Nat]] list = {List.withCapacity(10) + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10}
+      .let[List[Nat]] list = {List.consumeUList(UList.withCapacity(10) + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10)}
       .let x = {list.flow
         .actor[Void,Nat](iso Void,{next,_,x->Block#
           .if {x.nat == 5} .do {Error.msg (x.str)}

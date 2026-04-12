@@ -510,6 +510,10 @@ public record JavaMagicImpls(
     return ()->Optional.of("rt.ListK.$self");
   }
 
+  @Override public MagicTrait<MIR.E, String> uListK(MIR.E e) {
+    return ()->Optional.of("rt.UListK.$self");
+  }
+
   @Override public MagicTrait<MIR.E, String> mapK(MIR.E e) {
     return new MagicTrait<>() {
       @Override public Optional<String> instantiate() {return Optional.empty();}
@@ -546,7 +550,7 @@ public record JavaMagicImpls(
       if (isMagic(Magic.FlowK, call.recv())) {
         if (m.name().equals("#") || m.name().equals(".ofIso")) {
           var listKCall = new MIR.MCall(
-            new MIR.CreateObj(Mdf.imm, Magic.ListK),
+            new MIR.CreateObj(Mdf.imm, Magic.FListK),
             new Id.MethName(Optional.of(Mdf.imm), "#", call.args().size()),
             call.args(),
             new MIR.MT.Plain(Mdf.mut, Magic.FList),
@@ -580,7 +584,7 @@ public record JavaMagicImpls(
       }
 
       if (variants.contains(MIR.MCall.CallVariant.SafeMutSourceFlow)) {
-        if (isMagic(Magic.FList, call.recv())) {
+        if (isMagic(Magic.UList, call.recv())) {
           var newVariants = EnumSet.copyOf(variants);
           newVariants.remove(MIR.MCall.CallVariant.SafeMutSourceFlow);
           return Optional.of(gen.visitMCall(new MIR.MCall(

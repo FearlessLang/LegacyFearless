@@ -1711,10 +1711,10 @@ public class TestJavaProgram {
 
   @Test void noConcurrentModification() {ok(new Res("6", "", 0), """
     package test
-    GetList: F[mut List[Nat]]{List# + 1 + 2 + 3 + 4}
-    Elem: {read .n: Nat, mut .list: mut List[mut Elem]}
+    GetList: F[mut UList[Nat]]{UList# + 1 + 2 + 3 + 4}
+    Elem: {read .n: Nat, mut .list: mut UList[mut Elem]}
     BadMutation: {#: Nat -> Block#
-      .let[mut List[mut Elem]] l = {List#}
+      .let[mut UList[mut Elem]] l = {UList#}
       .do {l.add(mut Elem{.n -> 1, .list -> l})}
       .do {l.add(mut Elem{.n -> 2, .list -> l})}
       .do {l.add(mut Elem{.n -> 3, .list -> l})}
@@ -1728,10 +1728,10 @@ public class TestJavaProgram {
   @DisabledOnOs(OS.WINDOWS)
   @Test void concurrentModification() {ok(new Res("", "Program crashed with: Stack overflowed[###]", 1), """
     package test
-    GetList: F[mut List[Nat]]{List# + 1 + 2 + 3 + 4}
-    Elem: {read .n: Nat, mut .list: mut List[mut Elem]}
+    GetList: F[mut UList[Nat]]{UList# + 1 + 2 + 3 + 4}
+    Elem: {read .n: Nat, mut .list: mut UList[mut Elem]}
     BadMutation: {#: Nat -> Block#
-      .let[mut List[mut Elem]] l = {List#}
+      .let[mut UList[mut Elem]] l = {UList#}
       .do {l.add(mut Elem{.n -> 1, .list -> l})}
       .do {l.add(mut Elem{.n -> 2, .list -> l})}
       .do {l.add(mut Elem{.n -> 3, .list -> l})}
@@ -1745,10 +1745,10 @@ public class TestJavaProgram {
     """, Base.mutBaseAliases);}
   @Test void noConcurrentModificationFlow() {ok(new Res("6", "", 0), """
     package test
-    GetList: F[mut List[Nat]]{List# + 1 + 2 + 3 + 4}
-    Elem: {read .n: Nat, mut .list: mut List[mut Elem]}
+    GetList: F[mut UList[Nat]]{UList# + 1 + 2 + 3 + 4}
+    Elem: {read .n: Nat, mut .list: mut UList[mut Elem]}
     BadMutation: {#: Nat -> Block#
-      .let[mut List[mut Elem]] l = {List#}
+      .let[mut UList[mut Elem]] l = {UList#}
       .do {l.add(mut Elem{.n -> 1, .list -> l})}
       .do {l.add(mut Elem{.n -> 2, .list -> l})}
       .do {l.add(mut Elem{.n -> 3, .list -> l})}
@@ -1877,8 +1877,8 @@ public class TestJavaProgram {
   @Test void soundAsIdFnUList() { ok(new Res("1,2,3", "", 0), """
     package test
     Test: Main{sys -> Block#
-      .let[mut List[Nat]] l = {List#(1, 2, 3)}
-      .let[List[Nat]] l2 = {l.as{::}}
+      .let[mut UList[Nat]] l = {UList#(1, 2, 3)}
+      .let[UList[Nat]] l2 = {l.as{::}}
       .do {l.add(4)}
       .do {sys.io.println(l2.flow.map{::str}.join ",")}
       .return {{}}
@@ -1887,9 +1887,28 @@ public class TestJavaProgram {
   @Test void soundAsUList() { ok(new Res("1,2,3", "", 0), """
     package test
     Test: Main{sys -> Block#
+      .let[mut UList[Nat]] l = {UList#(1, 2, 3)}
+      .let[UList[Str]] l2 = {l.as{::str}}
+      .do {l.add(4)}
+      .do {sys.io.println(l2.flow.join ",")}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases);}
+
+  @Test void soundAsIdFnList() { ok(new Res("1,2,3", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[mut List[Nat]] l = {List#(1, 2, 3)}
+      .let[List[Nat]] l2 = {l.as{::}}
+      .do {sys.io.println(l2.flow.map{::str}.join ",")}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases);}
+  @Test void soundAsList() { ok(new Res("1,2,3", "", 0), """
+    package test
+    Test: Main{sys -> Block#
       .let[mut List[Nat]] l = {List#(1, 2, 3)}
       .let[List[Str]] l2 = {l.as{::str}}
-      .do {l.add(4)}
       .do {sys.io.println(l2.flow.join ",")}
       .return {{}}
       }
