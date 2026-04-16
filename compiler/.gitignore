@@ -1,5 +1,7 @@
 compiler/GeneratedFearless/
 
+.zig-cache
+
 lib/
 .attach_*
 .jqwik-database

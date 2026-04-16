@@ -328,7 +328,6 @@ UList[E:*]: Collection,Sealed{
     .var -> Count.nat(0),
     .in(cursor) -> { .next -> this.tryGet(cursor.update{c -> c + 1}) }
     },
-  read .subList(from: Nat, to: Nat): read ListView[E],
   }
 
 List: Sealed{

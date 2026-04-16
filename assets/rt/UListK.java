@@ -334,12 +334,6 @@ public interface UListK extends base.UList_0 {
       return Void_0.$self;
     }
 
-    @Override public base.ListView_1 subList$read(long from, long to) {
-      // Share the underlying ArrayList via a read-only ListImpl wrapper.
-      var wrapped = new ListK.ListImpl<>(this.inner);
-      return base.List_1.subList$read$fun(from, to, wrapped);
-    }
-
     @Override public base.UList_1 as$read(base.MF_2 f) {
       return UList_1.as$read$fun(f, this);
     }

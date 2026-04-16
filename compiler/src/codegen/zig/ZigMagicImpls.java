@@ -72,6 +72,14 @@ public record ZigMagicImpls(
     return () -> Optional.of("rt.obj_k_singleton(&var_rt.VT_Vars)");
   }
 
+  @Override public MagicTrait<MIR.E, String> listK(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&list_rt.VT_ListFactory)");
+  }
+
+  @Override public MagicTrait<MIR.E, String> uListK(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&list_rt.VT_UListFactory)");
+  }
+
   @Override public MagicTrait<MIR.E, String> float_(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> byte_(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> asciiStr(MIR.E e) { return EMPTY; }
