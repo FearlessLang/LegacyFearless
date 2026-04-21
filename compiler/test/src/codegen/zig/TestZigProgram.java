@@ -100,4 +100,14 @@ public class TestZigProgram {
     MutThingy:{ mut .n: mut Count[Int], read .rn: read Count[Int] }
     MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { .n -> n, .rn -> n } }
     """, Base.mutBaseAliases); }
+
+  @Test void flowMap() { okBase(new Res("300", "", 0), """
+    package test
+    Test:Main {sys -> UnrestrictedIO#sys.println(
+      Flow#[Int](+5, +10, +15)
+        .map{n -> n * +10}
+        #(Flow.sum)
+        .str
+      )}
+    """, Base.mutBaseAliases); }
 }

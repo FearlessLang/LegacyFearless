@@ -65,6 +65,7 @@ class ZigProgramBuilder {
       sb.append("const sys_rt = root.sys_rt;\n");
       sb.append("const list_rt = root.list_rt;\n");
       sb.append("const isopod_rt = root.isopod_rt;\n");
+      sb.append("const flow_rt = root.flow_rt;\n");
       sb.append("const heartbeat = root.heartbeat;\n");
       sb.append("const shadow_stack_mod = root.shadow_stack_mod;\n");
       sb.append("const worker_mod = root.worker_mod;\n");
@@ -116,6 +117,7 @@ class ZigProgramBuilder {
     sb.append("pub const sys_rt = @import(\"runtime/intrinsics/sys.zig\");\n");
     sb.append("pub const list_rt = @import(\"runtime/intrinsics/list.zig\");\n");
     sb.append("pub const isopod_rt = @import(\"runtime/intrinsics/isopod.zig\");\n");
+    sb.append("pub const flow_rt = @import(\"runtime/intrinsics/flow.zig\");\n");
     sb.append("pub const shadow_stack_mod = @import(\"runtime/shadow_stack.zig\");\n");
     sb.append("pub const worker_mod = @import(\"runtime/worker.zig\");\n");
     sb.append("pub const JoinObligation = @import(\"runtime/sync/join_obligation.zig\").JoinObligation;\n");
