@@ -3,6 +3,7 @@ package codegen.zig;
 import codegen.MIR;
 import failure.Fail;
 import id.Id;
+import id.Mdf;
 import magic.FearlessStringHandler;
 import magic.MagicTrait;
 import visitors.MIRVisitor;
@@ -85,7 +86,17 @@ public record ZigMagicImpls(
   @Override public MagicTrait<MIR.E, String> asciiStr(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> debug(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> refK(MIR.E e) { return EMPTY; }
-  @Override public MagicTrait<MIR.E, String> isoPodK(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> isoPodK(MIR.E e) {
+    return new MagicTrait<>() {
+      @Override public Optional<String> instantiate() { return Optional.empty(); }
+      @Override public Optional<String> call(Id.MethName m, List<? extends MIR.E> args, EnumSet<MIR.MCall.CallVariant> variants, MIR.MT expectedT) {
+        if (m.equals(new Id.MethName(Optional.of(Mdf.imm), "#", 1))) {
+          return Optional.of("isopod_rt.make(" + args.getFirst().accept(gen, true) + ")");
+        }
+        return Optional.empty();
+      }
+    };
+  }
   @Override public MagicTrait<MIR.E, String> assert_(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> cheapHash(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> regexK(MIR.E e) { return EMPTY; }

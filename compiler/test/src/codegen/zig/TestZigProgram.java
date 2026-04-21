@@ -47,4 +47,57 @@ public class TestZigProgram {
       // prints 350,350,350,140,140,140
     }
     """, Base.mutBaseAliases);}
+
+  @Test void isoPod1() { okBase(new Res("", "", 0), """
+    package test
+    Test:Main{ _ -> Block#
+      .let[mut IsoPod[MutThingy]] a = { IsoPod#[MutThingy](MutThingy'#(Count.int(+0))) }
+      .return{ Assert!(Usage#(a!) == +0) }
+      }
+    Usage:{ #(m: iso MutThingy): Int -> (m.n*) }
+    MutThingy:{ mut .n: mut Count[Int] }
+    MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { n }  }
+    """, Base.mutBaseAliases); }
+  @Test void isoPod1Consume() { okBase(new Res("", "", 0), """
+    package test
+    Test:Main{ _ -> Block#
+      .let[mut IsoPod[MutThingy]] a = { IsoPod#[MutThingy](MutThingy'#(Count.int(+0))) }
+      .return{ Assert!(a.consume{.some(n) -> Usage#n, .empty -> +500} == +0) }
+      }
+    Usage:{ #(m: iso MutThingy): Int -> (m.n*) }
+    MutThingy:{ mut .n: mut Count[Int] }
+    MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { n }  }
+    """, Base.mutBaseAliases); }
+  @Test void isoPod2() { okBase(new Res("", "", 0), """
+    package test
+    Test:Main{ _ -> Block#
+      .let[mut IsoPod[MutThingy]] a = { IsoPod#[MutThingy](MutThingy'#(Count.int(+0))) }
+      .do{ a.next(MutThingy'#(Count.int(+5))) }
+      .return{ Assert!(Usage#(a!) == +5) }
+      }
+    Usage:{ #(m: iso MutThingy): Int -> (m.n*) }
+    MutThingy:{ mut .n: mut Count[Int] }
+    MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { n }  }
+    """, Base.mutBaseAliases); }
+  @Test void isoPod3() { okBase(new Res("", "", 0), """
+    package test
+    Test:Main{ _ -> Block#
+      .let[mut IsoPod[MutThingy]] a = { IsoPod#[MutThingy](MutThingy'#(Count.int(+0))) }
+      .do{ Block#(a.mutate{ mt -> Block#(mt.n++) }!) }
+      .return{ Assert!(Usage#(a!) == +1) }
+      }
+    Usage:{ #(m: iso MutThingy): Int -> (m.n*) }
+    MutThingy:{ mut .n: mut Count[Int] }
+    MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { n }  }
+    """, Base.mutBaseAliases); }
+  @Test void isoPodNoImmFromPeekOk() { okBase(new Res("", "", 0), """
+    package test
+    Test:Main{ _ -> Block#
+      .let[mut IsoPod[MutThingy]] a = { IsoPod#[MutThingy](MutThingy'#(Count.int(+0))) }
+      .let[Int] ok = { a.peek[Int]{ .some(m) -> m.rn*.int + +0, .empty -> base.Abort! } }
+      .return{Void}
+      }
+    MutThingy:{ mut .n: mut Count[Int], read .rn: read Count[Int] }
+    MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { .n -> n, .rn -> n } }
+    """, Base.mutBaseAliases); }
 }
