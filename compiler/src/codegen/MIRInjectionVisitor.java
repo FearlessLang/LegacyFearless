@@ -306,6 +306,11 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
       return EnumSet.of(MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
     }
 
+    // The internal implementation of FeartDriver's .merge method is always parallelisable
+    if (recvIT.name().equals(Magic.FeartDriver) && e.name().equals(new Id.MethName(".merge", 3))) {
+      return EnumSet.of(MIR.MCall.CallVariant.VPFParallelisable);
+    }
+
     var tst = this.resolvedCalls.get(e.callId());
     if (tst != null && tst.vpfMode() == VPFCallMode.Parallel) {
       return EnumSet.of(MIR.MCall.CallVariant.VPFParallelisable);

@@ -1,0 +1,190 @@
+package base.flows
+
+/// This private & sealed type is for interoperability with the FeaRT runtime for Fearless.
+/// With FeaRT, flows are implemented magically in the Fearless runtime for performance reasons and
+/// to enable automatic parallelisation. We use VPF to implement the automatic parallelisation, unlike the
+/// Java backend where we had custom strategies distinct from VPF. The way it works is that we rely on the
+/// `.merge/3` method being called as a VPF method call so our `.driveReduce`, `.driveCollect`, etc. methods
+/// can be VPF parallelised. We have a special case in Mearless to allow VPF to trigger for `.merge/3` despite
+/// the fact that the method call could introduce user observable effects if not handled correctly.
+///
+/// The FeaRT code that implements this type is in `runtime/flows/driver.zig` and delegates to the generated
+/// Fearless code written here except for the magic methods.
+/// Magic methods that depend on runtime state are still marked as `mut` to abide by the Fearless type system's rules.
+_FeartDriver: Sealed{
+  /// This method is functionally the same as the `.fold` method on the public API allowing for arbitrary
+  /// folding of a split flow.
+  mut .driveReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read F[A,E,A]): A -> flow.split.match{
+    .some(pair) -> this.shouldStop ? {
+      .then -> initial,
+      .else -> _FeartDriver.merge[E,A](
+        this.driveReduce[E,A](pair.a, initial, combine),
+        this.driveReduce[E,A](pair.b, initial, combine),
+        combine
+        ),
+      },
+    .empty -> this.runChunkReduce[E,A](flow, initial, combine),
+    },
+
+  /// This method is a bit smarter than `.driveReduce` because we know the implementation of the list
+  /// data structure and can make optimisations that would not be safe with an arbitrary user-defined folding function.
+  mut .driveCollect[E:*](flow: mut Flow[E]): mut List[E] -> flow.split.match{
+    .some(pair) -> this.shouldStop ? {
+      .then -> List#[E],
+      .else -> _FeartDriver.merge[mut List[E], mut List[E]](
+        this.driveCollect[E](pair.a),
+        this.driveCollect[E](pair.b),
+        _FeartDriver.collectReducer[E]
+        ),
+      },
+    .empty -> this.runChunkCollect[E](flow),
+    },
+
+  mut .driveFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> flow.split.match{
+    .some(pair) -> this.shouldStop ? {
+      .then -> {},
+      .else -> _FeartDriver.merge[mut Opt[R], mut Opt[R]](
+        this.driveFindMap[E,R](pair.a, f),
+        this.driveFindMap[E,R](pair.b, f),
+        _FeartDriver.findMapReducer[R]
+        ),
+      },
+    .empty -> this.runChunkFindMap[E,R](flow, f),
+    },
+
+  mut .driveFor[E:*](flow: mut Flow[E], f: read F[E, Void]): Void -> flow.split.match{
+    .some(pair) -> this.shouldStop ? {
+      .then -> {},
+      .else -> _FeartDriver.merge[Void](
+        this.driveFor[E](pair.a, f),
+        this.driveFor[E](pair.b, f)
+        ),
+      },
+    .empty -> this.runChunkFor[E](flow, f),
+    },
+
+  mut .driveFirst[E:*](flow: mut Flow[E]): mut Opt[E] -> flow.split.match{
+    .some(pair) -> this.shouldStop ? {
+      .then -> {},
+      .else -> _FeartDriver.merge[mut Opt[E]](
+        this.driveFirst[E](pair.a),
+        this.driveFirst[E](pair.b)
+        ),
+      },
+    .empty -> this.runChunkFirst[E](flow),
+    },
+
+  /// Order-insensitive findMap. Same shape as `driveFindMap` but the leaf
+  /// (`runChunkUnorderedFindMap`) calls `scope.request()` on first match,
+  /// cancelling sibling forks. Routed via `.merge/3` with `findMapReducer`
+  /// (left-biased first-some-wins), the same VPF re-tag slot as the other
+  /// parallelisable drives.
+  mut .driveUnorderedFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> flow.split.match{
+    .some(pair) -> this.shouldStop ? {
+      .then -> {},
+      .else -> _FeartDriver.merge[mut Opt[R], mut Opt[R]](
+        this.driveUnorderedFindMap[E,R](pair.a, f),
+        this.driveUnorderedFindMap[E,R](pair.b, f),
+        _FeartDriver.findMapReducer[R]
+        ),
+      },
+    .empty -> this.runChunkUnorderedFindMap[E,R](flow, f),
+    },
+
+  /// Parallel max-by-comparator. The merger captures `compare` and reduces two
+  /// Opt[E] halves to a single Opt[E]. Factored into a named method
+  /// (`maxReducer`) instead of an inline lambda because Fearless's type
+  /// inference fails to propagate the expected `read F[Opt[E],Opt[E],Opt[E]]`
+  /// shape down through the inline `{l,r -> ...}` literal in this context.
+  /// Method form sidesteps that. Fearless can infer the lambda returned by
+  /// `maxReducer[E](compare)` cleanly because the method's return type is
+  /// declared explicitly.
+  mut .driveMax[E:*](flow: mut Flow[E], compare: read F[E, E, Ordering]): mut Opt[E] -> flow.split.match{
+    .some(pair) -> this.shouldStop ? {
+      .then -> {},
+      .else -> _FeartDriver.merge[mut Opt[E], mut Opt[E]](
+        this.driveMax[E](pair.a, compare),
+        this.driveMax[E](pair.b, compare),
+        _FeartDriver.maxReducer[E](compare)
+        ),
+      },
+    .empty -> this.runChunkMax[E](flow, compare),
+    },
+  mut .runChunkReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read F[A,E,A]): A -> Magic!,
+  mut .runChunkCollect[E:*](flow: mut Flow[E]): mut List[E] -> Magic!,
+  mut .runChunkFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> Magic!,
+  mut .runChunkFor[E:*](flow: mut Flow[E], f: read F[E, Void]): Void -> Magic!,
+  mut .runChunkFirst[E:*](flow: mut Flow[E]): mut Opt[E] -> Magic!,
+  /// Sequential leaf for `driveUnorderedFindMap`. Same shape as
+  /// `runChunkFindMap` but the Zig accept-fn calls `scope.request()` on first
+  /// match, so any sibling subtree currently running on a thief observes the
+  /// cancel at its next chunk poll and returns early.
+  mut .runChunkUnorderedFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> Magic!,
+  /// Sequential max leaf. Body delegates to `runChunkReduce` with an Opt-based
+  /// fold accumulator; it keeps Ordering-matching in Fearless and avoids a
+  /// dedicated Zig sequential driver. `runChunkReduce` takes `initial: A`
+  /// directly (the iso-MF unwrapping happens in `flow_fold`'s Zig dispatch),
+  /// so the seed is `{}` not `{{}}`.
+  mut .runChunkMax[E:*](flow: mut Flow[E], compare: read F[E, E, Ordering]): mut Opt[E] ->
+    this.runChunkReduce[E, mut Opt[E]](flow, {}, {max, b -> max.match{
+      .empty -> Opts#b,
+      .some(a) -> compare#(a, b).match{
+        .less -> Opts#b,
+        .equal -> max,
+        .greater -> max,
+        },
+      }}),
+
+  /// Builds the (Opt[E], Opt[E]) -> Opt[E] merge function used by `driveMax`.
+  /// Captures `compare` so the returned lambda can decide which Opt wins. A
+  /// named method declaration gives Fearless a concrete return type to infer
+  /// against, which inline `{l,r -> ...}` literals at the merge call site fail
+  /// to resolve.
+  .maxReducer[E:*](compare: read F[E, E, Ordering]): read F[mut Opt[E], mut Opt[E], mut Opt[E]] ->
+    {l, r -> l.match{
+      .empty -> r,
+      .some(a) -> r.match{
+        .empty -> l,
+        .some(b) -> compare#(a, b).match{
+          .less -> r,
+          .equal -> l,
+          .greater -> l,
+          },
+        },
+      }},
+
+  /// Cancellation poll. Zig body loads TLS `active_scope` and walks its
+  /// parent chain for the cancel bit (see `scope.zig::currentCancelled`).
+  /// Each `drive*`'s `.some(pair)` branch polls this before recursing so a
+  /// cancellation short-circuits the subtree without doing the split's work.
+  /// Cancel triggers are wired through `_TerminalOps`'s short-circuiting
+  /// terminals (`.any`, `.all`, `.none`) via `.unorderedFindMap`, whose
+  /// accept fn calls `scope.request()` on the first match.
+  mut .shouldStop: Bool -> Magic!,
+
+  /// Identity-on-left stub used by `.driveFor` (effects fire on both halves
+  /// regardless; merge result is meaningless Void) and `.driveFirst` (split
+  /// preserves order, left half always non-empty, so left-first = semantic-
+  /// first). The other two non-reduce drives now route through `.merge/3` with
+  /// a structural reducer (see `.collectReducer` / `.findMapReducer` below).
+  .merge[A:*](left: A, right: A): A -> left,
+
+  /// Singleton reducer for `.driveCollect`. Runtime body lives in
+  /// `driver.zig::VT_ListConcatReducer`'s `read #/2` handler: appends the
+  /// right list's items into the left list and returns left.
+  .collectReducer[E:*]: read F[mut List[E], mut List[E], mut List[E]] -> Magic!,
+
+  /// Singleton reducer for `.driveFindMap`. Runtime body lives in
+  /// `driver.zig::VT_FirstSomeReducer`'s `read #/2` handler: returns left if
+  /// left.isSome, else right (first-some-wins, left-biased).
+  .findMapReducer[R:*]: read F[mut Opt[R], mut Opt[R], mut Opt[R]] -> Magic!,
+
+  /// Real VPF combiner for .driveReduce. The MIR re-tag pass marks this MCall
+  /// site as VPFParallelisable; VPFCodegen wraps the two recursive
+  /// .driveReduce args in thief/shadow-frame infrastructure and re-emits this
+  /// call as the combiner. Body is `Magic!` because Fearless's F[A,E,A] apply
+  /// method only accepts (A,E) args, but we need to pass (A,A). The Zig
+  /// vtable does the FatPtr-level dispatch, correct whenever A=E at runtime
+  /// (sum-like left-folds). Mixed-type accumulators (A≠E) are not supported.
+  .merge[E:*,A:*](left: A, right: A, combine: read F[A,E,A]): A -> Magic!,
+  }

@@ -60,6 +60,8 @@ Flow[E:*]: Sealed, Extensible[Flow[E]], _NonTerminalOps[E], _TerminalOps[E]{
     .if {found.size > 1}
       .error {Infos.msg("Expected exactly one element, found at least " + (found.size.str))}
     .return {found.tryGet(0)},
+
+  mut .split: mut Opt[mut Pair[mut Flow[E], mut Flow[E]]] -> {}, // TODO: implement this for non FeaRT flows
   }
 _UnwrapFlowToken: {}
 
@@ -102,6 +104,11 @@ _TerminalOps[E:*]: Sealed{
   mut .first: mut Opt[E],
   mut .last: mut Opt[E] -> this.fold[mut Opt[E]]({{}}, {_, e -> Opts#e}),
   mut .findMap[R:*](f: read F[E, mut Opt[R]]): mut Opt[R],
+  /// Order-insensitive variant of `.findMap`. Parallel impls (e.g. `VT_Flow`)
+  /// can fork into halves and `scope.request()` on first match, cancelling
+  /// the sibling subtree. The default body delegates to ordered `.findMap`,
+  /// so non-parallel flow impls remain correct (sequential, no cancel).
+  mut .unorderedFindMap[R:*](f: read F[E, mut Opt[R]]): mut Opt[R] -> this.findMap(f),
   mut .fold[S:*](acc: iso MF[S], f: read F[S,E,S]): S,
   /// Get the size of the flow if it is known. This does not consume the flow.
   read .size: Opt[Nat],
@@ -111,13 +118,13 @@ _TerminalOps[E:*]: Sealed{
   mut .find(predicate: read F[E, Bool]): mut Opt[E] -> this.findMap{e -> predicate#e ? {.then -> Opts#e, .else -> {}}},
   mut .first(predicate: read F[E, Bool]): mut Opt[E] -> this.find(predicate),
   mut .any(predicate: read F[E, Bool]): Bool -> this
-    .findMap{e -> predicate#e ? {.then -> Opts#True, .else -> {}}}
+    .unorderedFindMap{e -> predicate#e ? {.then -> Opts#True, .else -> {}}}
     .isSome,
   mut .all(predicate: read F[E, Bool]): Bool -> this
-    .findMap{e -> predicate#e ? {.then -> {}, .else -> Opts#False}}
+    .unorderedFindMap{e -> predicate#e ? {.then -> {}, .else -> Opts#False}}
     .isEmpty,
   mut .none(predicate: read F[E, Bool]): Bool -> this
-    .findMap{e -> predicate#e ? {.then -> Opts#False, .else -> {}}}
+    .unorderedFindMap{e -> predicate#e ? {.then -> Opts#False, .else -> {}}}
     .isEmpty,
   mut .for(f: read F[E, Void]): Void -> this.fold({Void}, {_, e -> f#e}),
   mut .forEffect(f: mut MF[E, Void]): Void -> this.list.iter.for{e -> f#e},

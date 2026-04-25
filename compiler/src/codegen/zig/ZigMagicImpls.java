@@ -100,6 +100,9 @@ public record ZigMagicImpls(
   @Override public MagicTrait<MIR.E, String> flowK(MIR.E e) {
     return () -> Optional.of("rt.obj_k_singleton(&flow_rt.VT_FlowFactory)");
   }
+  @Override public MagicTrait<MIR.E, String> feartDriverK(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&flow_rt.VT_FeartDriver)");
+  }
   @Override public MagicTrait<MIR.E, String> flowRange(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> pipelineParallelSinkK(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> dataParallelFlowK(MIR.E e) { return EMPTY; }

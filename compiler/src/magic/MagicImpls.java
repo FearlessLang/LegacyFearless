@@ -27,6 +27,7 @@ public interface MagicImpls<R> {
     if (isMagic(Magic.FListK, e)) { return Optional.ofNullable(listK(e)); }
     if (isMagic(Magic.UListK, e)) { return Optional.ofNullable(uListK(e)); }
     if (isMagic(Magic.FlowK, e)) { return Optional.ofNullable(flowK(e)); }
+    if (isMagic(Magic.FeartDriver, e)) { return Optional.ofNullable(feartDriverK(e)); }
     if (isMagic(Magic.FlowRange, e)) { return Optional.ofNullable(flowRange(e)); }
     if (isMagic(Magic.CheapHash, e)) { return Optional.ofNullable(cheapHash(e)); }
     if (isMagic(Magic.RegexK, e)) { return Optional.ofNullable(regexK(e)); }
@@ -72,6 +73,7 @@ public interface MagicImpls<R> {
   default MagicTrait<MIR.E,R> listK(MIR.E e) { return null; }
   default MagicTrait<MIR.E,R> uListK(MIR.E e) { return null; }
   default MagicTrait<MIR.E,R> flowK(MIR.E e) { return null; }
+  default MagicTrait<MIR.E,R> feartDriverK(MIR.E e) { return null; }
   default MagicTrait<MIR.E,R> flowRange(MIR.E e) { return null; }
   default MagicTrait<MIR.E,R> pipelineParallelSinkK(MIR.E e) { return null; }
   default MagicTrait<MIR.E,R> dataParallelFlowK(MIR.E e) { return null; }

@@ -541,6 +541,10 @@ public record JavaMagicImpls(
     return ()->Optional.of("rt.flows.dataParallel.DataParallelFlowK.$self");
   }
 
+  @Override public MagicTrait<MIR.E, String> feartDriverK(MIR.E e) {
+    return () -> Optional.empty();
+  }
+
   @Override public MagicCallable<MIR.E,String> variantCall(MIR.E e) {
     return (m, args, variants, _)->{
       var call = (MIR.MCall) e;

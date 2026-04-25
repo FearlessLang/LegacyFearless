@@ -49,6 +49,7 @@ public class Magic {
   public static final Id.DecId CapTryK = new Id.DecId("base.caps.CapTrys", 0);
 
   public static final Id.DecId FlowK = new Id.DecId("base.flows.Flow", 0);
+  public static final Id.DecId FeartDriver = new Id.DecId("base.flows._FeartDriver", 0);
   public static final Id.DecId FlowOp = new Id.DecId("base.flows.FlowOp", 1);
   public static final Id.DecId FlowRange = new Id.DecId("base.flows._FlowRange", 0);
   public static final Id.DecId PipelineParallelSinkK = new Id.DecId("base.flows._PipelineParallelSink", 0);
