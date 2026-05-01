@@ -108,6 +108,13 @@ public final class DataParallelFlow implements Flow_1 {
       });
 //    return _SeqFlow_0.$self.fromOp$imm(new DataParallelSource(), size_m$).findMap$mut(f_m$);
   }
+  public Opt_1 unorderedFindMap$mut(F_2 f_m$) {
+    return this.find$mut(f_m$);
+  }
+
+  public Opt_1 split$mut() {
+    return Opt_1.$self;
+  }
 
   public FlowOp_1 unwrapOp$mut(_UnwrapFlowToken_0 fear55$_m$) {
     return source_m$;
