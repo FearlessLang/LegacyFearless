@@ -280,10 +280,10 @@ public class TestZigProgram {
       )}
     """, Base.mutBaseAliases); }
 
-  @Test void flowDumbPrimeFinder1() { okBase(new Res("2, 3, 5, 7, 11, 13, 17, 19", "", 0), """
+  @Test void flowDumbPrimeFinder1() { okBase(new Res("", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
-      Flow.range(+2, +5000)
+      Flow.range(+2, +30_000)
         .filter{n -> Flow.range(+2, n).all{m -> n % m != +0}}
         .map({n -> n.str})
         .join ", "

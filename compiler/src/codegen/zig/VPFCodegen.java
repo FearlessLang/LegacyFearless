@@ -81,6 +81,7 @@ class VPFCodegen {
       new DecId(localsName, 0),
       "const " + localsName + " = extern struct {\n" + localsFields + "};"
     );
+    emitLocalsHooks(localsName, fun.args().stream().map(a -> parent.id.varName(a.name())).toList());
 
     // 2. Emit thief function
     var remaining = frameAddingExprs.subList(1, frameAddingExprs.size());
@@ -103,12 +104,15 @@ class VPFCodegen {
 
     // heartbeat.tryPromote() — before base case check, so promotion always runs
     sb.append("heartbeat.tryPromote();\n");
+    for (var paramName : paramNames) {
+      sb.append("defer ").append(paramName).append(".rc_decrement();\n");
+    }
 
     // If there's a BoolExpr, emit the base case as an early return
     if (vpf.boolExpr != null) {
       var cond = vpf.boolExpr.condition().accept(parent, true);
       var thenFun = parent.funMap.get(vpf.boolExpr.then());
-      String thenBody = thenFun.body().accept(parent, true);
+      String thenBody = parent.returnExpr(thenFun.body(), true);
       sb.append("if (").append(cond).append(".vt == &").append(parent.vtableRef(new DecId("base.True", 0))).append(") return ").append(thenBody).append(";\n");
     }
 
@@ -155,7 +159,7 @@ class VPFCodegen {
       resultMap.put(frameAddingExprs.get(i).index, i == 0 ? "locals.r1" : "r" + (i + 1));
     }
     for (var sub : vpf.plainExprs) {
-      resultMap.put(sub.index, sub.expr.accept(parent, true));
+      resultMap.put(sub.index, parent.ownedExpr(sub.expr, true));
     }
     sb.append("return ").append(emitCombinerFromMap(vpf, resultMap)).append(";\n");
 
@@ -232,6 +236,7 @@ class VPFCodegen {
       new DecId(innerLocalsName, 0),
       "const " + innerLocalsName + " = extern struct {\n" + innerFields + "};"
     );
+    emitLocalsHooks(innerLocalsName, fun.args().stream().map(a -> parent.id.varName(a.name())).toList());
 
     // Recursively emit the inner thief
     var innerRemaining = remainingFrameAdding.subList(1, remainingFrameAdding.size());
@@ -286,6 +291,34 @@ class VPFCodegen {
 
     sb.append("}");
     parent.currentState().functions.add(sb.toString());
+  }
+
+  private void emitLocalsHooks(String localsName, List<String> fatPtrFields) {
+    var retain = new StringBuilder();
+    retain.append("fn ").append(localsName).append("_retain(locals_ptr: *anyopaque) void {\n");
+    retain.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
+    if (fatPtrFields.isEmpty()) {
+      retain.append("_ = locals;\n");
+    } else {
+      for (var field : fatPtrFields) {
+        retain.append("_ = locals.").append(field).append(".share();\n");
+      }
+    }
+    retain.append("}");
+    parent.currentState().functions.add(retain.toString());
+
+    var drop = new StringBuilder();
+    drop.append("fn ").append(localsName).append("_drop(locals_ptr: *anyopaque) void {\n");
+    drop.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
+    if (fatPtrFields.isEmpty()) {
+      drop.append("_ = locals;\n");
+    } else {
+      for (var field : fatPtrFields) {
+        drop.append("locals.").append(field).append(".rc_decrement();\n");
+      }
+    }
+    drop.append("}");
+    parent.currentState().functions.add(drop.toString());
   }
 
   /**
@@ -346,6 +379,8 @@ class VPFCodegen {
     sb.append("    .child_obligation = std.atomic.Value(?*JoinObligation).init(null),\n");
     sb.append("    .locals = @ptrCast(&").append(localsVar).append("),\n");
     sb.append("    .locals_size = @sizeOf(").append(localsTypeName).append("),\n");
+    sb.append("    .retain_fn = &").append(localsTypeName).append("_retain,\n");
+    sb.append("    .drop_fn = &").append(localsTypeName).append("_drop,\n");
     sb.append("    .thief_fn = &").append(thiefFnName).append(",\n");
     sb.append("});\n");
   }
@@ -398,7 +433,7 @@ class VPFCodegen {
         allArgs[sub.index] = resultMap.get(sub.index);
       } else {
         allArgs[sub.index] = (sub.expr instanceof MIR.X x)
-          ? "locals." + parent.id.varName(x.name())
+          ? "locals." + parent.id.varName(x.name()) + ".share()"
           : sub.expr.accept(parent, true);
       }
     }
@@ -440,14 +475,14 @@ class VPFCodegen {
       return delegate.visitX(x, checkMagic);
     }
     @Override public String visitMCall(MIR.MCall call, boolean checkMagic) {
-      var recv = call.recv().accept(this, checkMagic);
+      var recv = delegate.ownedExpr(call.recv(), this, checkMagic);
       var sig = new MIR.Sig(call.name(),
         call.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
         call.originalRet());
       var hashExpr = delegate.sigBuilder.inlineHash(sig);
 
       var args = call.args().stream()
-        .map(a -> a.accept(this, checkMagic))
+        .map(a -> delegate.ownedExpr(a, this, checkMagic))
         .collect(Collectors.joining(", "));
       var argsTuple = args.isEmpty() ? ".{}" : ".{ " + args + " }";
       return "rt.call(" + recv + ", " + hashExpr + ", " + argsTuple + ", @src())";
@@ -469,12 +504,12 @@ class VPFCodegen {
       return "rt.obj_k(" + delegate.capturesRef(objId) + ", &" + delegate.vtableRef(objId) + ", .{ " + captures + " })";
     }
     @Override public String visitBoolExpr(MIR.BoolExpr expr, boolean checkMagic) {
-      return delegate.visitBoolExpr(expr, checkMagic);
+      return delegate.boolExpr(expr, this, checkMagic, false);
     }
     @Override public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
       var fRef = delegate.funRef(call.fun());
       var args = call.args().stream()
-        .map(a -> a.accept(this, checkMagic))
+        .map(a -> delegate.ownedExpr(a, this, checkMagic))
         .collect(Collectors.joining(", "));
       return fRef + "(" + args + ")";
     }

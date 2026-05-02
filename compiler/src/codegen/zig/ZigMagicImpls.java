@@ -91,7 +91,7 @@ public record ZigMagicImpls(
       @Override public Optional<String> instantiate() { return Optional.empty(); }
       @Override public Optional<String> call(Id.MethName m, List<? extends MIR.E> args, EnumSet<MIR.MCall.CallVariant> variants, MIR.MT expectedT) {
         if (m.equals(new Id.MethName(Optional.of(Mdf.imm), "#", 1))) {
-          return Optional.of("isopod_rt.make(" + args.getFirst().accept(gen, true) + ")");
+          return Optional.of("isopod_rt.make(" + ownedArg(args.getFirst()) + ")");
         }
         return Optional.empty();
       }
@@ -130,5 +130,12 @@ public record ZigMagicImpls(
       }
     }
     return sb.toString();
+  }
+
+  private String ownedArg(MIR.E e) {
+    if (e instanceof MIR.X) {
+      return e.accept(gen, true) + ".share()";
+    }
+    return e.accept(gen, true);
   }
 }

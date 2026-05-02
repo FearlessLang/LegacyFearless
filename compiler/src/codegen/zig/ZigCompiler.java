@@ -187,10 +187,12 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
           const optimize = b.standardOptimizeOption(.{});
 
           const build_options = b.addOptions();
+          const track_allocs = b.option(bool, "track_allocs", "Record allocation and GC counters (default: false)") orelse false;
           build_options.addOption(bool, "log_scheduling", false);
           build_options.addOption(bool, "log_safety", %s);
           build_options.addOption(bool, "log_dispatch", false);
           build_options.addOption(bool, "log_trace", %s);
+          build_options.addOption(bool, "track_allocs", track_allocs);
 
           const exe = b.addExecutable(.{
               .name = "fearless-app",
@@ -232,6 +234,15 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
               else => {},
           }
           exe.use_llvm = true;
+
+          const exe_tests = b.addTest(.{
+              .root_module = exe.root_module,
+          });
+          exe_tests.use_llvm = true;
+
+          const test_step = b.step("test", "Run tests");
+          const run_exe_tests = b.addRunArtifact(exe_tests);
+          test_step.dependOn(&run_exe_tests.step);
 
           b.installArtifact(exe);
 

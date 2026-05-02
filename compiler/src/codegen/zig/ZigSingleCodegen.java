@@ -96,6 +96,45 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return id.getLiteral(p.p(), d).isPresent();
   }
 
+  String ownedExpr(MIR.E e, boolean checkMagic) {
+    return ownedExpr(e, this, checkMagic);
+  }
+
+  String ownedExpr(MIR.E e, MIRVisitor<String> gen, boolean checkMagic) {
+    if (e instanceof MIR.X) {
+      return e.accept(gen, checkMagic) + ".share()";
+    }
+    if (e instanceof MIR.BoolExpr b) {
+      return boolExpr(b, gen, checkMagic, true);
+    }
+    return e.accept(gen, checkMagic);
+  }
+
+  String returnExpr(MIR.E e, boolean checkMagic) {
+    if (e instanceof MIR.X) {
+      return visitX((MIR.X) e, checkMagic) + ".share()";
+    }
+    if (e instanceof MIR.BoolExpr b) {
+      return boolExpr(b, this, checkMagic, true);
+    }
+    return e.accept(this, checkMagic);
+  }
+
+  String boolExpr(MIR.BoolExpr expr, MIRVisitor<String> gen, boolean checkMagic, boolean ownedBranches) {
+    String recv = expr.condition().accept(gen, checkMagic);
+
+    String thenBody = switch (this.funMap.get(expr.then()).body()) {
+      case MIR.Block b -> inlineBlock(b, gen, ownedBranches);
+      case MIR.E e -> ownedBranches ? ownedExpr(e, gen, checkMagic) : e.accept(gen, checkMagic);
+    };
+    String elseBody = switch (this.funMap.get(expr.else_()).body()) {
+      case MIR.Block b -> inlineBlock(b, gen, ownedBranches);
+      case MIR.E e -> ownedBranches ? ownedExpr(e, gen, checkMagic) : e.accept(gen, checkMagic);
+    };
+
+    return "(if (" + recv + ".vt == &" + vtableRef(new DecId("base.True", 0)) + ") " + thenBody + " else " + elseBody + ")";
+  }
+
   public String visitTypeDef(String pkg, MIR.TypeDef def, List<MIR.Fun> funs) {
     this.pkg = pkg;
     this.emitTargetPkg = pkg;
@@ -250,10 +289,10 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
         for (var capture : meth.captures()) {
           // Captures need to be extracted from self if it's an object with captures
           if (!createObjHasCaptures(objId)) {
-            simpleArgs.add("self_m"); // no captures, pass self as placeholder
+            simpleArgs.add("self_m.share()"); // no captures, pass self as placeholder
           } else {
             simpleArgs.add(
-              "rt.deref(" + capturesRef(objId) + ", self_m)." + id.varName(capture));
+              "rt.deref(" + capturesRef(objId) + ", self_m)." + id.varName(capture) + ".share()");
           }
         }
 
@@ -339,7 +378,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       return;
     }
 
-    var body = fun.body().accept(this, true);
+    var body = returnExpr(fun.body(), true);
     var sb = new StringBuilder();
     sb.append("pub fn ").append(name).append("(").append(params).append(") rt.FatPtr {\n");
     // Discard all params to avoid unused-parameter errors
@@ -349,6 +388,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       sb.append(" };\n");
     }
     sb.append("heartbeat.tryPromote();\n");
+    for (var paramName : paramNames) {
+      sb.append("defer ").append(paramName).append(".rc_decrement();\n");
+    }
     if (body.equals("unreachable")) {
       sb.append("unreachable;\n");
     } else {
@@ -373,14 +415,14 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     }
 
     // Normal dispatch via rt.call
-    var recv = call.recv().accept(this, checkMagic);
+    var recv = ownedExpr(call.recv(), checkMagic);
     var sig = new MIR.Sig(call.name(),
       call.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
       call.originalRet());
     var hashExpr = sigBuilder.inlineHash(sig);
 
     var args = call.args().stream()
-      .map(a -> a.accept(this, checkMagic))
+      .map(a -> ownedExpr(a, checkMagic))
       .collect(Collectors.joining(", "));
 
     var argsTuple = args.isEmpty() ? ".{}" : ".{ " + args + " }";
@@ -427,22 +469,15 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   @Override
   public String visitBoolExpr(MIR.BoolExpr expr, boolean checkMagic) {
-    String recv = expr.condition().accept(this, checkMagic);
-
-    String thenBody = switch (this.funMap.get(expr.then()).body()) {
-      case MIR.Block b -> inlineBlock(b);
-      case MIR.E e -> e.accept(this, checkMagic);
-    };
-    String elseBody = switch (this.funMap.get(expr.else_()).body()) {
-      case MIR.Block b -> inlineBlock(b);
-      case MIR.E e -> e.accept(this, checkMagic);
-    };
-
-    return "(if (" + recv + ".vt == &" + vtableRef(new DecId("base.True", 0)) + ") " + thenBody + " else " + elseBody + ")";
+    return boolExpr(expr, this, checkMagic, false);
   }
 
   private String inlineBlock(MIR.Block block) {
-    return visitBlockExpr(block, true);
+    return inlineBlock(block, this, false);
+  }
+
+  private String inlineBlock(MIR.Block block, MIRVisitor<String> gen, boolean ownedBranches) {
+    return ownedBranches ? ownedExpr(block.original(), gen, true) : block.original().accept(gen, true);
   }
 
   // TODO: the block optimisation impl here is not correct, will clean up later.
@@ -507,7 +542,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
     var fRef = funRef(call.fun());
     var args = call.args().stream()
-      .map(a -> a.accept(this, checkMagic))
+      .map(a -> ownedExpr(a, checkMagic))
       .collect(Collectors.joining(", "));
     return fRef + "(" + args + ")";
   }
