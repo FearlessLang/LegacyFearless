@@ -14,82 +14,82 @@ package base.flows
 _FeartDriver: Sealed{
   /// This method is functionally the same as the `.fold` method on the public API allowing for arbitrary
   /// folding of a split flow.
-  mut .driveReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read F[A,E,A]): A -> flow.split.match{
-    .some(pair) -> this.shouldStop ? {
+  mut .driveReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read F[A,E,A]): A -> _FeartDriver.splitMatch[E,A](flow, {
+    .some(left, right) -> this.shouldStop ? {
       .then -> initial,
       .else -> _FeartDriver.merge[E,A](
-        this.driveReduce[E,A](pair.a, initial, combine),
-        this.driveReduce[E,A](pair.b, initial, combine),
+        this.driveReduce[E,A](left, initial, combine),
+        this.driveReduce[E,A](right, initial, combine),
         combine
         ),
       },
     .empty -> this.runChunkReduce[E,A](flow, initial, combine),
-    },
+    }),
 
   /// This method is a bit smarter than `.driveReduce` because we know the implementation of the list
   /// data structure and can make optimisations that would not be safe with an arbitrary user-defined folding function.
-  mut .driveCollect[E:*](flow: mut Flow[E]): mut List[E] -> flow.split.match{
-    .some(pair) -> this.shouldStop ? {
+  mut .driveCollect[E:*](flow: mut Flow[E]): mut List[E] -> _FeartDriver.splitMatch[E, mut List[E]](flow, {
+    .some(left, right) -> this.shouldStop ? {
       .then -> List#[E],
       .else -> _FeartDriver.merge[mut List[E], mut List[E]](
-        this.driveCollect[E](pair.a),
-        this.driveCollect[E](pair.b),
+        this.driveCollect[E](left),
+        this.driveCollect[E](right),
         _FeartDriver.collectReducer[E]
         ),
       },
     .empty -> this.runChunkCollect[E](flow),
-    },
+    }),
 
-  mut .driveFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> flow.split.match{
-    .some(pair) -> this.shouldStop ? {
+  mut .driveFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> _FeartDriver.splitMatch[E, mut Opt[R]](flow, {
+    .some(left, right) -> this.shouldStop ? {
       .then -> {},
       .else -> _FeartDriver.merge[mut Opt[R], mut Opt[R]](
-        this.driveFindMap[E,R](pair.a, f),
-        this.driveFindMap[E,R](pair.b, f),
+        this.driveFindMap[E,R](left, f),
+        this.driveFindMap[E,R](right, f),
         _FeartDriver.findMapReducer[R]
         ),
       },
     .empty -> this.runChunkFindMap[E,R](flow, f),
-    },
+    }),
 
-  mut .driveFor[E:*](flow: mut Flow[E], f: read F[E, Void]): Void -> flow.split.match{
-    .some(pair) -> this.shouldStop ? {
+  mut .driveFor[E:*](flow: mut Flow[E], f: read F[E, Void]): Void -> _FeartDriver.splitMatch[E, Void](flow, {
+    .some(left, right) -> this.shouldStop ? {
       .then -> {},
       .else -> _FeartDriver.merge[Void](
-        this.driveFor[E](pair.a, f),
-        this.driveFor[E](pair.b, f)
+        this.driveFor[E](left, f),
+        this.driveFor[E](right, f)
         ),
       },
     .empty -> this.runChunkFor[E](flow, f),
-    },
+    }),
 
-  mut .driveFirst[E:*](flow: mut Flow[E]): mut Opt[E] -> flow.split.match{
-    .some(pair) -> this.shouldStop ? {
+  mut .driveFirst[E:*](flow: mut Flow[E]): mut Opt[E] -> _FeartDriver.splitMatch[E, mut Opt[E]](flow, {
+    .some(left, right) -> this.shouldStop ? {
       .then -> {},
       .else -> _FeartDriver.merge[mut Opt[E]](
-        this.driveFirst[E](pair.a),
-        this.driveFirst[E](pair.b)
+        this.driveFirst[E](left),
+        this.driveFirst[E](right)
         ),
       },
     .empty -> this.runChunkFirst[E](flow),
-    },
+    }),
 
   /// Order-insensitive findMap. Same shape as `driveFindMap` but the leaf
   /// (`runChunkUnorderedFindMap`) calls `scope.request()` on first match,
   /// cancelling sibling forks. Routed via `.merge/3` with `findMapReducer`
   /// (left-biased first-some-wins), the same VPF re-tag slot as the other
   /// parallelisable drives.
-  mut .driveUnorderedFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> flow.split.match{
-    .some(pair) -> this.shouldStop ? {
+  mut .driveUnorderedFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> _FeartDriver.splitMatch[E, mut Opt[R]](flow, {
+    .some(left, right) -> this.shouldStop ? {
       .then -> {},
       .else -> _FeartDriver.merge[mut Opt[R], mut Opt[R]](
-        this.driveUnorderedFindMap[E,R](pair.a, f),
-        this.driveUnorderedFindMap[E,R](pair.b, f),
+        this.driveUnorderedFindMap[E,R](left, f),
+        this.driveUnorderedFindMap[E,R](right, f),
         _FeartDriver.findMapReducer[R]
         ),
       },
     .empty -> this.runChunkUnorderedFindMap[E,R](flow, f),
-    },
+    }),
 
   /// Parallel max-by-comparator. The merger captures `compare` and reduces two
   /// Opt[E] halves to a single Opt[E]. Factored into a named method
@@ -99,17 +99,18 @@ _FeartDriver: Sealed{
   /// Method form sidesteps that. Fearless can infer the lambda returned by
   /// `maxReducer[E](compare)` cleanly because the method's return type is
   /// declared explicitly.
-  mut .driveMax[E:*](flow: mut Flow[E], compare: read F[E, E, Ordering]): mut Opt[E] -> flow.split.match{
-    .some(pair) -> this.shouldStop ? {
+  mut .driveMax[E:*](flow: mut Flow[E], compare: read F[E, E, Ordering]): mut Opt[E] -> _FeartDriver.splitMatch[E, mut Opt[E]](flow, {
+    .some(left, right) -> this.shouldStop ? {
       .then -> {},
       .else -> _FeartDriver.merge[mut Opt[E], mut Opt[E]](
-        this.driveMax[E](pair.a, compare),
-        this.driveMax[E](pair.b, compare),
+        this.driveMax[E](left, compare),
+        this.driveMax[E](right, compare),
         _FeartDriver.maxReducer[E](compare)
         ),
       },
     .empty -> this.runChunkMax[E](flow, compare),
-    },
+    }),
+  .splitMatch[E:*, R:*](flow: mut Flow[E], cases: mut _FeartSplitMatch[E, R]): R -> Magic!,
   mut .runChunkReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read F[A,E,A]): A -> Magic!,
   mut .runChunkCollect[E:*](flow: mut Flow[E]): mut List[E] -> Magic!,
   mut .runChunkFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> Magic!,
@@ -187,4 +188,9 @@ _FeartDriver: Sealed{
   /// vtable does the FatPtr-level dispatch, correct whenever A=E at runtime
   /// (sum-like left-folds). Mixed-type accumulators (A≠E) are not supported.
   .merge[E:*,A:*](left: A, right: A, combine: read F[A,E,A]): A -> Magic!,
+  }
+
+_FeartSplitMatch[E:*, R:*]: {
+  mut .some(left: mut Flow[E], right: mut Flow[E]): R,
+  mut .empty: R,
   }

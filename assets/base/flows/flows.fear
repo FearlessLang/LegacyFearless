@@ -60,8 +60,6 @@ Flow[E:*]: Sealed, Extensible[Flow[E]], _NonTerminalOps[E], _TerminalOps[E]{
     .if {found.size > 1}
       .error {Infos.msg("Expected exactly one element, found at least " + (found.size.str))}
     .return {found.tryGet(0)},
-
-  mut .split: mut Opt[mut Pair[mut Flow[E], mut Flow[E]]] -> {}, // TODO: implement this for non FeaRT flows
   }
 _UnwrapFlowToken: {}
 

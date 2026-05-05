@@ -335,6 +335,15 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return false;
   }
 
+  private boolean isSingletonType(DecId objId) {
+    var typeDef = p.pkgs().stream()
+      .filter(pkg -> pkg.defs().containsKey(objId))
+      .map(pkg -> pkg.defs().get(objId))
+      .findFirst().orElse(null);
+    if (typeDef != null && typeDef.singletonInstance().isPresent()) return true;
+    return !createObjHasCaptures(objId);
+  }
+
   private void emitVTable(List<MIR.Meth> allMeths, DecId objId) {
     var typeName = id.getSimpleName(objId);
     var hashes = new ArrayList<String>();
@@ -351,11 +360,14 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var methodsStr = methods.isEmpty() ? "&.{}" :
       "&[_]*const anyopaque{ " + String.join(", ", methods) + " }";
 
+    var storageModeLine = isSingletonType(objId) ? "    .storage_mode = .singleton,\n" : "";
+
     currentState().vtableDefs.put(objId,
       "pub const VT_" + typeName + ": rt.VTable = .{\n"
       + "    .type_name = \"" + objId.name() + "/" + objId.gen() + "\",\n"
       + "    .hashes = " + hashesStr + ",\n"
       + "    .methods = " + methodsStr + ",\n"
+      + storageModeLine
       + "};");
   }
 

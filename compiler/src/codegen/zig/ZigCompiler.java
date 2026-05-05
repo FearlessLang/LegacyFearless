@@ -191,6 +191,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
           build_options.addOption(bool, "log_scheduling", false);
           build_options.addOption(bool, "log_safety", %s);
           build_options.addOption(bool, "log_dispatch", false);
+          build_options.addOption(bool, "log_alloc_caching", false);
           build_options.addOption(bool, "log_trace", %s);
           build_options.addOption(bool, "track_allocs", track_allocs);
 
