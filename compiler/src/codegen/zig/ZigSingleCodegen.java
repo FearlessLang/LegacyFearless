@@ -17,13 +17,20 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   private final ZigMagicImpls magic;
   public final ZigStringIds id = new ZigStringIds();
   final ZigSigStringBuilder sigBuilder;
+  private int transientCounter = 0;
+  private int blockCounter = 0;
 
   // Per-package accumulated output
   static class PackageState {
     final String packageName;
     final List<String> functions = new ArrayList<>();
     final LinkedHashMap<DecId, String> captureStructs = new LinkedHashMap<>();
-    final LinkedHashMap<DecId, String> vtableDefs = new LinkedHashMap<>();
+    final LinkedHashMap<String, String> vtableDefs = new LinkedHashMap<>();
+
+    // Capture list recorded verbatim at CreateObj emission time. The box hook needs the
+    // exact, ordered capture set; re-deriving it from the AST is fragile, so we keep it here.
+    final LinkedHashMap<DecId, SortedSet<MIR.X>> captureLists = new LinkedHashMap<>();
+
     PackageState(String packageName) { this.packageName = packageName; }
   }
 
@@ -64,12 +71,17 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   /** Get a VTable reference, qualified with root.pkg_ prefix if cross-package. */
   public String vtableRef(DecId objId) {
+    return vtableRef(objId, false);
+  }
+
+  public String vtableRef(DecId objId, boolean transientVt) {
     var typeName = id.getSimpleName(objId);
+    var vtName = "VT_" + typeName + (transientVt ? "_transient" : "");
     var owningPkg = typeToPackage.get(objId);
     if (owningPkg != null && !owningPkg.equals(emitTargetPkg)) {
-      return "root.pkg_" + owningPkg.replace(".", "_") + ".VT_" + typeName;
+      return "root.pkg_" + owningPkg.replace(".", "_") + "." + vtName;
     }
-    return "VT_" + typeName;
+    return vtName;
   }
 
   /** Get a Captures struct reference, qualified with root.pkg_ prefix if cross-package. */
@@ -94,6 +106,52 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   public boolean isLiteral(DecId d) {
     return id.getLiteral(p.p(), d).isPresent();
+  }
+
+  boolean isTransientType(DecId d) {
+    if (d.equals(Magic.Transient)) { return true; }
+    var seen = new HashSet<DecId>();
+    return isTransientType(d, seen);
+  }
+
+  private boolean isTransientType(DecId d, Set<DecId> seen) {
+    if (!seen.add(d)) { return false; }
+    var def = p.pkgs().stream()
+      .filter(pkg -> pkg.defs().containsKey(d))
+      .map(pkg -> pkg.defs().get(d))
+      .findFirst()
+      .orElse(null);
+    if (def == null) { return false; }
+    for (var impl : def.impls()) {
+      if (impl.id().equals(Magic.Transient) || isTransientType(impl.id(), seen)) { return true; }
+    }
+    return false;
+  }
+
+  boolean isTransientCreateObj(MIR.E e) {
+    return e instanceof MIR.CreateObj obj && isTransientType(obj.concreteT().id()) && !obj.captures().isEmpty();
+  }
+
+  record Materialised(String ref, List<String> prelude) {}
+
+  Materialised materialiseTransient(MIR.CreateObj createObj, MIRVisitor<String> gen, boolean checkMagic) {
+    emitCreateObj(createObj, checkMagic);
+    var objId = createObj.concreteT().id();
+    var tmp = "fear_transient_" + transientCounter++;
+    var captures = createObj.captures().stream()
+      .map(x -> "." + id.varName(x.name()) + " = " + gen.visitX(x, checkMagic))
+      .collect(Collectors.joining(", "));
+    var prelude = new ArrayList<String>();
+    prelude.add("var " + tmp + "_obj: rt.GenObjectLayoutType(" + capturesRef(objId) + ") = undefined;");
+    prelude.add("const " + tmp + " = rt.init_transient_obj(" + capturesRef(objId) + ", &" + tmp + "_obj, &" + vtableRef(objId, true) + ", .{ " + captures + " });");
+    prelude.add("defer rt.drop_transient_obj(" + capturesRef(objId) + ", &" + tmp + "_obj);");
+    return new Materialised(tmp, prelude);
+  }
+
+  String withTransientPrelude(List<String> prelude, String expr) {
+    if (prelude.isEmpty()) { return expr; }
+    var label = "fear_blk_" + blockCounter++;
+    return label + ": {\n" + String.join("\n", prelude) + "\nbreak :" + label + " " + expr + ";\n}";
   }
 
   String ownedExpr(MIR.E e, boolean checkMagic) {
@@ -198,6 +256,8 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       currentState().captureStructs.put(objId,
         "const " + id.getSimpleName(objId) + "_Captures = extern struct {\n"
         + fields + "\n};");
+      // Record the authoritative capture list for the box hook.
+      currentState().captureLists.put(objId, createObj.captures());
     }
 
     // Emit MF_ and T_ functions for each method
@@ -345,6 +405,14 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   }
 
   private void emitVTable(List<MIR.Meth> allMeths, DecId objId) {
+    emitVTable(allMeths, objId, false);
+    if (isTransientType(objId) && createObjHasCaptures(objId)) {
+      emitBoxHook(objId);
+      emitVTable(allMeths, objId, true);
+    }
+  }
+
+  private void emitVTable(List<MIR.Meth> allMeths, DecId objId, boolean transientVt) {
     var typeName = id.getSimpleName(objId);
     var hashes = new ArrayList<String>();
     var methods = new ArrayList<String>();
@@ -360,15 +428,56 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var methodsStr = methods.isEmpty() ? "&.{}" :
       "&[_]*const anyopaque{ " + String.join(", ", methods) + " }";
 
-    var storageModeLine = isSingletonType(objId) ? "    .storage_mode = .singleton,\n" : "";
+    var isTransient = transientVt && !isSingletonType(objId);
+    var storageModeLine = isTransient
+      ? "    .storage_mode = .transient,\n"
+      : isSingletonType(objId) ? "    .storage_mode = .singleton,\n" : "";
+    var boxLine = isTransient ? "    .box_fn = &box_" + typeName + ",\n" : "";
 
-    currentState().vtableDefs.put(objId,
-      "pub const VT_" + typeName + ": rt.VTable = .{\n"
+    var vtKey = typeName + (isTransient ? "_transient" : "");
+    currentState().vtableDefs.put(vtKey,
+      "pub const VT_" + typeName + (isTransient ? "_transient" : "") + ": rt.VTable = .{\n"
       + "    .type_name = \"" + objId.name() + "/" + objId.gen() + "\",\n"
       + "    .hashes = " + hashesStr + ",\n"
       + "    .methods = " + methodsStr + ",\n"
       + storageModeLine
+      + boxLine
       + "};");
+  }
+
+  // Deliberate invariant: boxing is a tree copy. Shared transient *nodes* are duplicated
+  // rather than shared, which is sound only because a transient node holds no inline
+  // mutable/identity state -- every mutable leaf is a heap object shared by refcount, and the
+  // no-HasIdentity well-formedness rule guarantees the copy is not observable.
+  private void emitBoxHook(DecId objId) {
+    var typeName = id.getSimpleName(objId);
+    var capturesName = capturesRef(objId);
+    var hookName = "box_" + typeName;
+    if (currentState().functions.stream().anyMatch(f -> f.startsWith("fn " + hookName + "("))) { return; }
+
+    var typeDef = p.pkgs().stream()
+      .filter(pkg -> pkg.defs().containsKey(objId))
+      .map(pkg -> pkg.defs().get(objId))
+      .findFirst()
+      .orElse(null);
+    if (typeDef == null || typeDef.singletonInstance().isPresent()) { return; }
+
+    var sb = new StringBuilder();
+    sb.append("fn ").append(hookName).append("(self_m: rt.FatPtr) callconv(.c) rt.FatPtr {\n");
+    sb.append("const captures = rt.deref(").append(capturesName).append(", self_m);\n");
+    // Capture list recorded by emitCreateObj when the captures struct was built.
+    var captureNames = currentState().captureLists.getOrDefault(objId, MIR.createCapturesSet());
+    var boxedFields = new ArrayList<String>();
+    for (var x : captureNames) {
+      var field = id.varName(x.name());
+      sb.append("const ").append(field).append("_boxed = captures.").append(field).append(".box_transient();\n");
+      sb.append("defer ").append(field).append("_boxed.rc_decrement();\n");
+      boxedFields.add("." + field + " = " + field + "_boxed");
+    }
+    sb.append("return rt.obj_k(").append(capturesName).append(", &").append(vtableRef(objId)).append(", .{ ")
+      .append(String.join(", ", boxedFields)).append(" });\n");
+    sb.append("}");
+    currentState().functions.add(sb.toString());
   }
 
   public void visitFun(MIR.Fun fun) {
@@ -426,19 +535,37 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       if (impl.isPresent()) { return impl.get(); }
     }
 
-    // Normal dispatch via rt.call
-    var recv = ownedExpr(call.recv(), checkMagic);
+    return emitMCall(call, this, checkMagic);
+  }
+
+  String emitMCall(MIR.MCall call, MIRVisitor<String> gen, boolean checkMagic) {
+    var prelude = new ArrayList<String>();
+    String recv;
+    if (isTransientCreateObj(call.recv())) {
+      var materialised = materialiseTransient((MIR.CreateObj) call.recv(), gen, checkMagic);
+      prelude.addAll(materialised.prelude());
+      recv = materialised.ref();
+    } else {
+      recv = ownedExpr(call.recv(), gen, checkMagic);
+    }
     var sig = new MIR.Sig(call.name(),
       call.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
       call.originalRet());
     var hashExpr = sigBuilder.inlineHash(sig);
 
     var args = call.args().stream()
-      .map(a -> ownedExpr(a, checkMagic))
+      .map(a -> {
+        if (isTransientCreateObj(a)) {
+          var materialised = materialiseTransient((MIR.CreateObj) a, gen, checkMagic);
+          prelude.addAll(materialised.prelude());
+          return materialised.ref();
+        }
+        return ownedExpr(a, gen, checkMagic);
+      })
       .collect(Collectors.joining(", "));
 
     var argsTuple = args.isEmpty() ? ".{}" : ".{ " + args + " }";
-    return "rt.call(" + recv + ", " + hashExpr + ", " + argsTuple + ", @src())";
+    return withTransientPrelude(prelude, "rt.call(" + recv + ", " + hashExpr + ", " + argsTuple + ", @src())");
   }
 
   @Override
@@ -553,10 +680,18 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   @Override
   public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
     var fRef = funRef(call.fun());
+    var prelude = new ArrayList<String>();
     var args = call.args().stream()
-      .map(a -> ownedExpr(a, checkMagic))
+      .map(a -> {
+        if (isTransientCreateObj(a)) {
+          var materialised = materialiseTransient((MIR.CreateObj) a, this, checkMagic);
+          prelude.addAll(materialised.prelude());
+          return materialised.ref();
+        }
+        return ownedExpr(a, checkMagic);
+      })
       .collect(Collectors.joining(", "));
-    return fRef + "(" + args + ")";
+    return withTransientPrelude(prelude, fRef + "(" + args + ")");
   }
 
 

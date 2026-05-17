@@ -295,13 +295,15 @@ class VPFCodegen {
 
   private void emitLocalsHooks(String localsName, List<String> fatPtrFields) {
     var retain = new StringBuilder();
-    retain.append("fn ").append(localsName).append("_retain(locals_ptr: *anyopaque) void {\n");
-    retain.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
+    retain.append("fn ").append(localsName).append("_retain(copy_ptr: *anyopaque, parent_ptr: *anyopaque) void {\n");
+    retain.append("const copy: *").append(localsName).append(" = @ptrCast(@alignCast(copy_ptr));\n");
+    retain.append("const parent: *").append(localsName).append(" = @ptrCast(@alignCast(parent_ptr));\n");
     if (fatPtrFields.isEmpty()) {
-      retain.append("_ = locals;\n");
+      retain.append("_ = .{ copy, parent };\n");
     } else {
       for (var field : fatPtrFields) {
-        retain.append("_ = locals.").append(field).append(".share();\n");
+        retain.append("if (parent.").append(field).append(".is_transient()) parent.").append(field).append(" = parent.").append(field).append(".box_transient();\n");
+        retain.append("copy.").append(field).append(" = parent.").append(field).append(".share();\n");
       }
     }
     retain.append("}");
@@ -475,17 +477,7 @@ class VPFCodegen {
       return delegate.visitX(x, checkMagic);
     }
     @Override public String visitMCall(MIR.MCall call, boolean checkMagic) {
-      var recv = delegate.ownedExpr(call.recv(), this, checkMagic);
-      var sig = new MIR.Sig(call.name(),
-        call.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
-        call.originalRet());
-      var hashExpr = delegate.sigBuilder.inlineHash(sig);
-
-      var args = call.args().stream()
-        .map(a -> delegate.ownedExpr(a, this, checkMagic))
-        .collect(Collectors.joining(", "));
-      var argsTuple = args.isEmpty() ? ".{}" : ".{ " + args + " }";
-      return "rt.call(" + recv + ", " + hashExpr + ", " + argsTuple + ", @src())";
+      return delegate.emitMCall(call, this, checkMagic);
     }
     @Override public String visitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
       // Let parent handle side effects (type/vtable emission) and magic
@@ -508,10 +500,18 @@ class VPFCodegen {
     }
     @Override public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
       var fRef = delegate.funRef(call.fun());
+      var prelude = new ArrayList<String>();
       var args = call.args().stream()
-        .map(a -> delegate.ownedExpr(a, this, checkMagic))
+        .map(a -> {
+          if (delegate.isTransientCreateObj(a)) {
+            var materialised = delegate.materialiseTransient((MIR.CreateObj) a, this, checkMagic);
+            prelude.addAll(materialised.prelude());
+            return materialised.ref();
+          }
+          return delegate.ownedExpr(a, this, checkMagic);
+        })
         .collect(Collectors.joining(", "));
-      return fRef + "(" + args + ")";
+      return delegate.withTransientPrelude(prelude, fRef + "(" + args + ")");
     }
 
   }

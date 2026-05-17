@@ -17,6 +17,8 @@ import ast.T.Dec;
 public class Magic {
   public static final Id.DecId Main = new Id.DecId("base.Main", 0);
   public static final Id.DecId Sealed = new Id.DecId("base.Sealed", 0);
+  public static final Id.DecId Transient = new Id.DecId("base.Transient", 0);
+  public static final Id.DecId HasIdentity = new Id.DecId("base.HasIdentity", 0);
   public static final Id.DecId Nat = new Id.DecId("base.Nat", 0);
   public static final Id.DecId Int = new Id.DecId("base.Int", 0);
   public static final Id.DecId Bool = new Id.DecId("base.Bool", 0);

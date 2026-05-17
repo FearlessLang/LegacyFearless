@@ -10,5 +10,5 @@ Bool: Sealed,Stringable{
   }
 True: Bool{ .and(b) -> b, .or(b) -> this, .not -> False, ?(f) -> f.then(), .str -> "True" }
 False: Bool{ .and(b) -> this, .or(b) -> b, .not -> True, ?(f) -> f.else(), .str -> "False" }
-ThenElse[R:imm]: { .then: R, .else: R, }
+ThenElse[R:imm]: Transient{ .then: R, .else: R, }
 

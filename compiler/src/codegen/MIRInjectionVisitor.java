@@ -1,6 +1,7 @@
 package codegen;
 
 import ast.E;
+import ast.FreeVariables;
 import ast.Program;
 import ast.T;
 import id.Id;
@@ -11,7 +12,6 @@ import program.typesystem.TsT;
 import program.typesystem.XBs;
 import vpf.VPFCallMode;
 import utils.*;
-import visitors.CollectorVisitor;
 import visitors.CtxVisitor;
 
 import java.util.*;
@@ -344,37 +344,7 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
       .collect(Collectors.toCollection(MIR::createCapturesSet)));
   }
 
-  private static class FreeVariables implements CollectorVisitor<SortedSet<String>> {
-    private final SortedSet<String> res = new TreeSet<>(String::compareTo);
-    private Set<String> fresh = new HashSet<>();
-    public SortedSet<String> res() { return this.res; }
-
-    public Void visitLambda(E.Lambda e) {
-      var old = fresh;
-      fresh = new HashSet<>(fresh);
-      fresh.add(e.selfName());
-      CollectorVisitor.super.visitLambda(e);
-      this.fresh = old;
-      return null;
-    }
-
-    public Void visitMeth(E.Meth m) {
-      var old = fresh;
-      fresh = new HashSet<>(fresh);
-      fresh.addAll(m.xs());
-      CollectorVisitor.super.visitMeth(m);
-      this.fresh = old;
-      return null;
-    }
-
-    public Void visitX(E.X e) {
-      if (!fresh.contains(e.name())) { res.add(e.name()); }
-      return CollectorVisitor.super.visitX(e);
-    }
-  }
-
   private static class NotInGammaException extends RuntimeException {
     public NotInGammaException(String x) { super(x); }
   }
-
 }

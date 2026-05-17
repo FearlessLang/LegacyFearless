@@ -63,6 +63,7 @@ alias base.F as F,
 alias base.Consumer as Consumer,
 alias base.Let as Let,
 alias base.Void as Void,
+alias base.Transient as Transient,
 alias base.HasIdentity as HasIdentity,
 
 alias base.Ice as Ice,

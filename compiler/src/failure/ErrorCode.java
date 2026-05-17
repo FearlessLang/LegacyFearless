@@ -72,7 +72,13 @@ public enum ErrorCode {
   genericMismatch,
   inferImplementsFailed,
   noUnimplementedMethods,
-  invalidStr;
+  invalidStr,
+  transientReturn,
+  transientArgument,
+  transientCapture,
+  transientReceiver,
+  transientStorage,
+  transientWithIdentity;
   private static final ErrorCode[] values = values();
   public int code() {
     return this.ordinal() + 1;

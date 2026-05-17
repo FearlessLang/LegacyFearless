@@ -190,7 +190,7 @@ _FeartDriver: Sealed{
   .merge[E:*,A:*](left: A, right: A, combine: read F[A,E,A]): A -> Magic!,
   }
 
-_FeartSplitMatch[E:*, R:*]: {
+_FeartSplitMatch[E:*, R:*]: Transient{
   mut .some(left: mut Flow[E], right: mut Flow[E]): R,
   mut .empty: R,
   }

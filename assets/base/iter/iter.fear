@@ -15,7 +15,7 @@ Iter[E:*]:{
     .empty -> False
     },
 
-  mut .map[R:*](f: mut IterMapper[E, R]): mut Iter[R] -> { this.next.map[R](f) },
+  mut .map[R:*](f: mut IterMapper[E, R]): mut Iter[R] -> {this.next.map[R]{x -> f#x}},
   mut .flatMap[R:*](f: mut IterMapper[E, mut Iter[R]]): mut Iter[R] -> Block#
     .let[mut Iter[mut Iter[R]]] mapIter = { this.map(f) }
     .let[mut Var[mut Opt[mut Iter[R]]]] optCurIter = { Vars#(mapIter.next) }
@@ -66,11 +66,11 @@ Sum:{
   .float(ns: mut Iter[Float]): Float -> ns.fold[Float](0.0, mut IterFolder[Float, Float]{ acc, n -> acc + n }),
   }
 
-IterForEacher[E:*]:{ mut #(e: E): Void }
-IterFolder[E:*,R:*]:{ mut #(acc: R, e: E): R }
-IterScanner[E:*, R:*, S:*]:{ mut #(state: mut Var[S], e: E): S }
-IterMapper[E:*,R:*]:OptMap[E, R]{}
-IterPredicate[E:*]:{ mut #(e: E): Bool }
+IterForEacher[E:*]: {mut #(e: E): Void}
+IterFolder[E:*,R:*]: {mut #(acc: R, e: E): R}
+IterScanner[E:*, R:*, S:*]: {mut #(state: mut Var[S], e: E): S}
+IterMapper[E:*,R:*]: {mut #(e: E): R}
+IterPredicate[E:*]: {mut #(e: E): Bool}
 
 //_ListIsoAdd[E:*]:{
 //  #(l: mut List[E], e: E): mut List[E] -> Block#(l.add(e), l),

@@ -82,6 +82,10 @@ interface ELambdaTypeSystem extends ETypeSystem{
       return fail.mapErr(err->()->err.get().pos(b.pos())).cast();
     }
     T selfT= new T(b.mdf(), d.toIT());
+    var captureErr = TransientSemantics.checkCaptures(p(), g(), selfT, b);
+    if (captureErr.isPresent()) {
+      return FailOr.err(() -> captureErr.get().pos(b.pos()));
+    }
     var selfName=b.selfName();
     var mRes= FailOr.fold(b.meths(),
       mi->methOkOuter(xbs, selfT, selfName, mi));
@@ -115,6 +119,10 @@ interface ELambdaTypeSystem extends ETypeSystem{
     var withXBs = (ELambdaTypeSystem) withXBs(xbs);
     var sigOk = withXBs.sigOk(selfT.toString(), m.sig(), m.pos());
     if (sigOk.isErr()) { return sigOk; }
+    var transientReturn = TransientSemantics.checkReturn(p(), m.sig().ret());
+    if (transientReturn.isPresent()) {
+      return FailOr.err(() -> transientReturn.get().pos(m.pos())).cast();
+    }
     if(m.isAbs()){ return FailOr.ok(); }
     return withXBs.mOkEntry(selfName, selfT, litT, m, m.sig());
   }
@@ -269,7 +277,15 @@ interface ELambdaTypeSystem extends ETypeSystem{
   private FailOr<Void> okWithSubType(Gamma g, E.Meth m, E e, T expected) {
     var methodBodyTypeSystem = ETypeSystem.of(p(), g, xbs(), List.of(expected), resolvedCalls(), cache(), depth()+1);
     FailOr<T> res = e.accept(methodBodyTypeSystem);
-    return res.flatMap(t->methSubType(t,expected)).mapErr(err->()->err.get().parentPos(e.pos()));
+    return res
+      .flatMap(t -> {
+        var transientReturn = TransientSemantics.checkReturn(p(), t);
+        if (transientReturn.isPresent()) {
+          return FailOr.<Void>err(transientReturn::get);
+        }
+        return methSubType(t, expected);
+      })
+      .mapErr(err->()->err.get().parentPos(e.pos()));
     // We pass the expected type of the expression down because different method body promotions
     // have different expected types. We could create a new type system visitor with the updated
     // expected instead, but that feels like overkill.

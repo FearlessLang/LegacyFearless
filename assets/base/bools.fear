@@ -36,4 +36,4 @@ False: Bool{
   .str -> "False",
   .toImm -> False,
   }
-ThenElse[R:**]: { mut .then: R, mut .else: R, }
+ThenElse[R:**]: Transient{ mut .then: R, mut .else: R, }

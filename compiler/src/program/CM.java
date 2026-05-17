@@ -10,7 +10,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-public interface CM {
+public sealed interface CM {
   Id.MethName name();
   List<String> xs();
   boolean isAbs();

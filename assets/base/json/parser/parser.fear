@@ -22,7 +22,7 @@ _TopLevelParser: _ParserActor{downstream, behaviour, token -> Block#
   .do {behaviour.set(_ValueParser#({value -> downstream#value}, this))}
   .return {behaviour.get#(downstream, behaviour, token)}
   }
-_ValueParser: {#(collector: mut Consumer[Json], old: mut _ParserActor): mut _ParserActor -> {'parser
+_ValueParser: {#(collector: mut _Consumer[Json], old: mut _ParserActor): mut _ParserActor -> {'parser
   downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
     .mode -> "value", .token -> token,
     .true -> Block#(collector#(Jsons.bool True), behaviour.set(old), ActorRes.continue),
@@ -35,9 +35,9 @@ _ValueParser: {#(collector: mut Consumer[Json], old: mut _ParserActor): mut _Par
     })
   }}
 
-_ArrayParser: {#(collector: mut Consumer[Json], old: mut _ParserActor): mut _ParserActor -> Block#
+_ArrayParser: {#(collector: mut _Consumer[Json], old: mut _ParserActor): mut _ParserActor -> Block#
   .let[mut IsoPod[UList[Json]]] es = {IsoPod#(UList#)}
-  .let[mut Consumer[Json]] collector' = {{value -> es.mutate{es' -> es'.add(value)}!}}
+  .let[mut _Consumer[Json]] collector' = {{value -> es.mutate{es' -> es'.add(value)}!}}
   .return {{'parser
     downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
       .mode -> "array", .token -> token,
@@ -48,7 +48,7 @@ _ArrayParser: {#(collector: mut Consumer[Json], old: mut _ParserActor): mut _Par
       })
     }}
   }
-_ArrayCommaParser: {#(collector: mut Consumer[Json], old: mut _ParserActor): mut _ParserActor -> {'parser
+_ArrayCommaParser: {#(collector: mut _Consumer[Json], old: mut _ParserActor): mut _ParserActor -> {'parser
   downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
     .mode -> "comma or end of array", .token -> token,
     .cs -> old#(downstream, behaviour, token),
@@ -59,9 +59,9 @@ _ArrayCommaParser: {#(collector: mut Consumer[Json], old: mut _ParserActor): mut
     })}
   }
 
-_ObjectParser: {#(collector: mut Consumer[Json], old: mut _ParserActor): mut _ParserActor -> Block#
+_ObjectParser: {#(collector: mut _Consumer[Json], old: mut _ParserActor): mut _ParserActor -> Block#
   .let[mut IsoPod[LinkedHashMap[Str,Json]]] es = {IsoPod#(Maps.hashMap[Str,Json]({k1,k2 -> k1 == k2}, {k->k}))}
-  .let[mut Consumer[Str,Json]] collector' = {{key, value -> es.mutate{es' -> es'.put(key, value)}!}}
+  .let[mut _Consumer[Str,Json]] collector' = {{key, value -> es.mutate{es' -> es'.put(key, value)}!}}
   .return {{'parser
     downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
       .mode -> "object", .token -> token,
@@ -73,7 +73,7 @@ _ObjectParser: {#(collector: mut Consumer[Json], old: mut _ParserActor): mut _Pa
       })
     }}
   }
-_MemberKeyParser: {#(collector: mut Consumer[Str,Json], old: mut _ParserActor): mut _ParserActor -> Block#
+_MemberKeyParser: {#(collector: mut _Consumer[Str,Json], old: mut _ParserActor): mut _ParserActor -> Block#
   .let[mut Str] key = {mut ""}
   .let hasKey = {Vars#[Bool]False}
   .return {{downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{'matcher
@@ -88,17 +88,17 @@ _MemberKeyParser: {#(collector: mut Consumer[Str,Json], old: mut _ParserActor): 
       },
     })}}
   }
-_MemberValueParser: {#(collector: mut Consumer[Str,Json], old: mut _ParserActor, key: Str): mut _ParserActor -> {'parser
+_MemberValueParser: {#(collector: mut _Consumer[Str,Json], old: mut _ParserActor, key: Str): mut _ParserActor -> {'parser
   downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
     .mode -> "object member value", .token -> token,
     .default(_) -> Block#
-      .let[mut Consumer[Json]] collector' = {{value -> collector#(key, value)}}
+      .let[mut _Consumer[Json]] collector' = {{value -> collector#(key, value)}}
       .return {_ValueParser
         #(collector', _ObjectCommaParser#(collector, old))
         #(downstream, behaviour, token)},
     })
   }}
-_ObjectCommaParser: {#(collector: mut Consumer[Str,Json], old: mut _ParserActor): mut _ParserActor -> {'parser
+_ObjectCommaParser: {#(collector: mut _Consumer[Str,Json], old: mut _ParserActor): mut _ParserActor -> {'parser
   downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
     .mode -> "comma or end of object", .token -> token,
     .cc -> old#(downstream, behaviour, token),
@@ -141,3 +141,6 @@ _SubMatch[R:**]: TokenMatch[R]{
   .comma -> this.default("','"),
   .colon -> this.default("':'"),
   }
+
+_Consumer[A:**]: { mut #(a: A): Void }
+_Consumer[A:**, B:**]: { mut #(a: A, b: B): Void }

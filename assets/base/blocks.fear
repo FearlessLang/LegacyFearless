@@ -1,9 +1,9 @@
 package base
 
-ReturnStmt[R:iso,imm,mut,read]: {mut #: R}
+ReturnStmt[R:iso,imm,mut,read]: Transient{mut #: R}
 Condition: ReturnStmt[Bool]{}
 LoopBody[R:*]: ReturnStmt[mut ControlFlow[R]]{}
-Continuation[T:*,C:*,R:*]: {mut #(x: T, self: C): R}
+Continuation[T:*,C:*,R:*]: Transient{mut #(x: T, self: C): R}
 ControlFlow: {
   .continue: mut ControlFlow[Void] -> mut ControlFlowContinue: ControlFlow[Void]{.match(m) -> m.continue},
   .break: mut ControlFlow[Void] -> mut ControlFlowBreak: ControlFlow[Void]{.match(m) -> m.break},
@@ -17,7 +17,7 @@ ControlFlow: {
 ControlFlow[T:*]: {
   mut .match[R:*](m: mut ControlFlowMatch[T,R]): R -> m.continue,
   }
-ControlFlowMatch[T:*,R:*]: {
+ControlFlowMatch[T:*,R:*]: Transient{
   mut .continue: R,
   mut .break: R,
   mut .return(returnValue: T): R,
