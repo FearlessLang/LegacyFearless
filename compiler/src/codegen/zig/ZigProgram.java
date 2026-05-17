@@ -181,7 +181,9 @@ class ZigProgramBuilder {
 
     var sb = new StringBuilder();
     sb.append("// === Entry Point ===\n");
-    sb.append("pub fn main() void {\n");
+    sb.append("pub fn main(init: std.process.Init) void {\n");
+    sb.append("gc.set_runtime_io(init.io);\n");
+    sb.append("if (init.environ_map.get(\"FEART_ALLOCS_OUT\")) |p| gc.set_allocs_out_path(p);\n");
     sb.append("log.installCrashHandler();\n");
     sb.append("gc.init_gc();\n");
     sb.append("const cpu_count = std.Thread.getCpuCount() catch 1;\n");
@@ -206,8 +208,8 @@ class ZigProgramBuilder {
       sb.append("const args = rt.obj_k_singleton(&").append(llistVtRef).append(");\n");
       sb.append("const result = rt.call(entry, ").append(hashExpr).append(", .{args}, @src());\n");
       sb.append("const str_data = str_rt.deref_str(result);\n");
-      sb.append("_ = std.posix.write(std.posix.STDOUT_FILENO, str_data) catch {};\n");
-      sb.append("_ = std.posix.write(std.posix.STDOUT_FILENO, \"\\n\") catch {};\n");
+      sb.append("_ = std.posix.system.write(std.posix.STDOUT_FILENO, str_data.ptr, str_data.len);\n");
+      sb.append("_ = std.posix.system.write(std.posix.STDOUT_FILENO, \"\\n\", 1);\n");
     }
 
     sb.append("worker_mod.global_done.store(true, .release);\n");
@@ -216,6 +218,7 @@ class ZigProgramBuilder {
     sb.append("pool.enqueueFiber(main_fiber);\n");
     sb.append("pool.run();\n");
     sb.append("log.dumpAllTraceBuffers();\n");
+    sb.append("gc.dump_allocs();\n");
     sb.append("}\n");
     return sb.toString();
   }

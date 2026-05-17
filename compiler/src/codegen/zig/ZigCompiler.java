@@ -209,11 +209,11 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
 
           const libgc = b.dependency("libgc", .{ .target = target, .optimize = optimize });
           const gc_lib = libgc.artifact("gc");
-          exe.linkLibrary(gc_lib);
           const gc_include = gc_lib.getEmittedIncludeTree();
-          exe.root_module.addIncludePath(gc_include);
-          exe.root_module.addIncludePath(gc_include.path(b, "gc"));
 
+          // Bundle the fiber context-switch asm into the exceptions static lib so
+          // that any module that links exceptions_lib also gets the asm symbols,
+          // avoids the .o being compiled/linked once per importing module.
           const exceptions_lib = b.addLibrary(.{
               .linkage = .static,
               .name = "exceptions",
@@ -223,17 +223,44 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
                   .link_libc = true,
               })
           });
-          exceptions_lib.addCSourceFiles(.{
+          exceptions_lib.root_module.addCSourceFiles(.{
               .files = &.{"src/runtime/exceptions.c"},
               .flags = &.{"-std=c23"},
           });
-          exe.linkLibrary(exceptions_lib);
-          exe.addIncludePath(b.path("src/runtime"));
           switch (target.result.cpu.arch) {
-              .x86_64 => exe.addAssemblyFile(b.path("src/runtime/context_switch_x86_64.S")),
-              .aarch64 => exe.addAssemblyFile(b.path("src/runtime/context_switch_aarch64.S")),
+              .x86_64 => exceptions_lib.root_module.addAssemblyFile(b.path("src/runtime/context_switch_x86_64.S")),
+              .aarch64 => exceptions_lib.root_module.addAssemblyFile(b.path("src/runtime/context_switch_aarch64.S")),
               else => {},
           }
+
+          const c_libgc_tc = b.addTranslateC(.{
+              .root_source_file = gc_include.path(b, "gc.h"),
+              .target = target,
+              .optimize = optimize,
+              .link_libc = true,
+          });
+          c_libgc_tc.defineCMacro("GC_THREADS", "1");
+          c_libgc_tc.defineCMacro("GC_PTHREADS", "1");
+          c_libgc_tc.addIncludePath(gc_include);
+          c_libgc_tc.addIncludePath(gc_include.path(b, "gc"));
+          const c_libgc_mod = c_libgc_tc.createModule();
+          c_libgc_mod.linkLibrary(gc_lib);
+
+          const c_exceptions_tc = b.addTranslateC(.{
+              .root_source_file = b.path("src/runtime/exceptions.h"),
+              .target = target,
+              .optimize = optimize,
+              .link_libc = true,
+          });
+          c_exceptions_tc.addIncludePath(b.path("src/runtime"));
+          const c_exceptions_mod = c_exceptions_tc.createModule();
+          c_exceptions_mod.linkLibrary(exceptions_lib);
+
+          // The translate-c modules carry linkLibrary(...) for gc_lib/exceptions_lib,
+          // so any importer transitively links the native code exactly once.
+          exe.root_module.addImport("libgc", c_libgc_mod);
+          exe.root_module.addImport("exceptions", c_exceptions_mod);
+
           exe.use_llvm = true;
 
           const exe_tests = b.addTest(.{
@@ -264,7 +291,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
           .name = .fearless_app,
           .version = "0.0.0",
           .fingerprint = 0xb506340ff5c420d3,
-          .minimum_zig_version = "0.15.2",
+          .minimum_zig_version = "0.16.0",
           .dependencies = .{
               .libgc = .{ .path = "lib/zig-build-libgc" }
           },
