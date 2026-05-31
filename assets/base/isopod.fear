@@ -6,10 +6,10 @@ IsoPod:{
 IsoPod[T]: {
   read .isAlive: Bool,
   read .peek[R:iso,imm,mut,read,mutH](f: mut IsoViewer[T, R]): R,
-  read .look[R:*](f: mut IsoViewer'[T, R]): mut Action[R] -> {m -> this.peek{
-    .some(x) -> m.ok(f#x),
-    .empty -> m.info(Infos.msg "The IsoPod was empty"),
-    }},
+  read .look[R:*](f: mut IsoViewer'[T, R]): mut Action[R] -> {m -> this.peek[mut Action[R]]{
+    .some(x) -> Actions.ok[R](f#x),
+    .empty -> Actions.info[R](Infos.msg "The IsoPod was empty"),
+    }.run(m)},
   mut !: iso T,
   mut .next(val: iso T): Void,
   read .isDead: Bool -> this.isAlive.not,
@@ -21,7 +21,7 @@ IsoPod[T]: {
       .empty -> m.info(Infos.msg "The IsoPod was empty"),
       }}
   }
-IsoConsumer[T, R:**]:{
+IsoConsumer[T, R:**]: Transient{
   mut .some(x: iso T): R,
   mut .empty: R,
   }

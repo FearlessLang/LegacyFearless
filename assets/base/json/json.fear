@@ -2,7 +2,7 @@ package base.json
 
 alias base.Todo as Todo,
 
-JsonMatch[R:**]: {
+JsonMatch[R:**]: Transient{
   mut .string(s: Str): R,
   mut .number(n: Float): R,
   mut .bool(b: Bool): R,

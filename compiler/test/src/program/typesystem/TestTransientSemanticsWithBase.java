@@ -100,4 +100,28 @@ public class TestTransientSemanticsWithBase {
       A:{ #(cb: mut Cb, t: T): Void -> cb#t }
       """);
   }
+
+  @Test void stdlibTransientMatchersCanCaptureTransientValues() {
+    ok("""
+      package test
+      alias base.Transient as Transient, alias base.Void as Void, alias base.True as True,
+      alias base.Opts as Opts, alias base.LList as LList, alias base.Actions as Actions,
+      T: Transient{}
+      Sink: { #(t: T): Void -> Void }
+      A:{ #(t: T): Void -> base.Block#
+        .do { True.match[Void]{ .true -> Sink#t, .false -> Void } }
+        .do { (Opts#Void).match[Void]{ .some(_) -> Sink#t, .empty -> Void } }
+        .do { LList#[Void].match[Void]{ .elem(_, _) -> Sink#t, .empty -> Void } }
+        .return { Actions.ok[Void](Void).run[Void]{ .ok(_) -> Sink#t, .info(_) -> Void } }
+        }
+      """);
+  }
+
+  @Test void infoVisitorRecursesWithoutCapturingTransientReceiver() {
+    ok("""
+      package test
+      alias base.Infos as Infos, alias base.List as List, alias base.Str as Str,
+      A:{ #: Str -> Infos.list(List#(Infos.msg "nested")).str }
+      """);
+  }
 }

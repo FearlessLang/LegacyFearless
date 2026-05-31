@@ -15,7 +15,7 @@ _OnePerStepSinks: _SinkDecorator{#[E:*](sink: mut _Sink[E]): mut _Sink[E] -> Blo
     }}
   }
 _OnePerStepElement[E:*]: {mut .match[R](m: mut _OnePerStepElementMatch[E,R]): R}
-_OnePerStepElementMatch[E:*,R:*]: {
+_OnePerStepElementMatch[E:*,R:*]: Transient{
   mut .element(e: E): R,
   mut .stop: R,
   mut .error(info: Info): R,

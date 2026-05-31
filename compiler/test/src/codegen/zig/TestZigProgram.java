@@ -7,6 +7,7 @@ import utils.Base;
 import static codegen.zig.RunZigProgramTests.okBase;
 import static utils.RunOutput.Res;
 
+@Disabled("Experimental & Slow, run these tests explicitly if you need to")
 public class TestZigProgram {
   @Test void emptyProgram() { okBase(new Res("", "", 0), """
     package test

@@ -1,9 +1,9 @@
 package base
 
-ReturnStmt[R:imm]:{ #: R }
+ReturnStmt[R:imm]: Transient{ #: R }
 Condition:{ #: Bool }
 //VarContinuation[X:imm,R:imm]:{ #(x: X, self: Block[R]): R }
-Continuation[T:imm,C:imm,R:imm]: {#(x: T, self: C): R}
+Continuation[T:imm,C:imm,R:imm]: Transient{#(x: T, self: C): R}
 ControlFlow: {
   .continue: ControlFlow[Void] -> {m -> m.continue},
   .break: ControlFlow[Void] -> {m -> m.break},
@@ -14,7 +14,7 @@ ControlFlow: {
 ControlFlow[T:imm]: {
   .match[R:imm](m: ControlFlowMatch[T,R]): R,
   }
-ControlFlowMatch[T:imm,R:imm]: {
+ControlFlowMatch[T:imm,R:imm]: Transient{
   .continue: R,
   .break: R,
   .return(returnValue: T): R,

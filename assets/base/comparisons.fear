@@ -8,7 +8,7 @@ FOrdering: {
   .equal: Ordering -> {m -> m.equal},
   .greater: Ordering -> {m -> m.greater},
   }
-OrderingMatch[R:*]: {
+OrderingMatch[R:*]: Transient{
   mut .less: R,
   mut .equal: R,
   mut .greater: R,

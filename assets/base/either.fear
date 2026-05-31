@@ -6,7 +6,7 @@ Either[A:*,B:*]:{
   read .match[R:**](m: mut EitherMatch[read A, read B, R]): R,
   imm  .match[R:**](m: mut EitherMatch[imm A, imm B, R]): R,
   }
-EitherMatch[A:*,B:*,R:**]:{
+EitherMatch[A:*,B:*,R:**]: Transient{
   mut .a(x: A): R,
   mut .b(x: B): R,
   }

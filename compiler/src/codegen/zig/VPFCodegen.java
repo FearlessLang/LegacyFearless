@@ -161,7 +161,7 @@ class VPFCodegen {
     for (var sub : vpf.plainExprs) {
       resultMap.put(sub.index, parent.ownedExpr(sub.expr, true));
     }
-    sb.append("return ").append(emitCombinerFromMap(vpf, resultMap)).append(";\n");
+    sb.append("return ").append(emitCombinerFromMap(vpf, resultMap, parent)).append(";\n");
 
     sb.append("}");
     parent.currentState().functions.add(sb.toString());
@@ -369,7 +369,7 @@ class VPFCodegen {
     sb.append("shadow_stack_mod.freeObligation(child_obl_opt.?);\n");
     emitWaitForwardedObligations(sb, forwardedChildOblFields);
     var resultMap = buildThiefCombinerMap(allFrameAdding, fwdCount, myGlobalIdx);
-    sb.append("return ").append(emitCombinerFromMap(vpf, resultMap)).append(";\n");
+    sb.append("return ").append(emitCombinerFromMap(vpf, resultMap, thiefGen)).append(";\n");
   }
 
   private void emitPushFrame(StringBuilder sb, String hashName,
@@ -428,7 +428,7 @@ class VPFCodegen {
   }
 
   /** Emit a combiner call using a pre-built sub-expr-index → variable-name map. */
-  private String emitCombinerFromMap(VPFCallInfo vpf, Map<Integer, String> resultMap) {
+  private String emitCombinerFromMap(VPFCallInfo vpf, Map<Integer, String> resultMap, MIRVisitor<String> codegen) {
     var allArgs = new String[vpf.subExprs.size()];
     for (var sub : vpf.subExprs) {
       if (resultMap.containsKey(sub.index)) {
@@ -436,7 +436,7 @@ class VPFCodegen {
       } else {
         allArgs[sub.index] = (sub.expr instanceof MIR.X x)
           ? "locals." + parent.id.varName(x.name()) + ".share()"
-          : sub.expr.accept(parent, true);
+          : sub.expr.accept(codegen, true);
       }
     }
 

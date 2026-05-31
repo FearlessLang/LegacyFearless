@@ -92,7 +92,7 @@ FTestResultKind: {
   .failed(details: Str): TestResultKind -> {.match(m) -> m.failed(details)},
   .errored(details: Str): TestResultKind -> {.match(m) -> m.errored(details)},
   }
-TestResultKindMatcher[R:*]: {
+TestResultKindMatcher[R:*]: Transient{
   mut .passed: R,
   mut .skipped: R,
   mut .failed(details: Str): R,

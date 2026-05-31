@@ -14,12 +14,15 @@ package base.flows
 _FeartDriver: Sealed{
   /// This method is functionally the same as the `.fold` method on the public API allowing for arbitrary
   /// folding of a split flow.
-  mut .driveReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read F[A,E,A]): A -> _FeartDriver.splitMatch[E,A](flow, {
+  mut .driveReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read F[A,E,A]): A ->
+    this.driveReduceFn[E,A](flow, initial, read _FeartReduceFn[A,E]{a, e -> combine#(a, e)}),
+
+  mut .driveReduceFn[E:*,A:*](flow: mut Flow[E], initial: A, combine: read _FeartReduceFn[A,E]): A -> _FeartDriver.splitMatch[E,A](flow, {
     .some(left, right) -> this.shouldStop ? {
       .then -> initial,
       .else -> _FeartDriver.merge[E,A](
-        this.driveReduce[E,A](left, initial, combine),
-        this.driveReduce[E,A](right, initial, combine),
+        this.driveReduceFn[E,A](left, initial, combine),
+        this.driveReduceFn[E,A](right, initial, combine),
         combine
         ),
       },
@@ -34,7 +37,7 @@ _FeartDriver: Sealed{
       .else -> _FeartDriver.merge[mut List[E], mut List[E]](
         this.driveCollect[E](left),
         this.driveCollect[E](right),
-        _FeartDriver.collectReducer[E]
+        _FeartReduceFn[mut List[E], mut List[E]]{l, r -> _FeartDriver.collectReducer[E]#(l, r)}
         ),
       },
     .empty -> this.runChunkCollect[E](flow),
@@ -46,7 +49,7 @@ _FeartDriver: Sealed{
       .else -> _FeartDriver.merge[mut Opt[R], mut Opt[R]](
         this.driveFindMap[E,R](left, f),
         this.driveFindMap[E,R](right, f),
-        _FeartDriver.findMapReducer[R]
+        _FeartReduceFn[mut Opt[R], mut Opt[R]]{l, r -> _FeartDriver.findMapReducer[R]#(l, r)}
         ),
       },
     .empty -> this.runChunkFindMap[E,R](flow, f),
@@ -85,33 +88,37 @@ _FeartDriver: Sealed{
       .else -> _FeartDriver.merge[mut Opt[R], mut Opt[R]](
         this.driveUnorderedFindMap[E,R](left, f),
         this.driveUnorderedFindMap[E,R](right, f),
-        _FeartDriver.findMapReducer[R]
+        _FeartReduceFn[mut Opt[R], mut Opt[R]]{l, r -> _FeartDriver.findMapReducer[R]#(l, r)}
         ),
       },
     .empty -> this.runChunkUnorderedFindMap[E,R](flow, f),
     }),
 
-  /// Parallel max-by-comparator. The merger captures `compare` and reduces two
-  /// Opt[E] halves to a single Opt[E]. Factored into a named method
-  /// (`maxReducer`) instead of an inline lambda because Fearless's type
-  /// inference fails to propagate the expected `read F[Opt[E],Opt[E],Opt[E]]`
-  /// shape down through the inline `{l,r -> ...}` literal in this context.
-  /// Method form sidesteps that. Fearless can infer the lambda returned by
-  /// `maxReducer[E](compare)` cleanly because the method's return type is
-  /// declared explicitly.
+  /// Parallel max-by-comparator. The transient merger captures `compare` and
+  /// reduces two Opt[E] halves to a single Opt[E].
   mut .driveMax[E:*](flow: mut Flow[E], compare: read F[E, E, Ordering]): mut Opt[E] -> _FeartDriver.splitMatch[E, mut Opt[E]](flow, {
     .some(left, right) -> this.shouldStop ? {
       .then -> {},
       .else -> _FeartDriver.merge[mut Opt[E], mut Opt[E]](
         this.driveMax[E](left, compare),
         this.driveMax[E](right, compare),
-        _FeartDriver.maxReducer[E](compare)
+        read _FeartReduceFn[mut Opt[E], mut Opt[E]]{l, r -> l.match{
+          .empty -> r,
+          .some(a) -> r.match{
+            .empty -> l,
+            .some(b) -> compare#(a, b).match{
+              .less -> r,
+              .equal -> l,
+              .greater -> l,
+              },
+            },
+          }}
         ),
       },
     .empty -> this.runChunkMax[E](flow, compare),
     }),
   .splitMatch[E:*, R:*](flow: mut Flow[E], cases: mut _FeartSplitMatch[E, R]): R -> Magic!,
-  mut .runChunkReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read F[A,E,A]): A -> Magic!,
+  mut .runChunkReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read _FeartReduceFn[A,E]): A -> Magic!,
   mut .runChunkCollect[E:*](flow: mut Flow[E]): mut List[E] -> Magic!,
   mut .runChunkFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> Magic!,
   mut .runChunkFor[E:*](flow: mut Flow[E], f: read F[E, Void]): Void -> Magic!,
@@ -127,7 +134,7 @@ _FeartDriver: Sealed{
   /// directly (the iso-MF unwrapping happens in `flow_fold`'s Zig dispatch),
   /// so the seed is `{}` not `{{}}`.
   mut .runChunkMax[E:*](flow: mut Flow[E], compare: read F[E, E, Ordering]): mut Opt[E] ->
-    this.runChunkReduce[E, mut Opt[E]](flow, {}, {max, b -> max.match{
+    this.runChunkReduce[E, mut Opt[E]](flow, {}, read _FeartReduceFn[mut Opt[E], E]{max, b -> max.match{
       .empty -> Opts#b,
       .some(a) -> compare#(a, b).match{
         .less -> Opts#b,
@@ -135,24 +142,6 @@ _FeartDriver: Sealed{
         .greater -> max,
         },
       }}),
-
-  /// Builds the (Opt[E], Opt[E]) -> Opt[E] merge function used by `driveMax`.
-  /// Captures `compare` so the returned lambda can decide which Opt wins. A
-  /// named method declaration gives Fearless a concrete return type to infer
-  /// against, which inline `{l,r -> ...}` literals at the merge call site fail
-  /// to resolve.
-  .maxReducer[E:*](compare: read F[E, E, Ordering]): read F[mut Opt[E], mut Opt[E], mut Opt[E]] ->
-    {l, r -> l.match{
-      .empty -> r,
-      .some(a) -> r.match{
-        .empty -> l,
-        .some(b) -> compare#(a, b).match{
-          .less -> r,
-          .equal -> l,
-          .greater -> l,
-          },
-        },
-      }},
 
   /// Cancellation poll. Zig body loads TLS `active_scope` and walks its
   /// parent chain for the cancel bit (see `scope.zig::currentCancelled`).
@@ -187,8 +176,10 @@ _FeartDriver: Sealed{
   /// method only accepts (A,E) args, but we need to pass (A,A). The Zig
   /// vtable does the FatPtr-level dispatch, correct whenever A=E at runtime
   /// (sum-like left-folds). Mixed-type accumulators (A≠E) are not supported.
-  .merge[E:*,A:*](left: A, right: A, combine: read F[A,E,A]): A -> Magic!,
+  .merge[E:*,A:*](left: A, right: A, combine: read _FeartReduceFn[A,E]): A -> Magic!,
   }
+
+_FeartReduceFn[A:*, E:*]: Transient, F[A,E,A]{}
 
 _FeartSplitMatch[E:*, R:*]: Transient{
   mut .some(left: mut Flow[E], right: mut Flow[E]): R,

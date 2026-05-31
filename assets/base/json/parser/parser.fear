@@ -23,7 +23,7 @@ _TopLevelParser: _ParserActor{downstream, behaviour, token -> Block#
   .return {behaviour.get#(downstream, behaviour, token)}
   }
 _ValueParser: {#(collector: mut _Consumer[Json], old: mut _ParserActor): mut _ParserActor -> {'parser
-  downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
+  downstream, behaviour, token -> _SubMatches#(token, mut _SubMatch[ActorRes]{
     .mode -> "value", .token -> token,
     .true -> Block#(collector#(Jsons.bool True), behaviour.set(old), ActorRes.continue),
     .false -> Block#(collector#(Jsons.bool False), behaviour.set(old), ActorRes.continue),
@@ -39,7 +39,7 @@ _ArrayParser: {#(collector: mut _Consumer[Json], old: mut _ParserActor): mut _Pa
   .let[mut IsoPod[UList[Json]]] es = {IsoPod#(UList#)}
   .let[mut _Consumer[Json]] collector' = {{value -> es.mutate{es' -> es'.add(value)}!}}
   .return {{'parser
-    downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
+    downstream, behaviour, token -> _SubMatches#(token, mut _SubMatch[ActorRes]{
       .mode -> "array", .token -> token,
       .cs -> Block#(collector#(Jsons.array(List.consumeUList[Json](es!))), behaviour.set(old), ActorRes.continue),
       .default(_) -> _ValueParser
@@ -49,7 +49,7 @@ _ArrayParser: {#(collector: mut _Consumer[Json], old: mut _ParserActor): mut _Pa
     }}
   }
 _ArrayCommaParser: {#(collector: mut _Consumer[Json], old: mut _ParserActor): mut _ParserActor -> {'parser
-  downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
+  downstream, behaviour, token -> _SubMatches#(token, mut _SubMatch[ActorRes]{
     .mode -> "comma or end of array", .token -> token,
     .cs -> old#(downstream, behaviour, token),
     .comma -> Block#(
@@ -63,7 +63,7 @@ _ObjectParser: {#(collector: mut _Consumer[Json], old: mut _ParserActor): mut _P
   .let[mut IsoPod[LinkedHashMap[Str,Json]]] es = {IsoPod#(Maps.hashMap[Str,Json]({k1,k2 -> k1 == k2}, {k->k}))}
   .let[mut _Consumer[Str,Json]] collector' = {{key, value -> es.mutate{es' -> es'.put(key, value)}!}}
   .return {{'parser
-    downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
+    downstream, behaviour, token -> _SubMatches#(token, mut _SubMatch[ActorRes]{
       .mode -> "object", .token -> token,
       .cc -> Block#(collector#(Jsons.object(es!)), behaviour.set(old), ActorRes.continue),
       .quoted(_) -> Block#
@@ -76,7 +76,7 @@ _ObjectParser: {#(collector: mut _Consumer[Json], old: mut _ParserActor): mut _P
 _MemberKeyParser: {#(collector: mut _Consumer[Str,Json], old: mut _ParserActor): mut _ParserActor -> Block#
   .let[mut Str] key = {mut ""}
   .let hasKey = {Vars#[Bool]False}
-  .return {{downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{'matcher
+  .return {{downstream, behaviour, token -> _SubMatches#(token, mut _SubMatch[ActorRes]{'matcher
     .mode -> "object member key", .token -> token,
     .quoted(str) -> key.isEmpty ? {
       .then -> Block#(key.append(str), hasKey.set(True), ActorRes.continue),
@@ -89,7 +89,7 @@ _MemberKeyParser: {#(collector: mut _Consumer[Str,Json], old: mut _ParserActor):
     })}}
   }
 _MemberValueParser: {#(collector: mut _Consumer[Str,Json], old: mut _ParserActor, key: Str): mut _ParserActor -> {'parser
-  downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
+  downstream, behaviour, token -> _SubMatches#(token, mut _SubMatch[ActorRes]{
     .mode -> "object member value", .token -> token,
     .default(_) -> Block#
       .let[mut _Consumer[Json]] collector' = {{value -> collector#(key, value)}}
@@ -99,7 +99,7 @@ _MemberValueParser: {#(collector: mut _Consumer[Str,Json], old: mut _ParserActor
     })
   }}
 _ObjectCommaParser: {#(collector: mut _Consumer[Str,Json], old: mut _ParserActor): mut _ParserActor -> {'parser
-  downstream, behaviour, token -> token.match(mut _SubMatch[ActorRes]{
+  downstream, behaviour, token -> _SubMatches#(token, mut _SubMatch[ActorRes]{
     .mode -> "comma or end of object", .token -> token,
     .cc -> old#(downstream, behaviour, token),
     .comma -> Block#(
@@ -124,22 +124,38 @@ TopLevelMatch: {
       )
     }}
 
-_SubMatch[R:**]: TokenMatch[R]{
+_SubMatches: {
+  #[R:**](token: Token, m: mut _SubMatch[R]): R -> token.match{
+    .true -> m.true,
+    .false -> m.false,
+    .null -> m.null,
+    .quoted(chars) -> m.quoted(chars),
+    .numeric(num) -> m.numeric(num),
+    .os -> m.os,
+    .cs -> m.cs,
+    .oc -> m.oc,
+    .cc -> m.cc,
+    .comma -> m.comma,
+    .colon -> m.colon,
+    }
+  }
+
+_SubMatch[R:**]: {
   read .mode: Str,
   read .token: Token,
   read .errorSuffix: Str -> mut " at " + (this.token.line.str) + ":" + (this.token.col.str),
   mut .default(kind: Str): R -> Error.msg (mut "Unexpected " + kind + " when parsing a JSON " + (this.mode) + (this.errorSuffix)),
-  .true -> this.default("'true'"),
-  .false -> this.default("'false'"),
-  .null -> this.default("'null'"),
-  .quoted(chars) -> this.default(mut "string \"" + chars + "\""),
-  .numeric(num) -> this.default("number " + (num.str)),
-  .os -> this.default("'['"),
-  .cs -> this.default("']'"),
-  .oc -> this.default("'{'"),
-  .cc -> this.default("'}'"),
-  .comma -> this.default("','"),
-  .colon -> this.default("':'"),
+  mut .true: R -> this.default("'true'"),
+  mut .false: R -> this.default("'false'"),
+  mut .null: R -> this.default("'null'"),
+  mut .quoted(chars: Str): R -> this.default(mut "string \"" + chars + "\""),
+  mut .numeric(num: Float): R -> this.default("number " + (num.str)),
+  mut .os: R -> this.default("'['"),
+  mut .cs: R -> this.default("']'"),
+  mut .oc: R -> this.default("'{'"),
+  mut .cc: R -> this.default("'}'"),
+  mut .comma: R -> this.default("','"),
+  mut .colon: R -> this.default("':'"),
   }
 
 _Consumer[A:**]: { mut #(a: A): Void }

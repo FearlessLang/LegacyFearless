@@ -51,7 +51,7 @@ Infos: {
     .accept(visitor) -> visitor.map(info),
     },
   }
-InfoVisitor[R]: {
+InfoVisitor[R]: Transient{
   .msg(info: Info): R,
   .list(info: Info): R,
   .map(info: Info): R,
@@ -59,11 +59,11 @@ InfoVisitor[R]: {
 
 _InfoToJson: InfoVisitor[Json]{
   .msg(info) -> Jsons.string(info.msg),
-  .list(info) -> Jsons.array(info.list.flow.map{info' -> info'.accept(this)}.list),
+  .list(info) -> Jsons.array(info.list.flow.map{info' -> info'.accept(_InfoToJson)}.list),
   .map(info) -> Jsons.object(info.map.flow
     .map{kv -> Entry[Str,Json]{
       .key -> kv.key,
-      .value -> kv.value.accept(this),
+      .value -> kv.value.accept(_InfoToJson),
       }}
     .fold(
       {Maps.hashMap[Str,Json]({k1, k2 -> k1 == k2}, {::})},
