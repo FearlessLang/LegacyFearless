@@ -2,7 +2,6 @@ package base.json
 alias base.iter.Iter as Iter,
 
 alias base.IsoPod as IsoPod,
-alias base.Transient as Transient,
 
 alias base.caps.Write as Write,
 alias base.caps.Read as Read,

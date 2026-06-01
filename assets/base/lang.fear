@@ -4,7 +4,6 @@ alias base.caps.System as System,
 Main: { #(s: mut System): Void }
 Sealed: {}
 Void: Sealed{}
-Transient: {}
 
 Abort: Sealed{![R:**]: R -> this!} // can be optimised to just terminate (goes stuck)
 Magic: Sealed{

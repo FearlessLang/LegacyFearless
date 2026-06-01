@@ -13,4 +13,4 @@ Assert:Sealed{
   ._fail[R:imm]: R -> Magic!,
   ._fail[R:imm](msg: Str): R -> Magic!,
   }
-AssertCont[R:imm]: Transient{ #: R }
+AssertCont[R:imm]: { #: R }

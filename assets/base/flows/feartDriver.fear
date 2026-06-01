@@ -179,9 +179,9 @@ _FeartDriver: Sealed{
   .merge[E:*,A:*](left: A, right: A, combine: read _FeartReduceFn[A,E]): A -> Magic!,
   }
 
-_FeartReduceFn[A:*, E:*]: Transient, F[A,E,A]{}
+_FeartReduceFn[A:*, E:*]: F[A,E,A]{}
 
-_FeartSplitMatch[E:*, R:*]: Transient{
+_FeartSplitMatch[E:*, R:*]: {
   mut .some(left: mut Flow[E], right: mut Flow[E]): R,
   mut .empty: R,
   }

@@ -2,7 +2,6 @@ package base.test
 
 alias base.Block as Block,
 alias base.Sealed as Sealed,
-alias base.Transient as Transient,
 alias base.Void as Void,
 alias base.Bool as Bool, alias base.True as True, alias base.False as False,
 alias base.Nat as Nat, alias base.Int as Int, alias base.Float as Float,

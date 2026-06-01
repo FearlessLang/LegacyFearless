@@ -21,7 +21,7 @@ IsoPod[T]: {
       .empty -> m.info(Infos.msg "The IsoPod was empty"),
       }}
   }
-IsoConsumer[T, R:**]: Transient{
+IsoConsumer[T, R:**]: {
   mut .some(x: iso T): R,
   mut .empty: R,
   }

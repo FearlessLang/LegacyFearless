@@ -37,6 +37,7 @@ class VPFCodegen {
   /** Find a VPFParallelisable MCall in the function body, return null if none. */
   VPFCallInfo findVPFCall(MIR.E body) {
     return switch (body) {
+      case MIR.Box box -> findVPFCall(box.inner());
       case MIR.MCall call -> {
         if (call.variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
           yield buildVPFInfo(call);
@@ -169,6 +170,9 @@ class VPFCodegen {
 
   /** Like findVPFCall but doesn't look through BoolExpr (inner level). */
   private VPFCallInfo findVPFCallInner(MIR.E body) {
+    if (body instanceof MIR.Box box) {
+      return findVPFCallInner(box.inner());
+    }
     if (body instanceof MIR.MCall call &&
         call.variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
       return buildVPFInfo(call);
@@ -195,8 +199,11 @@ class VPFCodegen {
     return new VPFCallInfo(call, null, subExprs, plainExprs, hashExpr);
   }
 
-  /** MCalls and BoolExprs are the only MIR expressions that add stack frames. */
+  /** MCalls and BoolExprs are the only MIR expressions that add stack frames; Box is transparent here. */
   private boolean isFrameAddingExpr(MIR.E expr) {
+    if (expr instanceof MIR.Box box) {
+      return isFrameAddingExpr(box.inner());
+    }
     return expr instanceof MIR.MCall || expr instanceof MIR.BoolExpr;
   }
 
@@ -512,6 +519,9 @@ class VPFCodegen {
         })
         .collect(Collectors.joining(", "));
       return delegate.withTransientPrelude(prelude, fRef + "(" + args + ")");
+    }
+    @Override public String visitBox(MIR.Box box, boolean checkMagic) {
+      return delegate.boxExpr(box.inner(), this, checkMagic);
     }
 
   }

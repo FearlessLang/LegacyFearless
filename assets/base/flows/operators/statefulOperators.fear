@@ -120,7 +120,7 @@ ActorRes: Sealed{
   .continue: ActorRes -> {.match(m) -> m.continue},
   .stop: ActorRes -> {.match(m) -> m.stop},
   }
-ActorResMatch[R:*]: Transient{ mut .continue: R, mut .stop: R, }
+ActorResMatch[R:*]: { mut .continue: R, mut .stop: R, }
 
 _ActorSinks: {#[T:*](sink: mut _Sink[T]): mut _ActorSink[T] -> mut _ActorSink[T:*]: {
   mut #(x: T): Void -> sink#x,

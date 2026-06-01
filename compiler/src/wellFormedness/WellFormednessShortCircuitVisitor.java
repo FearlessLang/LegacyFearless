@@ -43,7 +43,6 @@ public class WellFormednessShortCircuitVisitor extends ShortCircuitVisitorWithEn
     return ShortCircuitVisitor.visitAll(e.its(), it->noPrivateTraitOutsidePkg(it.name()))
       .or(()->validLambdaMdf(e))
       .or(()->noSealedOutsidePkg(e))
-      .or(()->noTransientWithIdentity(e))
       .or(()->noImplInlineDec(e))
       .or(()->noAbsMethods(e))
       .or(()->noFreeGensInLambda(e))
@@ -142,19 +141,6 @@ public class WellFormednessShortCircuitVisitor extends ShortCircuitVisitorWithEn
     }
     if (e.meths().isEmpty()) { return Optional.empty(); }
     return Optional.of(Fail.sealedCreation(sealedDecs.getFirst(), pkg).pos(e.pos()));
-  }
-
-  private Optional<CompileError> noTransientWithIdentity(E.Lambda e) {
-    // Boxing relocates a transient (stack -> heap); a type that exposes identity
-    // would observe that move, so the two traits must never be composed.
-    var supers = Stream.concat(Stream.of(e.id().toIT()), e.its().stream())
-      .map(Id.IT::name)
-      .flatMap(dec->Stream.concat(Stream.of(dec), p.superDecIds(dec).stream()))
-      .collect(Collectors.toSet());
-    if (supers.contains(Magic.Transient) && supers.contains(Magic.HasIdentity)) {
-      return Optional.of(Fail.transientWithIdentity(e.id().id()).pos(e.pos()));
-    }
-    return Optional.empty();
   }
 
   private List<Id.DecId> getSealedDecs(Id.IT<T> base, List<Id.IT<T>> its, String pkg) {

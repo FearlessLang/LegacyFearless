@@ -85,7 +85,7 @@ _LexStartingToken: Actor[mut _LexerCtx,Str,Token]{downstream, ctx, e -> Block#
   .return {ActorRes.continue}
   }
 
-TokenMatch[R:**]: Transient{
+TokenMatch[R:**]: {
   mut .true: R,
   mut .false: R,
   mut .null: R,
@@ -167,7 +167,7 @@ Token: {
   read .col: Nat,
   }
 
-_LexerModeMatch[R:**]: Transient{
+_LexerModeMatch[R:**]: {
   mut .value: R,
   mut .string: R,
   mut .stringEscape: R,

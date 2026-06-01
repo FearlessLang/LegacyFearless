@@ -25,7 +25,7 @@ Action[T:*]: {
   mut .ok: mut Opt[T] -> this.run{.ok(x) -> Opts#x, .info(_) -> {}},
   mut .info: Opt[Info] -> this.run{.ok(_) -> {}, .info(i) -> Opts#i},
   }
-ActionMatch[T:*,R:*]: Transient{
+ActionMatch[T:*,R:*]: {
   mut .ok(x: T): R,
   mut .info(info: Info): R,
   }

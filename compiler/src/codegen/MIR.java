@@ -178,7 +178,7 @@ public sealed interface MIR {
       }
       record Var(String name, E value) implements BlockStmt {
         @Override public E e() { return value; }
-        @Override public Let withE(E e) { return new Let(name, e); }
+        @Override public Var withE(E e) { return new Var(name, e); }
       }
     }
 
@@ -209,6 +209,13 @@ public sealed interface MIR {
     @Override public MT t() {return e.t();}
     @Override public <R> R accept(MIRVisitor<R> v, boolean checkMagic) {
       return v.visitUpdatableListAsIdFnCall(this, checkMagic);
+    }
+  }
+
+  record Box(E inner) implements E {
+    @Override public MT t() { return inner.t(); }
+    @Override public <R> R accept(MIRVisitor<R> v, boolean checkMagic) {
+      return v.visitBox(this, checkMagic);
     }
   }
 

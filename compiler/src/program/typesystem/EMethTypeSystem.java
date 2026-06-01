@@ -79,11 +79,6 @@ public interface EMethTypeSystem extends ETypeSystem {
     return cm.withSig(res);
   }
   private FailOr<T> visitMCall(Mdf mdf0, IT<T> recvIT, E.MCall e) {
-    var recvT = new T(mdf0, recvIT);
-    var recvTransientErr = TransientSemantics.checkReceiver(p(), recvT);
-    if (recvTransientErr.isPresent()) {
-      return FailOr.err(() -> recvTransientErr.get().pos(e.pos()));
-    }
     var sigs = p().meths(xbs(),mdf0,recvIT, e.name(),depth()).stream()
       .map(s->applyGenerics(s,e.ts()))
       .sorted(Comparator.comparingInt(cm->
@@ -134,22 +129,6 @@ public interface EMethTypeSystem extends ETypeSystem {
     return true;
   }
   private FailOr<T> selectResult(E.MCall e, CM selected, MultiSig multi, List<T> t1n){
-    // Storage-like calls (Vars/List/UList magic containers) take the transient through a
-    // generic parameter and hand it back inside a generic return. Both the argument check
-    // and the return check would otherwise mask the more precise transientStorage error,
-    // so the storage check runs first.
-    var storageErr = TransientSemantics.checkStorageLikeCall(p(), selected, t1n);
-    if (storageErr.isPresent()) {
-      return FailOr.err(() -> storageErr.get().pos(e.pos()));
-    }
-    var actualErr = TransientSemantics.checkArgumentsAllowedByOriginalParameters(p(), selected, t1n);
-    if (actualErr.isPresent()) {
-      return FailOr.err(() -> actualErr.get().pos(e.pos()));
-    }
-    var selectedRetErr = TransientSemantics.checkReturn(p(), selected.sig().ret());
-    if (selectedRetErr.isPresent()) {
-      return FailOr.err(() -> selectedRetErr.get().pos(e.pos()));
-    }
     assert multi.tss().size()==t1n.size();//That is, tss does not have 'this'?
     var sel= IntStream.range(0, multi.rets().size())
       .filter(i->ok(multi,i,t1n))
@@ -163,10 +142,6 @@ public interface EMethTypeSystem extends ETypeSystem {
     Mdf mdf = multi.recvMdfs().get(i);
     List<T> ts= multi.tss().stream().map(tsj->tsj.get(i)).toList();
     T ret= multi.rets().get(i);
-    var retErr = TransientSemantics.checkReturn(p(), ret);
-    if (retErr.isPresent()) {
-      return FailOr.err(() -> retErr.get().pos(e.pos()));
-    }
     var vpfMode = ComputeVPFMode.of(this, e);
     TsT tst = new TsT(mdf, ts, ret, selected, vpfMode);
     resolvedCalls().put(e.callId(), tst);

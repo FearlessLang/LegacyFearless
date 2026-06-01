@@ -10,7 +10,7 @@ Opt[T: imm]:{
   .isEmpty: Bool -> this.match{ .none -> True, .some(_) -> False },
   .isSome: Bool -> this.match{ .none -> False, .some(_) -> True },
   }
-OptMatch[T: imm,R: imm]: Transient{ .some(x:T): R, .none: R }
+OptMatch[T: imm,R: imm]: { .some(x:T): R, .none: R }
 OptFlatMap[T: imm,R: imm]:OptMatch[T,Opt[R]]{ .none -> {} }
 OptMap[T:imm,R:imm]:OptMatch[T,Opt[R]]{ #(t:T):R, .some(x) -> Opt#(this#x), .none -> {} }
 OptDo[T:imm]:OptMatch[T,Opt[T]]{

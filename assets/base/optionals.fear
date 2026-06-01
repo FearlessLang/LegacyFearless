@@ -52,7 +52,7 @@ _Opt[T:*]: Sealed{ // Sealed because potential magic on .flow
   imm  .ifSome(f: mut MF[imm T, Void]): Void,
   }
 
-OptMatch[T:*, R:**]: Transient{mut .some(x: T): R, mut .empty: R}
+OptMatch[T:*, R:**]: {mut .some(x: T): R, mut .empty: R}
 OptMap[T:*,R:*]: OptMatch[T, mut Opt[R]]{
   mut #(t: T): R,
   .some(x) -> Opts#(this#x),

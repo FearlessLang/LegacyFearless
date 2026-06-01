@@ -25,4 +25,7 @@ public interface MIRVisitor<R> {
   default R visitUpdatableListAsIdFnCall(MIR.UpdatableListAsIdFnCall call, boolean checkMagic) {
     return call.e().accept(this, checkMagic);
   }
+  default R visitBox(MIR.Box box, boolean checkMagic) {
+    return box.inner().accept(this, checkMagic);
+  }
 }

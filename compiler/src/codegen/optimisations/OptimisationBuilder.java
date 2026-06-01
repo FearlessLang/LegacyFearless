@@ -35,6 +35,9 @@ public class OptimisationBuilder {
   public OptimisationBuilder withAsIdFnOptimisation() {
     return withOptimisation(new AsIdFnOptimisation(magic));
   }
+  public OptimisationBuilder withBoxingOptimisation() {
+    return withOptimisation(new BoxingOptimisation(magic));
+  }
   public OptimisationBuilder withOptimisation(MIRCloneVisitor optimisation) {
     passes.add(optimisation);
     return this;

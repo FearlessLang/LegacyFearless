@@ -17,4 +17,4 @@ Slots: {#[E:*]: mut Slot[E] -> Block#
     mut .opt: mut Opt[E] -> e.get,
     }}
   }
-SlotMatch[E:*]: Transient{mut .some(x: E): E, mut .empty: E}
+SlotMatch[E:*]: {mut .some(x: E): E, mut .empty: E}

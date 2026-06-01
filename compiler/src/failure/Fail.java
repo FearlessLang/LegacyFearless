@@ -350,30 +350,6 @@ public class Fail{
     return of("Object literals must implement all callable methods. The following methods are unimplemented: "+unimplementedList+".");
   }
 
-  public static CompileError transientReturn(ast.T t) {
-    return of("Transient values may not be returned from methods. The returned type was "+t+".");
-  }
-
-  public static CompileError transientArgument(ast.T argument, ast.T parameter) {
-    return of("A transient value of type "+argument+" may only be passed to a type whose concrete type implements base.Transient. The formal type was "+parameter+".");
-  }
-
-  public static CompileError transientWithIdentity(Id.DecId d) {
-    return of("The type "+d+" may not implement both base.Transient and base.HasIdentity.");
-  }
-
-  public static CompileError transientCapture(String x, ast.T t, ast.T lambdaT) {
-    return of("The transient value '"+x+"' of type "+t+" cannot be captured by non-transient object literal "+lambdaT+".");
-  }
-
-  public static CompileError transientReceiver(ast.T recv) {
-    return of("Calls on transient-containing receivers are only allowed when the receiver's concrete type implements base.Transient. The receiver type was "+recv+".");
-  }
-
-  public static CompileError transientStorage(ast.T actual, CM target) {
-    return of("Transient value "+actual+" cannot be stored by call "+target.toStringSimplified()+".");
-  }
-
   private static String aVsAn(Mdf mdf) {
     if (mdf.isImm()) { return "an "+mdf; }
     return "a "+mdf;

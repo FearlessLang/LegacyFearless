@@ -139,6 +139,7 @@ public class BlockOptimisation implements
       case MIR.StaticCall ignored -> throw Bug.unreachable();
       case MIR.Block ignored -> throw Bug.unreachable();
       case MIR.UpdatableListAsIdFnCall ignored -> throw Bug.unreachable();
+      case MIR.Box box -> flatten(box.inner(), stmts, eagerStmts, self);
     };
   }
 

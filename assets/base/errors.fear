@@ -51,7 +51,7 @@ Infos: {
     .accept(visitor) -> visitor.map(info),
     },
   }
-InfoVisitor[R]: Transient{
+InfoVisitor[R]: {
   .msg(info: Info): R,
   .list(info: Info): R,
   .map(info: Info): R,

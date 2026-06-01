@@ -42,6 +42,7 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
     var magic = new ZigMagicImpls(null, null, mir.p());
     return new OptimisationBuilder(magic)
       .withBoolIfOptimisation()
+      .withBoxingOptimisation()
       .run(mir);
   }
 

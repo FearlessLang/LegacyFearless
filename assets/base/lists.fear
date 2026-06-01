@@ -167,11 +167,11 @@ LList[E:*]:Collection,Sealed{
 //        }
 //      },
   }
-LListMatch[E:*,R:*]: Transient{
+LListMatch[E:*,R:*]: {
   mut .elem(head: E, tail: mut LList[E]): R,
   mut .empty: R,
   }
-LListMatchRead[E:*,R:*]: Transient{
+LListMatchRead[E:*,R:*]: {
   mut .elem(head: read/imm E, tail: read LList[E]): R,
   mut .empty: R,
   }

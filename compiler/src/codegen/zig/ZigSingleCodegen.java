@@ -108,28 +108,16 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return id.getLiteral(p.p(), d).isPresent();
   }
 
-  boolean isTransientType(DecId d) {
-    if (d.equals(Magic.Transient)) { return true; }
-    var seen = new HashSet<DecId>();
-    return isTransientType(d, seen);
+  boolean hasIdentityType(DecId d) {
+    return p.p().superDecIds(d).contains(Magic.HasIdentity);
   }
 
-  private boolean isTransientType(DecId d, Set<DecId> seen) {
-    if (!seen.add(d)) { return false; }
-    var def = p.pkgs().stream()
-      .filter(pkg -> pkg.defs().containsKey(d))
-      .map(pkg -> pkg.defs().get(d))
-      .findFirst()
-      .orElse(null);
-    if (def == null) { return false; }
-    for (var impl : def.impls()) {
-      if (impl.id().equals(Magic.Transient) || isTransientType(impl.id(), seen)) { return true; }
-    }
-    return false;
+  boolean isTransientEligibleType(DecId d) {
+    return !hasIdentityType(d);
   }
 
   boolean isTransientCreateObj(MIR.E e) {
-    return e instanceof MIR.CreateObj obj && isTransientType(obj.concreteT().id()) && !obj.captures().isEmpty();
+    return e instanceof MIR.CreateObj obj && isTransientEligibleType(obj.concreteT().id()) && !obj.captures().isEmpty();
   }
 
   record Materialised(String ref, List<String> prelude) {}
@@ -176,6 +164,76 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       return boolExpr(b, this, checkMagic, true);
     }
     return e.accept(this, checkMagic);
+  }
+
+  String boxExpr(MIR.E e, MIRVisitor<String> gen, boolean checkMagic) {
+    return switch (e) {
+      case MIR.Box box -> boxExpr(box.inner(), gen, checkMagic);
+      case MIR.X x -> boxBorrowedCode(x.accept(gen, checkMagic));
+      case MIR.CreateObj createObj -> boxCreateObj(createObj, gen, checkMagic);
+      case MIR.BoolExpr boolExpr -> boxBoolExpr(boolExpr, gen, checkMagic);
+      case MIR.MCall ignored -> boxOwnedCode(e.accept(gen, checkMagic));
+      case MIR.StaticCall ignored -> boxOwnedCode(e.accept(gen, checkMagic));
+      case MIR.UpdatableListAsIdFnCall ignored -> boxOwnedCode(e.accept(gen, checkMagic));
+      case MIR.Block ignored -> boxOwnedCode(e.accept(gen, checkMagic));
+    };
+  }
+
+  private String boxBorrowedCode(String expr) {
+    return boxOwnedCode(expr + ".share()");
+  }
+
+  private String boxOwnedCode(String expr) {
+    var label = "fear_blk_" + blockCounter++;
+    var tmp = "fear_box_" + blockCounter++;
+    return label + ": {\nconst " + tmp + " = " + expr + ";\nbreak :" + label + " " + tmp + ".box_transient();\n}";
+  }
+
+  private String boxCreateObj(MIR.CreateObj createObj, MIRVisitor<String> gen, boolean checkMagic) {
+    var magicImpl = magic.get(createObj);
+    if (checkMagic && magicImpl.isPresent()) {
+      var res = magicImpl.get().instantiate();
+      if (res.isPresent()) { return boxOwnedCode(res.get()); }
+    }
+
+    var objId = createObj.concreteT().id();
+    var typeDef = p.pkgs().stream()
+      .filter(pkg -> pkg.defs().containsKey(objId))
+      .map(pkg -> pkg.defs().get(objId))
+      .findFirst()
+      .orElse(null);
+    if (typeDef == null || typeDef.singletonInstance().isPresent() || createObj.captures().isEmpty()) {
+      return visitCreateObj(createObj, checkMagic);
+    }
+
+    emitCreateObj(createObj, checkMagic);
+    var prelude = new ArrayList<String>();
+    var boxedFields = new ArrayList<String>();
+    for (var x : createObj.captures()) {
+      var field = id.varName(x.name());
+      var tmp = field + "_boxed";
+      prelude.add("const " + field + "_shared = " + x.accept(gen, checkMagic) + ".share();");
+      prelude.add("const " + tmp + " = " + field + "_shared.box_transient();");
+      prelude.add("defer " + tmp + ".rc_decrement();");
+      boxedFields.add("." + field + " = " + tmp);
+    }
+    return withTransientPrelude(prelude,
+      "rt.obj_k(" + capturesRef(objId) + ", &" + vtableRef(objId) + ", .{ " + String.join(", ", boxedFields) + " })");
+  }
+
+  private String boxBoolExpr(MIR.BoolExpr expr, MIRVisitor<String> gen, boolean checkMagic) {
+    String recv = expr.condition().accept(gen, checkMagic);
+
+    String thenBody = switch (this.funMap.get(expr.then()).body()) {
+      case MIR.Block b -> boxExpr(b.original(), gen, checkMagic);
+      case MIR.E e -> boxExpr(e, gen, checkMagic);
+    };
+    String elseBody = switch (this.funMap.get(expr.else_()).body()) {
+      case MIR.Block b -> boxExpr(b.original(), gen, checkMagic);
+      case MIR.E e -> boxExpr(e, gen, checkMagic);
+    };
+
+    return "(if (" + recv + ".vt == &" + vtableRef(new DecId("base.True", 0)) + ") " + thenBody + " else " + elseBody + ")";
   }
 
   String boolExpr(MIR.BoolExpr expr, MIRVisitor<String> gen, boolean checkMagic, boolean ownedBranches) {
@@ -406,7 +464,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   private void emitVTable(List<MIR.Meth> allMeths, DecId objId) {
     emitVTable(allMeths, objId, false);
-    if (isTransientType(objId) && createObjHasCaptures(objId)) {
+    if (isTransientEligibleType(objId) && createObjHasCaptures(objId)) {
       emitBoxHook(objId);
       emitVTable(allMeths, objId, true);
     }
@@ -445,10 +503,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       + "};");
   }
 
-  // Deliberate invariant: boxing is a tree copy. Shared transient *nodes* are duplicated
-  // rather than shared, which is sound only because a transient node holds no inline
-  // mutable/identity state -- every mutable leaf is a heap object shared by refcount, and the
-  // no-HasIdentity well-formedness rule guarantees the copy is not observable.
   private void emitBoxHook(DecId objId) {
     var typeName = id.getSimpleName(objId);
     var capturesName = capturesRef(objId);
@@ -470,7 +524,8 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var boxedFields = new ArrayList<String>();
     for (var x : captureNames) {
       var field = id.varName(x.name());
-      sb.append("const ").append(field).append("_boxed = captures.").append(field).append(".box_transient();\n");
+      sb.append("const ").append(field).append("_shared = captures.").append(field).append(".share();\n");
+      sb.append("const ").append(field).append("_boxed = ").append(field).append("_shared.box_transient();\n");
       sb.append("defer ").append(field).append("_boxed.rc_decrement();\n");
       boxedFields.add("." + field + " = " + field + "_boxed");
     }
@@ -609,6 +664,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   @Override
   public String visitBoolExpr(MIR.BoolExpr expr, boolean checkMagic) {
     return boolExpr(expr, this, checkMagic, false);
+  }
+
+  @Override
+  public String visitBox(MIR.Box box, boolean checkMagic) {
+    return boxExpr(box.inner(), this, checkMagic);
   }
 
   private String inlineBlock(MIR.Block block) {

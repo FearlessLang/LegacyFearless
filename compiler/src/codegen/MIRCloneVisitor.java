@@ -98,11 +98,32 @@ public interface MIRCloneVisitor extends MIRVisitor<MIR.E> {
     );
   }
 
+  @Override default MIR.E visitBlockExpr(MIR.Block expr, boolean checkMagic) {
+    return new MIR.Block(
+      expr.original().accept(this, checkMagic),
+      expr.stmts().stream().map(stmt -> stmt.withE(stmt.e().accept(this, checkMagic))).toList(),
+      this.visitMT(expr.expectedT())
+    );
+  }
+
+  @Override default MIR.E visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
+    return new MIR.StaticCall(
+      call.original().accept(this, checkMagic),
+      call.fun(),
+      call.args().stream().map(arg -> arg.accept(this, checkMagic)).toList(),
+      call.castTo().map(this::visitMT)
+    );
+  }
+
   @Override default MIR.E visitUpdatableListAsIdFnCall(MIR.UpdatableListAsIdFnCall call, boolean checkMagic) {
     var e = call.e().accept(this, checkMagic);
     if (e instanceof MIR.MCall mCall) {
       return new MIR.UpdatableListAsIdFnCall(mCall);
     }
     return e.accept(this, checkMagic);
+  }
+
+  @Override default MIR.E visitBox(MIR.Box box, boolean checkMagic) {
+    return new MIR.Box(box.inner().accept(this, checkMagic));
   }
 }

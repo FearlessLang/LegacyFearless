@@ -3,7 +3,6 @@ package base
 Main:{ #(args: LList[Str]): Str }
 Sealed:{}
 Void:{}
-Transient: {}
 
 Abort:{ ![R:imm]: R -> this! } // can be optimised to just terminate (goes stuck)
 Magic:{ ![R:imm]: R -> this! } // can be optimised to just terminate (goes stuck)

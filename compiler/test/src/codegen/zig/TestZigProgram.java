@@ -3,6 +3,7 @@ package codegen.zig;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import utils.Base;
+import utils.ResolveResource;
 
 import static codegen.zig.RunZigProgramTests.okBase;
 import static utils.RunOutput.Res;
@@ -310,4 +311,25 @@ public class TestZigProgram {
         })
       }
     """, Base.mutBaseAliases); }
+
+  @Disabled("Broken due to missing magic")
+  @Test void simpleJson() { okBase(new Res("""
+    "Hello!!!\\nHow are you?"
+    "Hello!!!\\nHow 吣are吣 you?"
+    "Hello!!!\\nHow 吣are吣 you? 𝄞"
+    []
+    [[[[]], [], true]]
+    ["abc", "def", true, false, null]
+    ["abc", "def", true, [false], 42.1337, null, []]
+    {}
+    {"single": true}
+    ["ab\\\\c", "def", {}, {"a": "fearless", "b": {"a": true}}]
+    {"value": 12345678901234567000}
+    """, """
+    Invalid string found, expected JSON.
+    Unknown fragment in JSON code:
+    tru at 1:6
+    Invalid string found, expected JSON.
+    Unexpected 'true' when parsing a JSON object at 1:6
+    """, 0), ResolveResource.test("/json/main.fear"), ResolveResource.test("/json/pkg.fear")); }
 }

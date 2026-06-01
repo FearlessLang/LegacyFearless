@@ -1,6 +1,6 @@
 package base
 
-BoolMatch[R:**]: Transient{
+BoolMatch[R:**]: {
   mut .true: R,
   mut .false: R,
   }
@@ -36,4 +36,4 @@ False: Bool{
   .str -> "False",
   .toImm -> False,
   }
-ThenElse[R:**]: Transient{ mut .then: R, mut .else: R, }
+ThenElse[R:**]: { mut .then: R, mut .else: R, }

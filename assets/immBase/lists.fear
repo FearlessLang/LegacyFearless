@@ -29,7 +29,7 @@ LList[E:imm]: Collection,Sealed{
       }
     },
   }
-LListMatch[E:imm,R:imm]: Transient{.elem(head: E, tail: LList[E]): R, .empty: R}
+LListMatch[E:imm,R:imm]: {.elem(head: E, tail: LList[E]): R, .empty: R}
 
 _LListCons: {
   #[E:imm](tail: LList[E], e: E): LList[E] -> Let#{
