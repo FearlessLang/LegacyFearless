@@ -412,6 +412,242 @@ public class TestZigProgram {
       }
     """, Base.mutBaseAliases); }
 
+  // ==========================================================================
+  // These tests are ported from from flows/TestFlowSemantics.java (Java
+  // backend), with FeaRT-adjusted expectations: crash messages are UNQUOTED
+  // (`.msg`, since JSON `.str` is unimplemented in this backend). Par/DP
+  // variants force VPF promotion via okBase(16, ...) so thieves actually steal
+  // chunks and the work-stealing join is exercised; Seq variants use the
+  // default high threshold (sequential).
+  //
+  // Golden rule: a deterministic error in a flow is observably the same
+  // sequential vs data-parallel — the flow-order-FIRST error wins; errors after
+  // a stop (`.limit`) are ignored.
+  // ==========================================================================
+
+  // Throw before a stop: first error in flow order (element 2) propagates.
+  @Test void throwInAFlowBeforeStopSeq() { okBase(new Res("", "Program crashed with: 2[###]", 1), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow#[mut Nat](mut 1, mut 2, mut 3)
+        .map{x->Block#
+          .if {x.nat == 2} .do {Error.msg (x.str)}
+          .return {x.nat * 10}
+          }
+        }
+      .let[Nat] sum = {x#(Flow.uSum)}
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(sum.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases); }
+  @Test void throwInAFlowBeforeStopPar() { okBase(16, new Res("", "Program crashed with: 2[###]", 1), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow#[Nat](1, 2, 3)
+        .map{x->Block#
+          .if {x.nat == 2} .do {Error.msg (x.str)}
+          .return {x.nat * 10}
+          }
+        }
+      .let[Nat] sum = {x#(Flow.uSum)}
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(sum.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases); }
+  @Test void throwInAFlowBeforeStopDP() { okBase(16, new Res("", "Program crashed with: 2[###]", 1), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow.range(+1, +50).map{n->n.nat}.list.flow
+        .map{x->Block#
+          .if {x.nat == 2} .do {Error.msg (x.str)}
+          .return {x.nat * 10}
+          }
+        }
+      .let[Nat] sum = {x#(Flow.uSum)}
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(sum.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases); }
+
+  // Throw after a stop: `.limit(1)` must stop pulling, so element 2 is never
+  // mapped and never throws. Result: element 1 -> 10.
+  @Test void throwInAFlowAfterStopSeq() { okBase(new Res("10", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow#[mut Nat](mut 1, mut 2, mut 3)
+        .map{x->Block#
+          .if {x.nat == 2} .do {Error.msg (x.str)}
+          .return {x.nat * 10}
+          }
+        .limit(1)
+        }
+      .let[Nat] sum = {x#(Flow.uSum)}
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(sum.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases); }
+  @Test void throwInAFlowAfterStopPar() { okBase(16, new Res("10", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow#[Nat](1, 2, 3)
+        .map{x->Block#
+          .if {x.nat == 2} .do {Error.msg (x.str)}
+          .return {x.nat * 10}
+          }
+        .limit(1)
+        }
+      .let[Nat] sum = {x#(Flow.uSum)}
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(sum.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases); }
+  @Test void throwInAFlowAfterStopDP() { okBase(16, new Res("10", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow.range(+1, +50).map{n->n.nat}.list.flow
+        .map{x->Block#
+          .if {x.nat == 2} .do {Error.msg (x.str)}
+          .return {x.nat * 10}
+          }
+        .limit(1)
+        }
+      .let[Nat] sum = {x#(Flow.uSum)}
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(sum.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases); }
+
+  // Multiple throws: leftmost (element 2) wins over a later throw (element 3).
+  @Test void throwMultiplePar() { okBase(16, new Res("", "Program crashed with: 2[###]", 1), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow#[Nat](1, 2, 3)
+        .map{x->Block#
+          .if {x.nat == 2} .do {Error.msg (x.str)}
+          .if {x.nat == 3} .do {Error.msg (x.str)}
+          .return {x.nat * 10}
+          }
+        }
+      .let[Nat] sum = {x#(Flow.uSum)}
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(sum.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases); }
+
+  // Actor throws (stateful -> not DP-split -> sequential). Leftmost wins.
+  @Test void throwMultipleActor() { okBase(new Res("", "Program crashed with: 2[###]", 1), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow#[Nat](1, 2, 3)
+        .actor[Void,Nat](iso Void,{next,_,x->Block#
+          .if {x.nat == 2} .do {Error.msg (x.str)}
+          .if {x.nat == 3} .do {Error.msg (x.str)}
+          .do {next#(x.nat * 10)}
+          .return {{}}
+          })
+        .fold[Nat]({0}, {a, x -> a + x})
+        }
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(x.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases); }
+  @Test void throwMultipleActorFromDP() { okBase(4, new Res("", "Program crashed with: 5[###]", 1), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] list = {List.consumeUList(UList.withCapacity(10) + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10)}
+      .let x = {list.flow
+        .actor[Void,Nat](iso Void,{next,_,x->Block#
+          .if {x.nat == 5} .do {Error.msg (x.str)}
+          .if {x.nat == 7} .do {Error.msg (x.str)}
+          .do {next#(x.nat * 10)}
+          .return {{}}
+          })
+        .fold[Nat]({0}, {a, x -> a + x})
+        }
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(x.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases); }
+
+  // Actor pushError injects a deterministic error element at position 2; the
+  // later Error.msg at position 3 loses. Result: "hello".
+  @Test void pushErrorAndThrowSeq() { okBase(new Res("", "Program crashed with: hello[###]", 1), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow#[mut Nat](mut 1, mut 2, mut 3)
+        .actor[Void,Nat](iso Void,{next,_,x->Block#
+          .if {x.nat == 2} .do {next.pushError(Infos.msg "hello")}
+          .if {x.nat == 3} .do {Error.msg (x.str)}
+          .do {next#(x.nat * 10)}
+          .return {{}}
+          })
+        .fold[Nat]({0}, {a, x -> a + x})
+        }
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(x.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases); }
+  @Test void pushErrorAndThrow() { okBase(new Res("", "Program crashed with: hello[###]", 1), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow#[Nat](1, 2, 3)
+        .actor[Void,Nat](iso Void,{next,_,x->Block#
+          .if {x.nat == 2} .do {next.pushError(Infos.msg "hello")}
+          .if {x.nat == 3} .do {Error.msg (x.str)}
+          .do {next#(x.nat * 10)}
+          .return {{}}
+          })
+        .fold[Nat]({0}, {a, x -> a + x})
+        }
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(x.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases); }
+
+  // Every element throws; the flow-order-first (element 0) must win even under
+  // forced data-parallel promotion (the leftmost spine is on the main fiber).
+  @Test void dataParallelAllThrowsMustGetFirst() { okBase(16, new Res("", "Program crashed with: 0[###]", 1), """
+    package test
+    Test: Main{sys -> Block#(
+      Flow.range(+0, +100_000)
+        .map{i -> Error.msg[Int] (i.str)}
+        .list
+      )}
+    """, Base.mutBaseAliases); }
+
+  // Throw inside an ordered terminal predicate (.first). Leftmost throwing
+  // element wins: seq -> element +1; DP -> first element > +30, i.e. +31.
+  @Test void throwInTerminalSeq() { okBase(new Res("", "Program crashed with: 1[###]", 1), """
+    package test
+    Test: Main{sys -> Block#(
+      Flow#[mut Int](mut +1, mut +2, mut +3)
+        .map{e -> e}
+        .first{e -> Error.msg (e.str)}
+      )}
+    """, Base.mutBaseAliases); }
+  @Test void throwInTerminalDP() { okBase(16, new Res("", "Program crashed with: 31[###]", 1), """
+    package test
+    Test: Main{sys -> Block#(
+      Flow.range(+1, +500)
+        .map{e -> e}
+        .first{e -> e > +30 ? {
+          .then -> Error.msg (e.str),
+          .else -> False
+          }}
+      )}
+    """, Base.mutBaseAliases); }
+
   @Disabled("Broken due to missing magic")
   @Test void simpleJson() { okBase(new Res("""
     "Hello!!!\\nHow are you?"
