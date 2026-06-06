@@ -12,9 +12,14 @@ import java.nio.file.*;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
-public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) {
+public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, Integer tokensThreshold) {
   static final int ZIG_CACHE_VERSION = 1;
+
+  public ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) {
+    this(verbosity, io, null);
+  }
 
   private Path cacheBaseDir() { return io.cachedBase().resolve("zig-cache"); }
   public Path versionedCacheDir() { return cacheBaseDir().resolve("v" + ZIG_CACHE_VERSION); }
@@ -79,7 +84,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
       }
 
       Files.writeString(srcDir.resolve("main.zig"), program.mainFile());
-      Files.writeString(workDir.resolve("build.zig"), buildZig(verbosity.printCodegen()));
+      Files.writeString(workDir.resolve("build.zig"), buildZig(verbosity.printCodegen(), Optional.ofNullable(tokensThreshold).orElse(25_000_000)));
       Files.writeString(workDir.resolve("build.zig.zon"), buildZigZon());
 
       runZigBuild(workDir, zigCacheDir(), zigGlobalCacheDir(), zigOutDir());
@@ -179,7 +184,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
     }
   }
 
-  private String buildZig(boolean enableTracing) {
+  private String buildZig(boolean enableTracing, int tokensThreshold) {
     return """
       const std = @import("std");
       pub fn build(b: *std.Build) void {
@@ -192,6 +197,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
           const log_dispatch = b.option(bool, "log_dispatch", "Enable dispatch/method resolution logging (default: false)") orelse false;
           const log_alloc_caching = b.option(bool, "log_alloc_caching", "Emit alloc-recycler miss events to the trace ring buffer (default: false).") orelse false;
           const track_allocs = b.option(bool, "track_allocs", "Record per-call-site allocation counts/bytes; dumps to FEART_ALLOCS_OUT (default ./feart-allocs.tsv) on exit. Slows execution significantly. (default: false)") orelse false;
+          const tokens_threshold = b.option(u32, "tokens_threshold", "Heartbeat promotion token threshold; lower forces more aggressive VPF promotion (default: 25_000_000)") orelse %d;
 
           const build_options = b.addOptions();
           build_options.addOption(bool, "log_scheduling", log_scheduling);
@@ -200,6 +206,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
           build_options.addOption(bool, "log_trace", log_trace);
           build_options.addOption(bool, "log_alloc_caching", log_alloc_caching);
           build_options.addOption(bool, "track_allocs", track_allocs);
+          build_options.addOption(u32, "tokens_threshold", tokens_threshold);
 
           const exe = b.addExecutable(.{
               .name = "fearless-app",
@@ -270,7 +277,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
               run_cmd.addArgs(args);
           }
       }
-      """.formatted(enableTracing, enableTracing);
+      """.formatted(enableTracing, enableTracing, tokensThreshold);
   }
 
   private String buildZigZon() {

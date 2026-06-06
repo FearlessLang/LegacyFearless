@@ -24,6 +24,11 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   Path executablePath();
   void setExecutablePath(Path path);
 
+  /** Optional heartbeat-promotion threshold override forwarded to the Zig build
+   * (null = use the runtime default). Tests use it to force aggressive VPF
+   * promotion; not exposed on any cross-backend interface. */
+  default Integer tokensThreshold() { return null; }
+
   @Override default void cachePackageTypes(Program program) {
     var versionedDir = new ZigCompiler(verbosity(), io()).versionedCacheDir();
     var baseDecs = program.ds().values().stream()
@@ -54,7 +59,7 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   }
 
   @Override default void compileBackEnd(ZigProgram src) {
-    var compiler = new ZigCompiler(verbosity(), io());
+    var compiler = new ZigCompiler(verbosity(), io(), tokensThreshold());
     var exePath = compiler.compile(src);
     setExecutablePath(exePath);
   }
@@ -64,6 +69,10 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   }
 
   static LogicMainZig of(InputOutput io, Verbosity verbosity) {
+    return of(io, verbosity, null);
+  }
+
+  static LogicMainZig of(InputOutput io, Verbosity verbosity, Integer tokensThreshold) {
     var cachedPkg = new HashSet<String>();
     return new LogicMainZig() {
       private Path exePath;
@@ -72,6 +81,7 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
       public Verbosity verbosity() { return verbosity; }
       public Path executablePath() { return exePath; }
       public void setExecutablePath(Path path) { exePath = path; }
+      public Integer tokensThreshold() { return tokensThreshold; }
     };
   }
 }

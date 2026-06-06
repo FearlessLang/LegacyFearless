@@ -28,12 +28,17 @@ public class RunZigProgramTests {
     assertResMatch(logicMain.run(), expected);
   }
   public static void okBase(Res expected, String... content) {
-    okBaseStrings(expected, Arrays.asList(content));
+    okBaseStrings(expected, Arrays.asList(content), null);
   }
   public static void okBase(Res expected, Path... content) {
-    okBaseStrings(expected, Arrays.stream(content).map(ResolveResource::read).toList());
+    okBaseStrings(expected, Arrays.stream(content).map(ResolveResource::read).toList(), null);
   }
-  private static void okBaseStrings(Res expected, List<String> content) {
+  /** Like {@link #okBase(Res, String...)} but forces the heartbeat promotion
+   * threshold so VPF promotion fires aggressively (exercises work-stealing joins). */
+  public static void okBase(int tokensThreshold, Res expected, String... content) {
+    okBaseStrings(expected, Arrays.asList(content), tokensThreshold);
+  }
+  private static void okBaseStrings(Res expected, List<String> content, Integer tokensThreshold) {
     Main.resetAll();
     var verbosity = new CompilerFrontEnd.Verbosity(true, false, CompilerFrontEnd.ProgressVerbosity.None);
     var workingDir = ResolveResource.freshTmpPath();
@@ -45,7 +50,7 @@ public class RunZigProgramTests {
       workingDir,
       ResolveResource.artefact("/cachedBase")
     );
-    var logicMain = LogicMainZig.of(io, verbosity);
+    var logicMain = LogicMainZig.of(io, verbosity, tokensThreshold);
     assertResMatch(logicMain.run(), expected);
   }
 }
