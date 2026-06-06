@@ -8,7 +8,7 @@ import utils.ResolveResource;
 import static codegen.zig.RunZigProgramTests.okBase;
 import static utils.RunOutput.Res;
 
-@Disabled("Experimental & Slow, run these tests explicitly if you need to")
+//@Disabled("Experimental & Slow, run these tests explicitly if you need to")
 public class TestZigProgram {
   @Test void emptyProgram() { okBase(new Res("", "", 0), """
     package test
@@ -310,6 +310,57 @@ public class TestZigProgram {
         .return {{}}
         })
       }
+    """, Base.mutBaseAliases); }
+
+  @Test void errorUncaught() { okBase(new Res("", "Program crashed with: oh no[###]", 1), """
+    package test
+    Test:Main {sys -> Error.msg[Void] "oh no"}
+    """, Base.mutBaseAliases); }
+
+  // Try catches a deterministic Error and routes it to the .info match arm.
+  @Test void tryCatchExplicitError() { okBase(new Res("Sad", "", 0), """
+    package test
+    Test:Main{s ->
+      s.io.println(Try#[Str]{Error.msg "Sad"}.run{
+        .ok(res) -> res,
+        .info(err) -> err.msg,
+        })
+      }
+    """, Base.mutBaseAliases); }
+
+  @Test void tryCatchNothing() { okBase(new Res("Happy", "", 0), """
+    package test
+    Test:Main{s ->
+      s.io.println(Try#[Str]{"Happy"}.run{
+        .ok(res) -> res,
+        .info(err) -> err.msg,
+        })
+      }
+    """, Base.mutBaseAliases); }
+
+  @Test void tryCatchViaActionDefaults() { okBase(new Res("", "oh no", 0), """
+    package test
+    Test:Main {sys -> sys.io.printlnErr(Try#[Int]{Error.msg "oh no"}.info!.msg)}
+    """, Base.mutBaseAliases); }
+
+  @Test void capTryCatchesNd() { okBase(new Res("", "/ by zero", 0), """
+    package test
+    Test:Main {sys -> sys.io.printlnErr(sys.try#[Int]{+12 / +0}.info!.msg)}
+    """, Base.mutBaseAliases); }
+
+  @Test void plainTryDoesNotCatchNd() { okBase(new Res("", "Program crashed with: / by zero[###]", 1), """
+    package test
+    Test:Main{sys ->
+      sys.io.println(Try#[Int]{+12 / +0}.run{
+        .ok(n) -> n.str,
+        .info(i) -> i.msg,
+        })
+      }
+    """, Base.mutBaseAliases); }
+
+  @Test void abortCrashes() { okBase(new Res("", "Program aborted[###]", 1), """
+    package test
+    Test:Main {sys -> base.Abort![Void]}
     """, Base.mutBaseAliases); }
 
   @Disabled("Broken due to missing magic")

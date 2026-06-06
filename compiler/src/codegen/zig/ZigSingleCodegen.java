@@ -474,30 +474,35 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var typeName = id.getSimpleName(objId);
     var hashes = new ArrayList<String>();
     var methods = new ArrayList<String>();
+    var methodNames = new ArrayList<String>();
 
-    for (var meth : allMeths) {
+    allMeths.forEach(meth -> {
       var sig = meth.sig();
       hashes.add(sigBuilder.hashExpr(sig));
       methods.add("&T_" + typeName + "_" + id.getMName(sig.mdf(), sig.name()));
-    }
+      methodNames.add(sigBuilder.sigString(sig));
+    });
 
     var hashesStr = hashes.isEmpty() ? "&.{}" :
       "&[_]u64{ " + String.join(", ", hashes) + " }";
     var methodsStr = methods.isEmpty() ? "&.{}" :
       "&[_]*const anyopaque{ " + String.join(", ", methods) + " }";
+    var methodNamesStr = methodNames.isEmpty() ? "&.{}" :
+      "&[_][]const u8{ " + String.join(", ", methodNames) + " }";
 
     var isTransient = transientVt && !isSingletonType(objId);
     var storageModeLine = isTransient
-      ? "    .storage_mode = .transient,\n"
-      : isSingletonType(objId) ? "    .storage_mode = .singleton,\n" : "";
-    var boxLine = isTransient ? "    .box_fn = &box_" + typeName + ",\n" : "";
+      ? ".storage_mode = .transient,\n"
+      : isSingletonType(objId) ? ".storage_mode = .singleton,\n" : "";
+    var boxLine = isTransient ? ".box_fn = &box_" + typeName + ",\n" : "";
 
     var vtKey = typeName + (isTransient ? "_transient" : "");
     currentState().vtableDefs.put(vtKey,
       "pub const VT_" + typeName + (isTransient ? "_transient" : "") + ": rt.VTable = .{\n"
-      + "    .type_name = \"" + objId.name() + "/" + objId.gen() + "\",\n"
-      + "    .hashes = " + hashesStr + ",\n"
-      + "    .methods = " + methodsStr + ",\n"
+      + ".type_name = \"" + objId.name() + "/" + objId.gen() + "\",\n"
+      + ".hashes = " + hashesStr + ",\n"
+      + ".methods = " + methodsStr + ",\n"
+      + ".method_names = " + methodNamesStr + ",\n"
       + storageModeLine
       + boxLine
       + "};");

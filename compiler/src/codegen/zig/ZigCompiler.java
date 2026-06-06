@@ -186,13 +186,19 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
           const target = b.standardTargetOptions(.{});
           const optimize = b.standardOptimizeOption(.{});
 
+          const log_trace = b.option(bool, "log_trace", "Enable trace ring buffer events (default: false)") orelse %s;
+          const log_scheduling = b.option(bool, "log_scheduling", "Enable scheduling-related logging (default: false)") orelse false;
+          const log_safety = b.option(bool, "log_safety", "Enable safety-related logging (default: false)") orelse %s;
+          const log_dispatch = b.option(bool, "log_dispatch", "Enable dispatch/method resolution logging (default: false)") orelse false;
+          const log_alloc_caching = b.option(bool, "log_alloc_caching", "Emit alloc-recycler miss events to the trace ring buffer (default: false).") orelse false;
+          const track_allocs = b.option(bool, "track_allocs", "Record per-call-site allocation counts/bytes; dumps to FEART_ALLOCS_OUT (default ./feart-allocs.tsv) on exit. Slows execution significantly. (default: false)") orelse false;
+
           const build_options = b.addOptions();
-          const track_allocs = b.option(bool, "track_allocs", "Record allocation and GC counters (default: false)") orelse false;
-          build_options.addOption(bool, "log_scheduling", false);
-          build_options.addOption(bool, "log_safety", %s);
-          build_options.addOption(bool, "log_dispatch", false);
-          build_options.addOption(bool, "log_alloc_caching", false);
-          build_options.addOption(bool, "log_trace", %s);
+          build_options.addOption(bool, "log_scheduling", log_scheduling);
+          build_options.addOption(bool, "log_safety", log_safety);
+          build_options.addOption(bool, "log_dispatch", log_dispatch);
+          build_options.addOption(bool, "log_trace", log_trace);
+          build_options.addOption(bool, "log_alloc_caching", log_alloc_caching);
           build_options.addOption(bool, "track_allocs", track_allocs);
 
           const exe = b.addExecutable(.{
@@ -211,25 +217,17 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
           const gc_lib = libgc.artifact("gc");
           const gc_include = gc_lib.getEmittedIncludeTree();
 
-          // Bundle the fiber context-switch asm into the exceptions static lib so
-          // that any module that links exceptions_lib also gets the asm symbols,
-          // avoids the .o being compiled/linked once per importing module.
-          const exceptions_lib = b.addLibrary(.{
+          const context_switch_lib = b.addLibrary(.{
               .linkage = .static,
-              .name = "exceptions",
+              .name = "context_switch",
               .root_module = b.createModule(.{
                   .target = target,
                   .optimize = optimize,
-                  .link_libc = true,
               })
           });
-          exceptions_lib.root_module.addCSourceFiles(.{
-              .files = &.{"src/runtime/exceptions.c"},
-              .flags = &.{"-std=c23"},
-          });
           switch (target.result.cpu.arch) {
-              .x86_64 => exceptions_lib.root_module.addAssemblyFile(b.path("src/runtime/context_switch_x86_64.S")),
-              .aarch64 => exceptions_lib.root_module.addAssemblyFile(b.path("src/runtime/context_switch_aarch64.S")),
+              .x86_64 => context_switch_lib.root_module.addAssemblyFile(b.path("src/runtime/context_switch_x86_64.S")),
+              .aarch64 => context_switch_lib.root_module.addAssemblyFile(b.path("src/runtime/context_switch_aarch64.S")),
               else => {},
           }
 
@@ -246,22 +244,12 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) 
           const c_libgc_mod = c_libgc_tc.createModule();
           c_libgc_mod.linkLibrary(gc_lib);
 
-          const c_exceptions_tc = b.addTranslateC(.{
-              .root_source_file = b.path("src/runtime/exceptions.h"),
-              .target = target,
-              .optimize = optimize,
-              .link_libc = true,
-          });
-          c_exceptions_tc.addIncludePath(b.path("src/runtime"));
-          const c_exceptions_mod = c_exceptions_tc.createModule();
-          c_exceptions_mod.linkLibrary(exceptions_lib);
-
-          // The translate-c modules carry linkLibrary(...) for gc_lib/exceptions_lib,
-          // so any importer transitively links the native code exactly once.
           exe.root_module.addImport("libgc", c_libgc_mod);
-          exe.root_module.addImport("exceptions", c_exceptions_mod);
+          exe.root_module.linkLibrary(context_switch_lib);
 
           exe.use_llvm = true;
+          exe.root_module.omit_frame_pointer = false;
+          exe.root_module.strip = false;
 
           const exe_tests = b.addTest(.{
               .root_module = exe.root_module,

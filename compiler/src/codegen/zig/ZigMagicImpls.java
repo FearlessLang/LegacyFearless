@@ -97,6 +97,22 @@ public record ZigMagicImpls(
       }
     };
   }
+  @Override public MagicTrait<MIR.E, String> errorK(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&unwind.VT_ErrorK)");
+  }
+
+  @Override public MagicTrait<MIR.E, String> tryCatch(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&try_rt.VT_Try)");
+  }
+
+  @Override public MagicTrait<MIR.E, String> abort(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&unwind.VT_Abort)");
+  }
+
+  @Override public MagicTrait<MIR.E, String> magicAbort(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&unwind.VT_Magic)");
+  }
+
   @Override public MagicTrait<MIR.E, String> flowK(MIR.E e) {
     return () -> Optional.of("rt.obj_k_singleton(&flow_rt.VT_FlowFactory)");
   }
