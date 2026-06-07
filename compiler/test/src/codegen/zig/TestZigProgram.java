@@ -615,15 +615,34 @@ public class TestZigProgram {
       }
     """, Base.mutBaseAliases); }
 
-  // Every element throws; the flow-order-first (element 0) must win even under
-  // forced data-parallel promotion (the leftmost spine is on the main fiber).
-  @Test void dataParallelAllThrowsMustGetFirst() { okBase(16, new Res("", "Program crashed with: 0[###]", 1), """
+  @Test void dataParallelAllThrowsMustGetFirst1() { okBase(16, new Res("", "Program crashed with: 0[###]", 1), """
     package test
     Test: Main{sys -> Block#(
       Flow.range(+0, +100_000)
-        .map{i -> Error.msg[Int] (i.str)}
+        .map{i -> Error.msg[Int](i.str)}
         .list
       )}
+    """, Base.mutBaseAliases); }
+
+  @Test void dataParallelAllThrowsMustGetFirst2() { okBase(4096, new Res("", "Program crashed with: 80000[###]", 1), """
+    package test
+    Test: Main{sys -> Block#(
+      Flow.range(+0, +100_000)
+        .map{i -> i == +80_000 ? {.then -> Error.msg(i.str), .else -> i}}
+        .list
+      )}
+    """, Base.mutBaseAliases); }
+
+  @Test void dataParallelAllThrowsMustGetFirstWithCatch() { okBase(4096, new Res("80000 <-- caught it!", "", 0), """
+    package test
+    Test: Main{sys -> Try#{
+      Block#[List[Int],Str](Flow.range(+0, +100_000)
+        .map{i -> i == +80_000 ? {.then -> Error.msg(i.str), .else -> i}}
+        .list, "oh no")
+      }.run{
+        .ok(msg) -> sys.io.println(msg),
+        .info(i) -> sys.io.println(i.msg + " <-- caught it!"),
+      }}
     """, Base.mutBaseAliases); }
 
   // Throw inside an ordered terminal predicate (.first). Leftmost throwing
@@ -633,7 +652,7 @@ public class TestZigProgram {
     Test: Main{sys -> Block#(
       Flow#[mut Int](mut +1, mut +2, mut +3)
         .map{e -> e}
-        .first{e -> Error.msg (e.str)}
+        .first{e -> Error.msg(e.str)}
       )}
     """, Base.mutBaseAliases); }
   @Test void throwInTerminalDP() { okBase(16, new Res("", "Program crashed with: 31[###]", 1), """
@@ -642,10 +661,98 @@ public class TestZigProgram {
       Flow.range(+1, +500)
         .map{e -> e}
         .first{e -> e > +30 ? {
-          .then -> Error.msg (e.str),
+          .then -> Error.msg(e.str),
           .else -> False
           }}
       )}
+    """, Base.mutBaseAliases); }
+
+  @Test void stackOverflowUncaught() { okBase(new Res("", "Program crashed with: Stack overflowed[###]", 1), """
+    package test
+    Test: Main{sys -> Block#
+      .do {StackOverflow#}
+      .return {{}}
+      }
+    StackOverflow: {#[R]: R -> this#}
+    """, Base.mutBaseAliases); }
+
+  @Test void stackOverflowCaughtByCapTry() { okBase(new Res("", "Stack overflowed", 0), """
+    package test
+    Test:Main {sys -> sys.io.printlnErr(sys.try#[Nat]{StackOverflow#}.info!.msg)}
+    StackOverflow: {#[R]: R -> this#}
+    """, Base.mutBaseAliases); }
+
+  @Test void stackOverflowInAFlowSeq() { okBase(new Res("", "Program crashed with: Stack overflowed[###]", 1), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow#[mut Nat](mut 1, mut 2, mut 3)
+        .map{x->Block#
+          .if {x.nat == 2} .do {StackOverflow#}
+          .return {x.nat * 10}
+          }
+        }
+      .let[Nat] sum = {x#(Flow.uSum)}
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(sum.str)}
+      .return {{}}
+      }
+    StackOverflow: {#[R]: R -> this#}
+    """, Base.mutBaseAliases); }
+
+  @Test void stackOverflowInAFlowPar() { okBase(2, new Res("", "Program crashed with: Stack overflowed[###]", 1), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] sum = {sys.try#{Flow#[Nat](1, 2, 3)
+        .map{x->Block#
+          .if {x.nat == 2} .do {StackOverflow#}
+          .return {x.nat * 10}
+          }
+        #(Flow.uSum)
+        }!}
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(sum.str)}
+      .return {{}}
+      }
+    StackOverflow: {#[R]: R -> this#}
+    """, Base.mutBaseAliases); }
+
+  // Overflow after a stop is never reached: `.limit` makes the flow stateful, so
+  // it never DP-splits and element 2 (the overflow) is never pulled. Holds both
+  // sequentially and under forced promotion -> deterministic "10" (a stronger
+  // guarantee than the parallel Java backend, which races the limit vs the SO).
+  @Test void stackOverflowAfterStopSeq() { okBase(new Res("10", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow#[mut Nat](mut 1, mut 2, mut 3)
+        .map{x->Block#
+          .if {x.nat == 2} .do {StackOverflow#}
+          .return {x.nat * 10}
+          }
+        .limit(1)
+        }
+      .let[Nat] sum = {x#(Flow.uSum)}
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(sum.str)}
+      .return {{}}
+      }
+    StackOverflow: {#[R]: R -> this#}
+    """, Base.mutBaseAliases); }
+  @Test void stackOverflowAfterStopPar() { okBase(2, new Res("10", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let x = {Flow#[mut Nat](mut 1, mut 2, mut 3)
+        .map{x->Block#
+          .if {x.nat == 2} .do {StackOverflow#}
+          .return {x.nat * 10}
+          }
+        .limit(1)
+        }
+      .let[Nat] sum = {x#(Flow.uSum)}
+      .let[mut IO] io = {UnrestrictedIO#sys}
+      .do {io.println(sum.str)}
+      .return {{}}
+      }
+    StackOverflow: {#[R]: R -> this#}
     """, Base.mutBaseAliases); }
 
   @Disabled("Broken due to missing magic")

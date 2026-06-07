@@ -148,7 +148,7 @@ class VPFCodegen {
     // deterministic Error! or ND fault) it fulfilled this obligation with a
     // tag-typed error payload instead. Re-unwind on our own fiber so the error
     // cascades one level up rather than being fed into the combiner as a value.
-    sb.append("        if (error_rt.tagOf(wait_result) != .none) unwind.feart_unwind(wait_result);\n");
+    sb.append("        if (error_rt.tagOf(wait_result) != .none) errors.feart_unwind(wait_result);\n");
     sb.append("        return wait_result;\n");
     sb.append("    }\n");
     sb.append("}\n");
@@ -293,7 +293,7 @@ class VPFCodegen {
     sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, thief_locals.r_thief);\n");
     sb.append("        const wait_result = inner_obl.wait(worker_mod.getCurrentWorker().?);\n");
     sb.append("        shadow_stack_mod.freeObligation(inner_obl);\n");
-    sb.append("        if (error_rt.tagOf(wait_result) != .none) unwind.feart_unwind(wait_result);\n");
+    sb.append("        if (error_rt.tagOf(wait_result) != .none) errors.feart_unwind(wait_result);\n");
     sb.append("        return wait_result;\n");
     sb.append("    }\n");
     sb.append("}\n");
@@ -383,7 +383,7 @@ class VPFCodegen {
     // child_obl_opt carries our immediate parent's sub-expr value — unless the
     // parent unwound, in which case feart_unwind delivered a tag-typed error
     // here. Re-unwind on our own fiber to cascade it up.
-    sb.append("if (error_rt.tagOf(r1) != .none) unwind.feart_unwind(r1);\n");
+    sb.append("if (error_rt.tagOf(r1) != .none) errors.feart_unwind(r1);\n");
     emitWaitForwardedObligations(sb, forwardedChildOblFields);
     var resultMap = buildThiefCombinerMap(allFrameAdding, fwdCount, myGlobalIdx);
     sb.append("return ").append(emitCombinerFromMap(vpf, resultMap, thiefGen)).append(";\n");
@@ -410,7 +410,7 @@ class VPFCodegen {
       var field = forwardedChildOblFields.get(i);
       sb.append("const fwd_obl_").append(i).append(": ?*JoinObligation = @ptrFromInt(locals.").append(field).append(");\n");
       sb.append("const fwd_r").append(i).append(" = fwd_obl_").append(i).append(".?.wait(worker_mod.getCurrentWorker().?);\n");
-      sb.append("if (error_rt.tagOf(fwd_r").append(i).append(") != .none) unwind.feart_unwind(fwd_r").append(i).append(");\n");
+      sb.append("if (error_rt.tagOf(fwd_r").append(i).append(") != .none) errors.feart_unwind(fwd_r").append(i).append(");\n");
     }
   }
 

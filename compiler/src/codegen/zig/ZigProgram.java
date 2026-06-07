@@ -68,7 +68,7 @@ class ZigProgramBuilder {
       sb.append("const flow_rt = root.flow_rt;\n");
       sb.append("const try_rt = root.try_rt;\n");
       sb.append("const error_rt = root.error_rt;\n");
-      sb.append("const unwind = root.unwind;\n");
+      sb.append("const errors = root.errors;\n");
       sb.append("const heartbeat = root.heartbeat;\n");
       sb.append("const shadow_stack_mod = root.shadow_stack_mod;\n");
       sb.append("const worker_mod = root.worker_mod;\n");
@@ -123,7 +123,7 @@ class ZigProgramBuilder {
     sb.append("pub const flow_rt = @import(\"runtime/intrinsics/flow.zig\");\n");
     sb.append("pub const try_rt = @import(\"runtime/try.zig\");\n");
     sb.append("pub const error_rt = @import(\"runtime/error.zig\");\n");
-    sb.append("pub const unwind = @import(\"runtime/unwind.zig\");\n");
+    sb.append("pub const errors = @import(\"runtime/errors/errors.zig\");\n");
     sb.append("pub const shadow_stack_mod = @import(\"runtime/shadow_stack.zig\");\n");
     sb.append("pub const worker_mod = @import(\"runtime/worker.zig\");\n");
     sb.append("pub const JoinObligation = @import(\"runtime/sync/join_obligation.zig\").JoinObligation;\n");
@@ -132,8 +132,9 @@ class ZigProgramBuilder {
     sb.append("pub const Fiber = @import(\"runtime/fiber.zig\").Fiber;\n");
     sb.append("comptime { _ = Fiber; }\n");
     // A `@panic`-class fault inside a fiber becomes a non-deterministic error
-    // that unwinds to the nearest `CapTry`/top-level boundary. See `unwind.zig`.
-    sb.append("pub const panic = std.debug.FullPanic(unwind.ndPanicHandler);\n");
+    // that unwinds to the nearest `CapTry`/top-level boundary. See
+    // `runtime/errors/unwind.zig`.
+    sb.append("pub const panic = std.debug.FullPanic(errors.ndPanicHandler);\n");
     sb.append('\n');
 
     // Generated package imports — all pub for cross-package @import("root") access
@@ -195,6 +196,7 @@ class ZigProgramBuilder {
     sb.append("if (init.environ_map.get(\"FEART_ALLOCS_OUT\")) |p| gc.set_allocs_out_path(p);\n");
     sb.append("log.installCrashHandler();\n");
     sb.append("gc.init_gc();\n");
+    sb.append("errors.installNdHandlers();\n");
     sb.append("const cpu_count = std.Thread.getCpuCount() catch 1;\n");
     sb.append("const pool = worker_mod.WorkerPool.init(cpu_count) catch @panic(\"OOM\");\n");
     sb.append("const main_fiber = Fiber.create(struct {\n");
