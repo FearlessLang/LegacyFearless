@@ -162,6 +162,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     var pb = new ProcessBuilder(
       "zig", "build",
       "-Doptimize=ReleaseFast",
+      "-Dtrace_frames=true",
       "--cache-dir", localCache.toAbsolutePath().toString(),
       "--global-cache-dir", globalCache.toAbsolutePath().toString(),
       "--prefix", outDir.toAbsolutePath().toString()
@@ -197,6 +198,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           const log_dispatch = b.option(bool, "log_dispatch", "Enable dispatch/method resolution logging (default: false)") orelse false;
           const log_alloc_caching = b.option(bool, "log_alloc_caching", "Emit alloc-recycler miss events to the trace ring buffer (default: false).") orelse false;
           const track_allocs = b.option(bool, "track_allocs", "Record per-call-site allocation counts/bytes; dumps to FEART_ALLOCS_OUT (default ./feart-allocs.tsv) on exit. Slows execution significantly. (default: false)") orelse false;
+          const trace_frames = b.option(bool, "trace_frames", "Push a per-call trace stack so an uncaught crash prints a Fearless stack trace (default: false)") orelse false;
           const tokens_threshold = b.option(u32, "tokens_threshold", "Heartbeat promotion token threshold; lower forces more aggressive VPF promotion (default: 25_000_000)") orelse %d;
 
           const build_options = b.addOptions();
@@ -206,6 +208,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           build_options.addOption(bool, "log_trace", log_trace);
           build_options.addOption(bool, "log_alloc_caching", log_alloc_caching);
           build_options.addOption(bool, "track_allocs", track_allocs);
+          build_options.addOption(bool, "trace_frames", trace_frames);
           build_options.addOption(u32, "tokens_threshold", tokens_threshold);
 
           const exe = b.addExecutable(.{

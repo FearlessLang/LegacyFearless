@@ -414,8 +414,12 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
           }
         }
 
+        var tracePush = "shadow_stack_mod.tracePush(&" + vtableRef(objId) + ", " + sigBuilder.inlineHash(sig) + ");\n"
+          + "defer shadow_stack_mod.tracePop();\n";
+
         currentState().functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
           + paramDiscard
+          + tracePush
           + "return " + fRef + "(" + String.join(", ", simpleArgs) + ");\n"
           + "}");
       } else {
