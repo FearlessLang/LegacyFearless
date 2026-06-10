@@ -24,7 +24,7 @@ public class RunZigProgramTests {
     assert content.length > 0;
     Main.resetAll();
     var verbosity = new CompilerFrontEnd.Verbosity(true, false, CompilerFrontEnd.ProgressVerbosity.None);
-    var logicMain = LogicMainZig.of(TestInputOutputs.programmaticImm(Arrays.asList(content), args), verbosity);
+    var logicMain = LogicMainZig.of(TestInputOutputs.programmaticImm(Arrays.asList(content), args), verbosity, null, true);
     assertResMatch(logicMain.run(), expected);
   }
   public static void okBase(Res expected, String... content) {
@@ -50,7 +50,7 @@ public class RunZigProgramTests {
       workingDir,
       ResolveResource.artefact("/cachedBase")
     );
-    var logicMain = LogicMainZig.of(io, verbosity, tokensThreshold);
+    var logicMain = LogicMainZig.of(io, verbosity, tokensThreshold, true);
     assertResMatch(logicMain.run(), expected);
   }
 }

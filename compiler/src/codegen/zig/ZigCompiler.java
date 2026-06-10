@@ -14,19 +14,33 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
-public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, Integer tokensThreshold) {
+/** {@code fastTestBuild} swaps the production backend (LLVM + {@code ReleaseFast})
+ * for the self-hosted backend + {@code Debug}, which compiles ~9x faster at the cost
+ * of unoptimised runtime code. Used only by the codegen test harness, where compile
+ * time dominates and the programs are tiny; production builds keep ReleaseFast+LLVM. */
+public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, Integer tokensThreshold, boolean fastTestBuild) {
   static final int ZIG_CACHE_VERSION = 1;
 
   public ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) {
-    this(verbosity, io, null);
+    this(verbosity, io, null, false);
+  }
+
+  public ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, Integer tokensThreshold) {
+    this(verbosity, io, tokensThreshold, false);
   }
 
   private Path cacheBaseDir() { return io.cachedBase().resolve("zig-cache"); }
   public Path versionedCacheDir() { return cacheBaseDir().resolve("v" + ZIG_CACHE_VERSION); }
+  // Shared, content-addressed Zig caches: stay warm across compiles and are safe
+  // under concurrent builds (Zig locks them internally). The compiled runtime
+  // lives here, so a per-program rebuild only recompiles the changed program.
   private Path zigCacheDir() { return cacheBaseDir().resolve("zig-cache/local"); }
   private Path zigGlobalCacheDir() { return cacheBaseDir().resolve("zig-cache/global"); }
-  private Path zigOutDir() { return cacheBaseDir().resolve("zig-out"); }
-  private Path stableWorkDir() { return cacheBaseDir().resolve("zig-build"); }
+  // Per-compile build tree + output, under io.output() like the Java backend's
+  // generated classes: the program source and binary differ per compile, so they
+  // must not share a fixed path across concurrent test forks.
+  private Path workDir() { return io.output().resolve("zig-build"); }
+  private Path zigOutDir(Path workDir) { return workDir.resolve("zig-out"); }
 
   /** Load cached .zig content for base packages. Returns pkgName→zigContent for cache hits. */
   public Map<String, String> loadCachedPackages(MIR.Program program) {
@@ -66,7 +80,8 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   }
 
   public Path compile(ZigProgram program) {
-    var workDir = stableWorkDir();
+    var workDir = workDir();
+    var outDir = zigOutDir(workDir);
     if (verbosity.printCodegen()) {
       System.out.println("Zig build directory: " + workDir);
     }
@@ -84,17 +99,17 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
       }
 
       Files.writeString(srcDir.resolve("main.zig"), program.mainFile());
-      Files.writeString(workDir.resolve("build.zig"), buildZig(verbosity.printCodegen(), Optional.ofNullable(tokensThreshold).orElse(25_000_000)));
+      Files.writeString(workDir.resolve("build.zig"), buildZig(verbosity.printCodegen(), Optional.ofNullable(tokensThreshold).orElse(25_000_000), !fastTestBuild));
       Files.writeString(workDir.resolve("build.zig.zon"), buildZigZon());
 
-      runZigBuild(workDir, zigCacheDir(), zigGlobalCacheDir(), zigOutDir());
+      runZigBuild(workDir, zigCacheDir(), zigGlobalCacheDir(), outDir);
 
       // Save base package files to versioned cache dir
       saveCachedPackages(program);
 
       return null;
     });
-    return zigOutDir().resolve("bin/fearless-app");
+    return outDir.resolve("bin/fearless-app");
   }
 
   public static void cleanOldVersions(Path cacheBase, Path keep) {
@@ -161,7 +176,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   private void runZigBuild(Path workDir, Path localCache, Path globalCache, Path outDir) throws IOException {
     var pb = new ProcessBuilder(
       "zig", "build",
-      "-Doptimize=ReleaseFast",
+      "-Doptimize=" + (fastTestBuild ? "Debug" : "ReleaseFast"),
       "-Dtrace_frames=true",
       "--cache-dir", localCache.toAbsolutePath().toString(),
       "--global-cache-dir", globalCache.toAbsolutePath().toString(),
@@ -185,7 +200,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     }
   }
 
-  private String buildZig(boolean enableTracing, int tokensThreshold) {
+  private String buildZig(boolean enableTracing, int tokensThreshold, boolean useLlvm) {
     return """
       const std = @import("std");
       pub fn build(b: *std.Build) void {
@@ -257,14 +272,14 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           exe.root_module.addImport("libgc", c_libgc_mod);
           exe.root_module.linkLibrary(context_switch_lib);
 
-          exe.use_llvm = true;
+          exe.use_llvm = %b;
           exe.root_module.omit_frame_pointer = false;
           exe.root_module.strip = false;
 
           const exe_tests = b.addTest(.{
               .root_module = exe.root_module,
           });
-          exe_tests.use_llvm = true;
+          exe_tests.use_llvm = %b;
 
           const test_step = b.step("test", "Run tests");
           const run_exe_tests = b.addRunArtifact(exe_tests);
@@ -280,7 +295,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
               run_cmd.addArgs(args);
           }
       }
-      """.formatted(enableTracing, enableTracing, tokensThreshold);
+      """.formatted(enableTracing, enableTracing, tokensThreshold, useLlvm, useLlvm);
   }
 
   private String buildZigZon() {

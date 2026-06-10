@@ -29,6 +29,10 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
    * promotion; not exposed on any cross-backend interface. */
   default Integer tokensThreshold() { return null; }
 
+  /** When true, build with the self-hosted backend + Debug instead of LLVM +
+   * ReleaseFast. ~9x faster to compile; used by the codegen test harness only. */
+  default boolean fastBuild() { return false; }
+
   @Override default void cachePackageTypes(Program program) {
     var versionedDir = new ZigCompiler(verbosity(), io()).versionedCacheDir();
     var baseDecs = program.ds().values().stream()
@@ -59,7 +63,7 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   }
 
   @Override default void compileBackEnd(ZigProgram src) {
-    var compiler = new ZigCompiler(verbosity(), io(), tokensThreshold());
+    var compiler = new ZigCompiler(verbosity(), io(), tokensThreshold(), fastBuild());
     var exePath = compiler.compile(src);
     setExecutablePath(exePath);
   }
@@ -73,6 +77,10 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   }
 
   static LogicMainZig of(InputOutput io, Verbosity verbosity, Integer tokensThreshold) {
+    return of(io, verbosity, tokensThreshold, false);
+  }
+
+  static LogicMainZig of(InputOutput io, Verbosity verbosity, Integer tokensThreshold, boolean fastBuild) {
     var cachedPkg = new HashSet<String>();
     return new LogicMainZig() {
       private Path exePath;
@@ -82,6 +90,7 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
       public Path executablePath() { return exePath; }
       public void setExecutablePath(Path path) { exePath = path; }
       public Integer tokensThreshold() { return tokensThreshold; }
+      public boolean fastBuild() { return fastBuild; }
     };
   }
 }
