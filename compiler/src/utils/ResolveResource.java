@@ -9,7 +9,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Queue;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
 This file will have a compile time error on the first git checkout.
@@ -89,6 +91,10 @@ public record ResolveResource(Path assetRoot, Path artefactRoot, Optional<Path> 
   static public String read(Path path) {
     return IoErr.of(()->Files.readString(path, StandardCharsets.UTF_8));
   }
+  // Tmp dirs are swept eagerly via cleanTmpPaths() because long-lived JVMs (reused surefire
+  // forks) would otherwise accumulate one zig-build tree per compiled program until exit;
+  // DeleteOnExit only covers the dirs still alive when the JVM shuts down.
+  private static final Queue<Path> TMP_PATHS = new ConcurrentLinkedQueue<>();
   static public Path freshTmpPath(){
     /*var res= Paths.get(
       System.getProperty("java.io.tmpdir"),
@@ -96,7 +102,13 @@ public record ResolveResource(Path assetRoot, Path artefactRoot, Optional<Path> 
     var res = ResolveResource.artefact("/.tmp")
       .resolve("fearOut"+UUID.randomUUID());
     IoErr.of(()->Files.createDirectories(res));
+    TMP_PATHS.add(res);
     DeleteOnExit.of(res);
     return res;
+  }
+  /// Deletes every tmp dir handed out by freshTmpPath so far. Only safe once their
+  /// compilations have finished; tests call this via Main.resetAll().
+  static public void cleanTmpPaths(){
+    for (Path p; (p = TMP_PATHS.poll()) != null;) { DeleteDir.of(p); }
   }
 }

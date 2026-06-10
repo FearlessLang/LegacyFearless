@@ -4,29 +4,22 @@ import codegen.MIR;
 import main.CompilerFrontEnd;
 import main.InputOutput;
 import utils.Bug;
-import utils.DeleteOnExit;
+import utils.DeleteDir;
 import utils.IoErr;
+import utils.OsCache;
+import utils.ResolveResource;
 
 import java.io.IOException;
 import java.nio.file.*;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
-/** {@code fastTestBuild} swaps the production backend (LLVM + {@code ReleaseFast})
- * for the self-hosted backend + {@code Debug}, which compiles ~9x faster at the cost
- * of unoptimised runtime code. Used only by the codegen test harness, where compile
- * time dominates and the programs are tiny; production builds keep ReleaseFast+LLVM. */
-public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, Integer tokensThreshold, boolean fastTestBuild) {
+public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, ZigBuildOpts opts) {
   static final int ZIG_CACHE_VERSION = 1;
 
   public ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io) {
-    this(verbosity, io, null, false);
-  }
-
-  public ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, Integer tokensThreshold) {
-    this(verbosity, io, tokensThreshold, false);
+    this(verbosity, io, ZigBuildOpts.DEFAULT);
   }
 
   private Path cacheBaseDir() { return io.cachedBase().resolve("zig-cache"); }
@@ -34,8 +27,11 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   // Shared, content-addressed Zig caches: stay warm across compiles and are safe
   // under concurrent builds (Zig locks them internally). The compiled runtime
   // lives here, so a per-program rebuild only recompiles the changed program.
-  private Path zigCacheDir() { return cacheBaseDir().resolve("zig-cache/local"); }
-  private Path zigGlobalCacheDir() { return cacheBaseDir().resolve("zig-cache/global"); }
+  // They live in the per-user cache, not under io.cachedBase(): they are
+  // machine-global by nature, grow into the gigabytes, and in the test harness
+  // io.cachedBase() sits inside target/classes, which is jarred wholesale.
+  private Path zigCacheDir() { return OsCache.root().resolve("zig-cache/local"); }
+  private Path zigGlobalCacheDir() { return OsCache.root().resolve("zig-cache/global"); }
   // Per-compile build tree + output, under io.output() like the Java backend's
   // generated classes: the program source and binary differ per compile, so they
   // must not share a fixed path across concurrent test forks.
@@ -60,23 +56,15 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     }
     return cached;
   }
-  /** The absolute path to the feart runtime source tree (the experiments/feart directory). */
+  /// The FeaRT runtime source tree. Normally the copy bundled with the compiler
+  /// (assets/feaRT, i.e. /feaRT inside the jar); FEART_ROOT overrides it so the
+  /// runtime can be developed against a checkout without rebuilding the compiler.
   private static Path feartRoot() {
-    // Resolve from the location of this class or use an env var
     var envPath = System.getenv("FEART_ROOT");
     if (envPath != null) { return Path.of(envPath); }
-    // Default: assume we're in the experiments directory structure
-    // Try relative to working directory
-    var candidates = new Path[]{
-      Path.of("feart"),
-      Path.of("../feart"),
-      Path.of("../../feart"),
-      Path.of("experiments/feart"),
-    };
-    for (var c : candidates) {
-      if (Files.isDirectory(c)) { return c.toAbsolutePath(); }
-    }
-    throw Bug.of("Cannot find feart runtime. Set FEART_ROOT environment variable.");
+    var bundled = ResolveResource.asset("/feaRT");
+    if (Files.isDirectory(bundled)) { return bundled; }
+    throw Bug.of("Cannot find the bundled FeaRT runtime at " + bundled + ". Set the FEART_ROOT environment variable to a FeaRT source tree.");
   }
 
   public Path compile(ZigProgram program) {
@@ -99,7 +87,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
       }
 
       Files.writeString(srcDir.resolve("main.zig"), program.mainFile());
-      Files.writeString(workDir.resolve("build.zig"), buildZig(verbosity.printCodegen(), Optional.ofNullable(tokensThreshold).orElse(25_000_000), !fastTestBuild));
+      Files.writeString(workDir.resolve("build.zig"), buildZig());
       Files.writeString(workDir.resolve("build.zig.zon"), buildZigZon());
 
       runZigBuild(workDir, zigCacheDir(), zigGlobalCacheDir(), outDir);
@@ -119,16 +107,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
         dirs.filter(Files::isDirectory)
           .filter(d -> d.getFileName().toString().matches("v\\d+"))
           .filter(d -> !d.equals(keep))
-          .forEach(ZigCompiler::deleteTree);
-      }
-    });
-  }
-
-  private static void deleteTree(Path root) {
-    IoErr.of(() -> {
-      try (var walk = Files.walk(root)) {
-        walk.sorted(Comparator.reverseOrder())
-          .forEach(f -> IoErr.of(() -> Files.deleteIfExists(f)));
+          .forEach(DeleteDir::of);
       }
     });
   }
@@ -161,7 +140,8 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   private void copyTree(Path source, Path target) throws IOException {
     try (var walker = Files.walk(source)) {
       walker.forEach(src -> IoErr.of(() -> {
-        var dest = target.resolve(source.relativize(src));
+        // resolve via String: source may live in the jar's virtual file system
+        var dest = target.resolve(source.relativize(src).toString());
         if (Files.isDirectory(src)) {
           Files.createDirectories(dest);
         } else {
@@ -174,14 +154,24 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   }
 
   private void runZigBuild(Path workDir, Path localCache, Path globalCache, Path outDir) throws IOException {
-    var pb = new ProcessBuilder(
-      "zig", "build",
-      "-Doptimize=" + (fastTestBuild ? "Debug" : "ReleaseFast"),
-      "-Dtrace_frames=true",
+    var zig = ZigToolchain.resolve(OsCache.root().resolve("zig-toolchain"));
+    var cmd = new java.util.ArrayList<>(java.util.List.of(
+      zig.toAbsolutePath().toString(), "build",
+      "-Doptimize=" + opts.optimizeMode(),
       "--cache-dir", localCache.toAbsolutePath().toString(),
       "--global-cache-dir", globalCache.toAbsolutePath().toString(),
       "--prefix", outDir.toAbsolutePath().toString()
-    )
+    ));
+    // The self-hosted (non-LLVM) linker cannot handle .sframe sections present in the
+    // CRT objects of very new host glibc/gcc toolchains. Pinning a glibc version makes
+    // zig build and link its own bundled CRT objects instead of using the host's.
+    // Production builds keep a fully native target (LLD links .sframe fine, and a
+    // native target keeps native CPU tuning for ReleaseFast).
+    // glibc 2.34 keeps the binary runnable on older stable distros (RHEL 9, Ubuntu 22.04+, Debian 12+).
+    if (!opts.useLlvm() && System.getProperty("os.name").toLowerCase().contains("linux")) {
+      cmd.add("-Dtarget=native-native-gnu.2.34");
+    }
+    var pb = new ProcessBuilder(cmd)
       .directory(workDir.toFile())
       .redirectErrorStream(true);
     var process = pb.start();
@@ -200,7 +190,8 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     }
   }
 
-  private String buildZig(boolean enableTracing, int tokensThreshold, boolean useLlvm) {
+  private String buildZig() {
+    var enableTracing = verbosity.printCodegen();
     return """
       const std = @import("std");
       pub fn build(b: *std.Build) void {
@@ -213,8 +204,9 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           const log_dispatch = b.option(bool, "log_dispatch", "Enable dispatch/method resolution logging (default: false)") orelse false;
           const log_alloc_caching = b.option(bool, "log_alloc_caching", "Emit alloc-recycler miss events to the trace ring buffer (default: false).") orelse false;
           const track_allocs = b.option(bool, "track_allocs", "Record per-call-site allocation counts/bytes; dumps to FEART_ALLOCS_OUT (default ./feart-allocs.tsv) on exit. Slows execution significantly. (default: false)") orelse false;
-          const trace_frames = b.option(bool, "trace_frames", "Push a per-call trace stack so an uncaught crash prints a Fearless stack trace (default: false)") orelse false;
+          const trace_frames = b.option(bool, "trace_frames", "Push a per-call trace stack so an uncaught crash prints a Fearless stack trace (default: false)") orelse %s;
           const tokens_threshold = b.option(u32, "tokens_threshold", "Heartbeat promotion token threshold; lower forces more aggressive VPF promotion (default: 25_000_000)") orelse %d;
+          const enable_vpf = b.option(bool, "enable_vpf", "Compile in the heartbeat/VPF automatic parallelism system (default: true)") orelse %s;
 
           const build_options = b.addOptions();
           build_options.addOption(bool, "log_scheduling", log_scheduling);
@@ -225,6 +217,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           build_options.addOption(bool, "track_allocs", track_allocs);
           build_options.addOption(bool, "trace_frames", trace_frames);
           build_options.addOption(u32, "tokens_threshold", tokens_threshold);
+          build_options.addOption(bool, "enable_vpf", enable_vpf);
 
           const exe = b.addExecutable(.{
               .name = "fearless-app",
@@ -295,7 +288,14 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
               run_cmd.addArgs(args);
           }
       }
-      """.formatted(enableTracing, enableTracing, tokensThreshold, useLlvm, useLlvm);
+      """.formatted(
+        enableTracing || opts.logTrace(),
+        enableTracing,
+        opts.traceFrames(),
+        Optional.ofNullable(opts.tokensThreshold()).orElse(25_000_000),
+        opts.vpfEnabled(),
+        opts.useLlvm(),
+        opts.useLlvm());
   }
 
   private String buildZigZon() {

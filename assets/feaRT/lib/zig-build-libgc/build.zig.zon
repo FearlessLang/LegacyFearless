@@ -1,0 +1,21 @@
+.{
+    .name = .libgc,
+    .version = "0.1.0",
+    .fingerprint = 0x699a071495ec2f50,
+    .dependencies = .{
+        .bdwgc = .{
+            .url = "git+https://github.com/ivmai/bdwgc.git#2955e33aba7467d4777aa985637620f909cc2a14",
+            .hash = "N-V-__8AAIkyLwAMRlzIMMfXHsj0r9OKIoh22YTKbvABvH7U",
+        },
+        .macos_sdk = .{
+            .url = "git+https://github.com/NickGeek/zig-build-macos-sdk.git#879827c6e748bb9c23991b38134319ef6dae6a43",
+            .hash = "macos_sdk-0.1.1-eskmB4BlOwQsPZD1KSeEqrSU5X58YhWAOenELmbiP7ef",
+        },
+    },
+    .paths = .{
+        "LICENSE",
+        "README.md",
+        "build.zig",
+        "build.zig.zon",
+    },
+}

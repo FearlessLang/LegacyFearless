@@ -18,9 +18,14 @@ public interface FullLogicMain<Exe> extends LogicMain {
     var program = inference(fullProgram);
     wellFormednessCore(program);
     var resolvedCalls = typeSystem(program);
+    var timer = new Timer();
+    verbosity().progress().printTask("Running code generation 🏭");
     var mir = lower(program,resolvedCalls);
     var exe = codeGeneration(mir);
+    verbosity().progress().printTask("Code generated 🥳 ("+timer.duration()+"ms)");
+    verbosity().progress().printStep("Executing backend compiler 🏭");
     compileBackEnd(exe);
+    verbosity().progress().printStep("Done executing backend compiler 🥳 ("+timer.duration()+"ms)");
     cachePackageTypes(program);
     return exe;
   }

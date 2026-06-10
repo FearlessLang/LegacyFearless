@@ -1,0 +1,229 @@
+const std = @import("std");
+const objs = @import("objs.zig");
+const gc = @import("gc.zig");
+const error_rt = @import("error.zig");
+const unwind = @import("errors/unwind.zig");
+const fiber_mod = @import("fiber.zig");
+const worker_mod = @import("worker.zig");
+const shadow_stack = @import("shadow_stack.zig");
+const scope_mod = @import("scope.zig");
+const trace = @import("errors/trace.zig");
+const build_options = @import("build_options");
+const root = @import("root");
+const pb = root.pkg_base;
+
+const FatPtr = objs.FatPtr;
+const Fiber = fiber_mod.Fiber;
+const JoinObligation = shadow_stack.JoinObligation;
+const h = objs.hash_signature;
+
+// ==========================================
+// Fiber-isolated exception handling (Try / CapTry)
+// ==========================================
+//
+// `Try`/`CapTry` run their lambda in a disposable child fiber so that a
+// deterministic `Error!` (which lowers to `feart_unwind`, abandoning the
+// failing Zig frames) has a fiber boundary to unwind to. The child's
+// `root_obligation` carries either the lambda's normal result or — if it
+// unwinds — the tag-typed error payload (see `error.zig`). The parent's
+// `.run` then classifies the result: an ordinary value becomes `m.ok`, a
+// deterministic error becomes `m.info` (both `Try` and `CapTry`), and a
+// non-deterministic error becomes `m.info` only for `CapTry` while a plain
+// `Try` re-propagates it (a deterministic handler must not absorb ND).
+
+const TryActionCaptures = extern struct {
+    f: FatPtr,
+    /// The `iso` data for `#/2`, or a Void singleton placeholder for `#/1`.
+    /// Always a valid FatPtr so the uniform capture share/drop path applies.
+    data: FatPtr,
+    has_data: bool,
+    catch_nd: bool,
+};
+
+fn make_try_action(f: FatPtr, data: FatPtr, has_data: bool, catch_nd: bool) FatPtr {
+    return objs.obj_k(TryActionCaptures, &VT_TryAction, .{
+        .f = f,
+        .data = data,
+        .has_data = has_data,
+        .catch_nd = catch_nd,
+    });
+}
+
+// ------------------------------------------
+// Child-fiber spawn + wait
+// ------------------------------------------
+
+const ChildCtx = struct {
+    f: FatPtr,
+    data: ?FatPtr,
+};
+
+/// Entry point of a Try/CapTry child fiber: run the lambda and deliver its
+/// result to the parent through `root_obligation`. If the lambda unwinds
+/// (`Error!` or a panic), `feart_unwind` fulfills the same obligation with the
+/// error payload instead, so this never reaches the fulfill below in that case.
+fn childEntry(fiber: *Fiber) void {
+    const ctx: *ChildCtx = @ptrCast(@alignCast(fiber.context.?));
+    const result = if (ctx.data) |d|
+        objs.call(ctx.f, comptime h("read #/1"), .{d}, @src())
+    else
+        objs.call(ctx.f, comptime h("read #/0"), .{}, @src());
+    const worker = worker_mod.getCurrentWorker().?;
+    fiber.root_obligation.?.fulfill(result.box_transient(), worker.ready_queue);
+}
+
+/// Run `f#`/`f#data` on a fresh child fiber and block the current fiber until it
+/// completes. Returns either the lambda's value or a tag-typed error payload
+/// (classify with `error_rt.tagOf`). Ownership of `f`/`data` transfers to the
+/// child.
+pub fn runInChildFiber(f: FatPtr, data: ?FatPtr) FatPtr {
+    const worker = worker_mod.getCurrentWorker().?;
+    const parent_fiber = worker.current_fiber.?;
+    const obl = worker.allocObligation() orelse @panic("OOM allocating Try obligation");
+
+    // `ctx` lives on the parent's stack; the parent parks in `wait` below and is
+    // not resumed until the child has fulfilled the obligation (after it has
+    // already consumed `ctx`), so the pointer stays valid for the child's read.
+    var ctx = ChildCtx{ .f = f, .data = data };
+    const child = Fiber.create(&childEntry, &ctx) catch @panic("OOM creating Try fiber");
+    child.root_obligation = obl;
+    child.saved_scope = scope_mod.active_scope;
+    child.parent_tokens_ptr = &parent_fiber.tokens;
+    if (build_options.trace_frames) {
+        trace.inheritStackTrace(child, &parent_fiber.trace_frames, parent_fiber.trace_top);
+    }
+    child.state = .Ready;
+    worker.ready_queue.enqueueWithSpin(child);
+
+    const result = obl.wait(worker_mod.getCurrentWorker().?);
+    shadow_stack.freeObligation(obl);
+    return result;
+}
+
+// ------------------------------------------
+// TryAction.run (native)
+// ------------------------------------------
+
+fn tryaction_run(self: FatPtr, m: FatPtr) callconv(.c) FatPtr {
+    defer self.rc_decrement();
+    const caps = objs.deref(TryActionCaptures, self);
+    const catch_nd = caps.catch_nd;
+    const result = runInChildFiber(
+        caps.f.share(),
+        if (caps.has_data) caps.data.share() else null,
+    );
+    switch (error_rt.tagOf(result)) {
+        .none => return objs.call(m, comptime h("mut .ok/1"), .{result}, @src()),
+        .deterministic => {
+            const info = error_rt.infoOf(result);
+            result.rc_decrement();
+            return objs.call(m, comptime h("mut .info/1"), .{info}, @src());
+        },
+        .nd => {
+            if (catch_nd) {
+                const info = error_rt.infoOf(result);
+                result.rc_decrement();
+                return objs.call(m, comptime h("mut .info/1"), .{info}, @src());
+            }
+            // Plain `Try` does not catch ND: re-propagate on the parent fiber.
+            unwind.feart_unwind(result);
+        },
+    }
+}
+
+fn T_tryaction_map(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
+    return pb.Action_1__Zdotmap_1_mut_Zfun(f_m, self_m);
+}
+fn T_tryaction_andThen(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
+    return pb.Action_1__ZdotandThen_1_mut_Zfun(f_m, self_m);
+}
+fn T_tryaction_mapInfo(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
+    return pb.Action_1__ZdotmapInfo_1_mut_Zfun(f_m, self_m);
+}
+fn T_tryaction_bang(self_m: FatPtr) callconv(.c) FatPtr {
+    return pb.Action_1__Zbang_0_mut_Zfun(self_m);
+}
+fn T_tryaction_ok(self_m: FatPtr) callconv(.c) FatPtr {
+    return pb.Action_1__Zdotok_0_mut_Zfun(self_m);
+}
+fn T_tryaction_info(self_m: FatPtr) callconv(.c) FatPtr {
+    return pb.Action_1__Zdotinfo_0_mut_Zfun(self_m);
+}
+
+pub const VT_TryAction: objs.VTable = .{
+    .type_name = "base.Action/1",
+    .hashes = &.{
+        h("mut .run/1"),  h("mut .map/1"), h("mut .andThen/1"),
+        h("mut .mapInfo/1"), h("mut !/0"),  h("mut .ok/0"),
+        h("mut .info/0"),
+    },
+    .methods = &.{
+        @as(*const anyopaque, @ptrCast(&tryaction_run)), @as(*const anyopaque, @ptrCast(&T_tryaction_map)), @as(*const anyopaque, @ptrCast(&T_tryaction_andThen)),
+        @as(*const anyopaque, @ptrCast(&T_tryaction_mapInfo)), @as(*const anyopaque, @ptrCast(&T_tryaction_bang)), @as(*const anyopaque, @ptrCast(&T_tryaction_ok)),
+        @as(*const anyopaque, @ptrCast(&T_tryaction_info)),
+    },
+    .method_names = &.{
+        "mut .run/1",  "mut .map/1", "mut .andThen/1",
+        "mut .mapInfo/1", "mut !/0",  "mut .ok/0",
+        "mut .info/0",
+    },
+};
+
+// ------------------------------------------
+// Try / CapTry factory singletons
+// ------------------------------------------
+
+fn try_make_1(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
+    defer self.rc_decrement();
+    defer f.rc_decrement();
+    return make_try_action(f, objs.obj_k_singleton(&pb.VT_Void_0), false, false);
+}
+fn try_make_2(self: FatPtr, data: FatPtr, f: FatPtr) callconv(.c) FatPtr {
+    defer self.rc_decrement();
+    defer data.rc_decrement();
+    defer f.rc_decrement();
+    return make_try_action(f, data, true, false);
+}
+
+fn captry_make_1(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
+    defer self.rc_decrement();
+    defer f.rc_decrement();
+    return make_try_action(f, objs.obj_k_singleton(&pb.VT_Void_0), false, true);
+}
+fn captry_make_2(self: FatPtr, data: FatPtr, f: FatPtr) callconv(.c) FatPtr {
+    defer self.rc_decrement();
+    defer data.rc_decrement();
+    defer f.rc_decrement();
+    return make_try_action(f, data, true, true);
+}
+
+/// `ToIso[CapTry]` methods. CapTry is a stateless singleton, so both just hand
+/// the singleton straight back (RC ops on a singleton are no-ops).
+fn captry_iso(self: FatPtr) callconv(.c) FatPtr {
+    return self;
+}
+fn captry_self(self: FatPtr) callconv(.c) FatPtr {
+    return self;
+}
+
+pub const VT_Try: objs.VTable = .{
+    .type_name = "base.Try/0",
+    .hashes = &.{ h("imm #/1"), h("imm #/2") },
+    .methods = &.{
+        @as(*const anyopaque, @ptrCast(&try_make_1)),
+        @as(*const anyopaque, @ptrCast(&try_make_2)),
+    },
+    .method_names = &.{ "imm #/1", "imm #/2" },
+    .storage_mode = .singleton,
+};
+
+pub const VT_CapTry: objs.VTable = .{
+    .type_name = "base.caps.CapTry/0",
+    .hashes = &.{ h("mut #/1"), h("mut #/2"), h("mut .iso/0"), h("mut .self/0") },
+    .methods = &.{
+        @as(*const anyopaque, @ptrCast(&captry_make_1)), @as(*const anyopaque, @ptrCast(&captry_make_2)),
+        @as(*const anyopaque, @ptrCast(&captry_iso)),    @as(*const anyopaque, @ptrCast(&captry_self)),
+    },
+    .method_names = &.{ "mut #/1", "mut #/2", "mut .iso/0", "mut .self/0" },
+    .storage_mode = .singleton,
+};

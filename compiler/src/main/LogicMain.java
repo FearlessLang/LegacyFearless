@@ -22,6 +22,9 @@ import java.util.stream.Collectors;
 public interface LogicMain {
   InputOutput io();
   HashSet<String> cachedPkg();
+  default CompilerFrontEnd.Verbosity verbosity() {
+    return new CompilerFrontEnd.Verbosity(false, false, CompilerFrontEnd.ProgressVerbosity.None);
+  }
   default TypeSystemFeatures typeSystemFeatures() {
     return new TypeSystemFeatures()
       .hygienics(true)
@@ -52,27 +55,44 @@ public interface LogicMain {
       packages.putAll(load(io().baseFiles()));
     }
     packages.putAll(cache);//Purposely overriding any app also in cache
-    return Parser.parseAll(packages, typeSystemFeatures());
+    var timer = new Timer();
+    verbosity().progress().printTask("Parsing 👀");
+    var parsed = Parser.parseAll(packages, typeSystemFeatures());
+    verbosity().progress().printTask("Parsing complete 🥳 ("+timer.duration()+"ms)");
+    return parsed;
   }
   default void wellFormednessFull(astFull.Program fullProgram){
+    var timer = new Timer();
+    verbosity().progress().printTask("Checking that the program is well formed 🔎");
     new WellFormednessFullShortCircuitVisitor()
       .visitProgram(fullProgram)
       .ifPresent(err->{ throw err; });
+    verbosity().progress().printTask("Well formedness checks complete 🥳 ("+timer.duration()+"ms)");
   }
   default ast.Program inference(astFull.Program fullProgram){
-    return InferBodies.inferAll(fullProgram);
+    var timer = new Timer();
+    verbosity().progress().printTask("Inferring types 🕵️");
+    var inferred = InferBodies.inferAll(fullProgram);
+    verbosity().progress().printTask("Types inferred 🥳 ("+timer.duration()+"ms)");
+    return inferred;
   }
   default void wellFormednessCore(ast.Program program){
+    var timer = new Timer();
+    verbosity().progress().printTask("Checking that the program is still well formed 🔎");
     program.ds().values().parallelStream()
       .map(dec->new WellFormednessShortCircuitVisitor(program).visitDec(dec))
       .filter(Optional::isPresent)
       .findAny()
       .flatMap(x->x)
       .ifPresent(err->{ throw err; });
+    verbosity().progress().printTask("Well formedness checks complete 🥳 ("+timer.duration()+"ms)");
   }
   default ConcurrentHashMap<Long, TsT> typeSystem(ast.Program program){
+    var timer = new Timer();
+    verbosity().progress().printTask("Checking types 🤔");
     var acc= new ConcurrentHashMap<Long, TsT>();
     program.typeCheck(acc);
+    verbosity().progress().printTask("Types look all good 🥳 ("+timer.duration()+"ms)");
     return acc;
   }
   default void check() {

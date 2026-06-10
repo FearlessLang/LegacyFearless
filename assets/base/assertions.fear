@@ -4,13 +4,11 @@ Assert:Sealed{
   !(assertion: Bool): Void -> this!(assertion, { Void }),
   ![R:*](assertion: Bool, cont: mut AssertCont[R]): R -> assertion ? {
     .then -> cont#,
-    .else -> this._fail
+    .else -> Error.msg "Assertion failed :(",
     },
   ![R:*](assertion: Bool, msg: Str, cont: mut AssertCont[R]): R -> assertion ? {
       .then -> cont#,
-      .else -> this._fail(msg)
+      .else -> Error.msg msg,
       },
-  ._fail[R:*]: R -> Magic!,
-  ._fail[R:*](msg: Str): R -> Magic!,
   }
 AssertCont[R:*]: { mut #: R }

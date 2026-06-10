@@ -24,13 +24,15 @@ import static program.TypeTable.filterByMdf;
 public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, MIRInjectionVisitor.Res<? extends MIR.E>> {
   private final Program p;
   private final ConcurrentHashMap<Long, TsT> resolvedCalls;
-  private final Collection<String> cached;
-
-  public record Res<EE extends MIR.E>(EE e, List<MIR.TypeDef> defs, List<MIR.Fun> funs) {
-    public TopLevelRes mergeAsTopLevel(Res<?> other) {
-      return new TopLevelRes(Push.of(defs(), other.defs()), Push.of(funs(), other.funs()));
-    }
+  private final Map<String, String> freshRenames = new HashMap<>();
+  private int freshCount = 0;
+  private String mintX() { return "fear"+(freshCount++)+"$"; }
+  private String normX(String x) {
+    if (!astFull.E.X.isFresh(x)) { return x; }
+    return freshRenames.computeIfAbsent(x, k->mintX());
   }
+
+  public record Res<EE extends MIR.E>(EE e, List<MIR.TypeDef> defs, List<MIR.Fun> funs) {}
   public record TopLevelRes(List<MIR.TypeDef> defs, List<MIR.Fun> funs) {
     public static TopLevelRes EMPTY = new TopLevelRes(List.of(), List.of());
     public TopLevelRes merge(TopLevelRes other) {
@@ -55,7 +57,6 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
   public MIRInjectionVisitor(Collection<String>cached, Program p, ConcurrentHashMap<Long, TsT> resolvedCalls) {
     this.p = p;
     this.resolvedCalls = resolvedCalls;
-    this.cached = cached;//TODO: clean up mearless so that can work
     //on partial programs
   }
 
@@ -63,6 +64,7 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     var pkgs = p.ds().values().parallelStream()
       .collect(Collectors.groupingBy(t->t.name().pkg()))
       .entrySet().stream()
+      .sorted(Map.Entry.comparingByKey())
       //.filter(kv->!cached.contains(kv.getKey()))//uncomment when cached TODO is sorted
       .map(kv->visitPackage(kv.getKey(), kv.getValue()))
       .toList();
@@ -74,6 +76,7 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     var allTDefs = new ArrayList<MIR.TypeDef>(ds.size());
     var allFuns = new ArrayList<MIR.Fun>(ds.size());
     ds.stream()
+      .sorted(Comparator.comparing(d->d.name().toString()))
       .map(d->visitTopDec(d.withLambda(d.lambda().withMdf(Mdf.mut)), Ctx.EMPTY))
       .forEach(res->{
         allTDefs.addAll(res.defs());
@@ -92,7 +95,7 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
       .filter(m->!m.isAbs())
       .map(m->{
         var g = new HashMap<>(ctx.xXs());
-        g.put(dec.lambda().selfName(), new MIR.X(dec.lambda().selfName(), MIR.MT.of(new T(m.mdf(), it))));
+        g.put(dec.lambda().selfName(), new MIR.X(normX(dec.lambda().selfName()), MIR.MT.of(new T(m.mdf(), it))));
         var ctx_ = ctx.withXXs(g);
         return function(new CM.CoreCM(it, m, m.sig()), ctx_);
       })
@@ -129,7 +132,7 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
 
     return new MIR.CreateObj(
       MIR.MT.of(new T(e.mdf(), e.id().toIT())),
-      e.selfName(),
+      normX(e.selfName()),
       ms,
       uncallableMs,
       captures(e, ctx)
@@ -140,7 +143,7 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     return new MIR.Sig(
       cm.name(),
       Streams.zip(cm.xs(), cm.sig().ts()).map((x,t)->{
-        if (x.equals("_")) { x = astFull.E.X.freshName(); }
+        x = x.equals("_") ? mintX() : normX(x);
         return new MIR.X(x, MIR.MT.of(t));
       }).toList(),
       MIR.MT.of(cm.ret())
@@ -151,10 +154,14 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     var sig = visitSig(cm);
     var captures = captures(cm.m(), ctx);
 
+    // Gamma is keyed by source-level names (bodies reference params by their pre-renaming name);
+    // "_" params are unreferenceable so they stay out of Gamma. The captures are already in
+    // ctx.xXs() under their source-level names.
     var mCtx = new Ctx(Mapper.of(xXs->{
       xXs.putAll(ctx.xXs());
-      sig.xs().forEach(x->xXs.put(x.name(), x));
-      captures.forEach(x->xXs.put(x.name(), x));
+      Streams.zip(cm.xs(), sig.xs()).forEach((srcX,x)->{
+        if (!srcX.equals("_")) { xXs.put(srcX, x); }
+      });
     }));
 
     var x = ctx.xXs().get(selfNameOf(cm.c().name()));
@@ -179,8 +186,9 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     fv.visitMeth(cm.m());
     var xs = fv.res();
     var capturesSelf = xs.remove(x);
+    var captures = xs.stream().map(this::normX).collect(Collectors.toCollection(TreeSet::new));
 
-    return new MIR.Meth(cm.c().name(), sig, capturesSelf, Collections.unmodifiableSortedSet(xs), Optional.of(new MIR.FName(cm, capturesSelf)));
+    return new MIR.Meth(cm.c().name(), sig, capturesSelf, Collections.unmodifiableSortedSet(captures), Optional.of(new MIR.FName(cm, capturesSelf)));
   }
 
   @Override public Res<MIR.MCall> visitMCall(E.MCall e, Ctx ctx) {
@@ -222,7 +230,7 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
       var realDec = transparentSource.get();
       var k = new MIR.CreateObj(
         MIR.MT.of(new T(e.mdf(), realDec.toIT())),
-        realDec.lambda().selfName(),
+        normX(realDec.lambda().selfName()),
         List.of(),
         List.of(),
         MIR.createCapturesSet()

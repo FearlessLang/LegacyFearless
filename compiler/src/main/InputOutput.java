@@ -8,6 +8,7 @@ import java.util.stream.IntStream;
 import codegen.java.JavaFile;
 import parser.Parser;
 import utils.IoErr;
+import utils.OsCache;
 import utils.ResolveResource;
 
 public interface InputOutput{
@@ -89,6 +90,27 @@ public interface InputOutput{
       output,
       cachedFiles,
       ResolveResource.asset("/default-imm-aliases.fear")
+    );
+  }
+  /// IO for the FeaRT (Zig) backend, with the base-library cache in the shared
+  /// per-user cache directory rather than the project's out/ — the compiled base
+  /// is project-independent, so it is built once per machine per library variant
+  /// (per cache version: bumping ZigCompiler.ZIG_CACHE_VERSION discards it).
+  static InputOutput userFolderZig(String entry, List<String> commandLineArguments, Path userFolder, boolean isImm) {
+    Path output= userFolder.resolve("out");
+    Path cachedBase= OsCache.root().resolve("feart").resolve(isImm ? "immBase" : "base");
+    List<Parser> inputFiles= InputOutputHelper.loadInputFiles(userFolder);
+    List<Parser> cachedFiles= InputOutputHelper.loadCachedFiles(cachedBase);
+    return new FieldsInputOutput(
+      entry,
+      commandLineArguments,
+      ResolveResource.asset(isImm ? "/immBase" : "/base"),
+      ResolveResource.asset(isImm ? "/immRt" : "/rt"),
+      inputFiles,
+      output,
+      cachedBase,
+      cachedFiles,
+      ResolveResource.asset(isImm ? "/default-imm-aliases.fear" : "/default-aliases.fear")
     );
   }
   static InputOutput programmatic(

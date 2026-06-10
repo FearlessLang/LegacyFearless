@@ -4,6 +4,7 @@ module FearlessCompiler {
   requires org.opentest4j;
   requires net.jqwik.api;
   requires java.compiler;
+  requires java.net.http;
 //  requires commons.cli;
   requires cmdline.app;
   requires java.logging;

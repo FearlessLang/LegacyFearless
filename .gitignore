@@ -1,6 +1,7 @@
 GeneratedFearless/
 
 lib/
+!assets/feaRT/lib/
 .attach_*
 .jqwik-database
 # Created by https://www.toptal.com/developers/gitignore/api/windows,macos,linux,eclipse,intellij,node,rust

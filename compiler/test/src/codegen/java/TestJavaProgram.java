@@ -35,27 +35,27 @@ public class TestJavaProgram {
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(True, { Void }) }
     """);}
-  @Test void assertFalse() { ok(new Res("", "Assertion failed :(", 1), """
+  @Test void assertFalse() { ok(new Res("", "Program crashed with: \"Assertion failed :(\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, { Void }) }
     """);}
-  @Test void assertFalseMsg() { ok(new Res("", "power level less than 9000", 1), """
+  @Test void assertFalseMsg() { ok(new Res("", "Program crashed with: \"power level less than 9000\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, "power level less than 9000", { Void }) }
     """);}
 
-  @Test void falseToStr() { ok(new Res("", "False", 1), """
+  @Test void falseToStr() { ok(new Res("", "Program crashed with: \"False\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, Foo.bs(False), { Void }) }
     Foo:{ .bs(b: base.Bool): base.Str -> b.str }
     """);}
-  @Test void trueToStr() { ok(new Res("", "True", 1), """
+  @Test void trueToStr() { ok(new Res("", "Program crashed with: \"True\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
@@ -63,76 +63,76 @@ public class TestJavaProgram {
     Foo:{ .bs(s: base.Stringable): base.Str -> s.str }
     """);}
 
-  @Test void binaryAnd1() { ok(new Res("", "True", 1), """
+  @Test void binaryAnd1() { ok(new Res("", "Program crashed with: \"True\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (True & True) .str, { Void }) }
     """);}
-  @Test void binaryAnd2() { ok(new Res("", "False", 1), """
+  @Test void binaryAnd2() { ok(new Res("", "Program crashed with: \"False\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (True & False) .str, { Void }) }
     """);}
-  @Test void binaryAnd3() { ok(new Res("", "False", 1), """
+  @Test void binaryAnd3() { ok(new Res("", "Program crashed with: \"False\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (False & False) .str, { Void }) }
     """);}
-  @Test void binaryOr1() { ok(new Res("", "True", 1), """
+  @Test void binaryOr1() { ok(new Res("", "Program crashed with: \"True\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (True | True) .str, { Void }) }
     """);}
-  @Test void binaryOr2() { ok(new Res("", "True", 1), """
+  @Test void binaryOr2() { ok(new Res("", "Program crashed with: \"True\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (True | False) .str, { Void }) }
     """);}
-  @Test void binaryOr3() { ok(new Res("", "True", 1), """
+  @Test void binaryOr3() { ok(new Res("", "Program crashed with: \"True\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (False | True) .str, { Void }) }
     """);}
-  @Test void binaryOr4() { ok(new Res("", "False", 1), """
+  @Test void binaryOr4() { ok(new Res("", "Program crashed with: \"False\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (False | False) .str, { Void }) }
     """);}
 
-  @Test void conditionals1() { ok(new Res("", "Assertion failed :(", 1), """
+  @Test void conditionals1() { ok(new Res("", "Program crashed with: \"Assertion failed :(\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(420 > 9000, { Void }) }
     """);}
-  @Test void conditionals2() { ok(new Res("", "Assertion failed :(", 1), """
+  @Test void conditionals2() { ok(new Res("", "Program crashed with: \"Assertion failed :(\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!("hi".size > 9000, { Void }) }
     """);}
 
-  @Test void longToStr() { ok(new Res("", "123456789", 1), """
+  @Test void longToStr() { ok(new Res("", "Program crashed with: \"123456789\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, 123456789 .str, { Void }) }
     """);}
-  @Test void longLongToStr() { ok(new Res("", "9223372036854775807", 1), """
+  @Test void longLongToStr() { ok(new Res("", "Program crashed with: \"9223372036854775807\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, 9223372036854775807 .str, { Void }) }
     """);}
 
-  @Test void veryLongLongToStr() { ok(new Res("", "9223372036854775808", 1), """
+  @Test void veryLongLongToStr() { ok(new Res("", "Program crashed with: \"9223372036854775808\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
@@ -156,32 +156,32 @@ public class TestJavaProgram {
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, 10000000000000000000000 .str, { Void }) }
     """);}
-  @Test void negativeToStr() { ok(new Res("", "-123456789", 1), """
+  @Test void negativeToStr() { ok(new Res("", "Program crashed with: \"-123456789\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, -123456789 .str, { Void }) }
     """);}
 
-  @Test void addition() { ok(new Res("", "7", 1), """
+  @Test void addition() { ok(new Res("", "Program crashed with: \"7\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (5 + 2) .str, { Void }) }
     """);}
-  @Test void addWithUnderscoreInt() { ok(new Res("", "500002", 1), """
+  @Test void addWithUnderscoreInt() { ok(new Res("", "Program crashed with: \"500002\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (5_00_000 + 2) .str, { Void }) }
     """);}
-  @Test void addWithUnderscoreNat() { ok(new Res("", "500002", 1), """
+  @Test void addWithUnderscoreNat() { ok(new Res("", "Program crashed with: \"500002\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (5_00_000 + 2) .str, { Void }) }
     """);}
-  @Test void addWithUnderscoreFloat() { ok(new Res("", "500002.6", 1), """
+  @Test void addWithUnderscoreFloat() { ok(new Res("", "Program crashed with: \"500002.6\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
@@ -201,33 +201,33 @@ public class TestJavaProgram {
     alias base.Void as Void, alias base.Block as Do,
     Test:Main{ _ -> Do#(5 / 0) }
     """);}
-  @Test void subtraction() { ok(new Res("", "3", 1), """
+  @Test void subtraction() { ok(new Res("", "Program crashed with: \"3\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (5 - 2) .str, { Void }) }
     """);}
-  @Test void subtractionNeg() { ok(new Res("", "-2", 1), """
+  @Test void subtractionNeg() { ok(new Res("", "Program crashed with: \"-2\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, (-0 - +2) .str, { Void }) }
     """);}
-  @Test void subtractionUnderflow() { ok(new Res("", "9223372036854775807", 1), """
+  @Test void subtractionUnderflow() { ok(new Res("", "Program crashed with: \"9223372036854775807\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, ((0 - 2) - 9223372036854775807) .str, { Void }) }
     """);}
 
-  @Test void numSqrtOne() { ok(new Res("", "10", 1), """
+  @Test void numSqrtOne() { ok(new Res("", "Program crashed with: \"10\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
     Test:Main{ _ -> Assert!(False, 100.sqrt.str, { Void }) }
     """);}
-  @Test void numSqrtMany() { ok(new Res("", 
-    "10W2227255841W2227255841W2227255841W3037000499W4294967295W15", 1), """
+  @Test void numSqrtMany() { ok(new Res("",
+    "Program crashed with: \"10W2227255841W2227255841W2227255841W3037000499W4294967295W15\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,
@@ -248,7 +248,7 @@ public class TestJavaProgram {
     alias base.Void as Void,
     Test:Main{_ -> Assert!("abc" == "abc", {Void})}
     """);}
-  @Test void strEqFail() { ok(new Res("", "Assertion failed :(", 1), """
+  @Test void strEqFail() { ok(new Res("", "Program crashed with: \"Assertion failed :(\"[###]", 1), """
     package test
     alias base.Main as Main, alias base.Assert as Assert, alias base.True as True, alias base.False as False,
     alias base.Void as Void,

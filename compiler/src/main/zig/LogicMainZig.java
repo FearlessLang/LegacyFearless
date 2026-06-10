@@ -4,6 +4,7 @@ import ast.Program;
 import codegen.MIR;
 import codegen.MIRInjectionVisitor;
 import codegen.optimisations.OptimisationBuilder;
+import codegen.zig.ZigBuildOpts;
 import codegen.zig.ZigCompiler;
 import codegen.zig.ZigMagicImpls;
 import codegen.zig.ZigProgram;
@@ -15,6 +16,7 @@ import program.typesystem.TsT;
 import main.java.HDCache;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -24,14 +26,9 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   Path executablePath();
   void setExecutablePath(Path path);
 
-  /** Optional heartbeat-promotion threshold override forwarded to the Zig build
-   * (null = use the runtime default). Tests use it to force aggressive VPF
-   * promotion; not exposed on any cross-backend interface. */
-  default Integer tokensThreshold() { return null; }
-
-  /** When true, build with the self-hosted backend + Debug instead of LLVM +
-   * ReleaseFast. ~9x faster to compile; used by the codegen test harness only. */
-  default boolean fastBuild() { return false; }
+  /** FeaRT build configuration (optimisation mode, VPF, stack traces, ...);
+   * not exposed on any cross-backend interface. */
+  default ZigBuildOpts buildOpts() { return ZigBuildOpts.DEFAULT; }
 
   @Override default void cachePackageTypes(Program program) {
     var versionedDir = new ZigCompiler(verbosity(), io()).versionedCacheDir();
@@ -63,24 +60,28 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   }
 
   @Override default void compileBackEnd(ZigProgram src) {
-    var compiler = new ZigCompiler(verbosity(), io(), tokensThreshold(), fastBuild());
+    var compiler = new ZigCompiler(verbosity(), io(), buildOpts());
     var exePath = compiler.compile(src);
     setExecutablePath(exePath);
   }
 
   @Override default ProcessBuilder execution(ZigProgram exe) {
-    return new ProcessBuilder(executablePath().toString());
+    var cmd = new ArrayList<String>();
+    cmd.add(executablePath().toString());
+    cmd.addAll(io().commandLineArguments());
+    return new ProcessBuilder(cmd);
   }
 
   static LogicMainZig of(InputOutput io, Verbosity verbosity) {
-    return of(io, verbosity, null);
-  }
-
-  static LogicMainZig of(InputOutput io, Verbosity verbosity, Integer tokensThreshold) {
-    return of(io, verbosity, tokensThreshold, false);
+    return of(io, verbosity, ZigBuildOpts.DEFAULT);
   }
 
   static LogicMainZig of(InputOutput io, Verbosity verbosity, Integer tokensThreshold, boolean fastBuild) {
+    assert fastBuild;
+    return of(io, verbosity, ZigBuildOpts.forTests(tokensThreshold));
+  }
+
+  static LogicMainZig of(InputOutput io, Verbosity verbosity, ZigBuildOpts buildOpts) {
     var cachedPkg = new HashSet<String>();
     return new LogicMainZig() {
       private Path exePath;
@@ -89,8 +90,7 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
       public Verbosity verbosity() { return verbosity; }
       public Path executablePath() { return exePath; }
       public void setExecutablePath(Path path) { exePath = path; }
-      public Integer tokensThreshold() { return tokensThreshold; }
-      public boolean fastBuild() { return fastBuild; }
+      public ZigBuildOpts buildOpts() { return buildOpts; }
     };
   }
 }
