@@ -59,8 +59,13 @@ class ZigProgramBuilder {
       sb.append("const rt = root.rt;\n");
       sb.append("const nat_rt = root.nat_rt;\n");
       sb.append("const int_rt = root.int_rt;\n");
+      sb.append("const float_rt = root.float_rt;\n");
+      sb.append("const byte_rt = root.byte_rt;\n");
       sb.append("const gc = root.gc;\n");
       sb.append("const str_rt = root.str_rt;\n");
+      sb.append("const regex_rt = root.regex_rt;\n");
+      sb.append("const hash_rt = root.hash_rt;\n");
+      sb.append("const map_rt = root.map_rt;\n");
       sb.append("const var_rt = root.var_rt;\n");
       sb.append("const sys_rt = root.sys_rt;\n");
       sb.append("const list_rt = root.list_rt;\n");
@@ -114,8 +119,13 @@ class ZigProgramBuilder {
     sb.append("pub const rt = @import(\"runtime/objs.zig\");\n");
     sb.append("pub const nat_rt = @import(\"runtime/intrinsics/nat.zig\");\n");
     sb.append("pub const int_rt = @import(\"runtime/intrinsics/int.zig\");\n");
+    sb.append("pub const float_rt = @import(\"runtime/intrinsics/float.zig\");\n");
+    sb.append("pub const byte_rt = @import(\"runtime/intrinsics/byte.zig\");\n");
     sb.append("pub const gc = @import(\"runtime/gc.zig\");\n");
     sb.append("pub const str_rt = @import(\"runtime/intrinsics/str.zig\");\n");
+    sb.append("pub const regex_rt = @import(\"runtime/intrinsics/regex.zig\");\n");
+    sb.append("pub const hash_rt = @import(\"runtime/intrinsics/hash.zig\");\n");
+    sb.append("pub const map_rt = @import(\"runtime/intrinsics/map.zig\");\n");
     sb.append("pub const var_rt = @import(\"runtime/intrinsics/var.zig\");\n");
     sb.append("pub const sys_rt = @import(\"runtime/intrinsics/sys.zig\");\n");
     sb.append("pub const list_rt = @import(\"runtime/intrinsics/list.zig\");\n");
@@ -131,6 +141,7 @@ class ZigProgramBuilder {
     sb.append("pub const log = @import(\"runtime/log.zig\");\n");
     sb.append("pub const Fiber = @import(\"runtime/fiber.zig\").Fiber;\n");
     sb.append("comptime { _ = Fiber; }\n");
+    sb.append("pub const native = @import(\"runtime/native.zig\");\n");
     // A `@panic`-class fault inside a fiber becomes a non-deterministic error
     // that unwinds to the nearest `CapTry`/top-level boundary. See
     // `runtime/errors/unwind.zig`.
@@ -193,6 +204,7 @@ class ZigProgramBuilder {
     sb.append("// === Entry Point ===\n");
     sb.append("pub fn main(init: std.process.Init) void {\n");
     sb.append("gc.set_runtime_io(init.io);\n");
+    sb.append("std.mem.doNotOptimizeAway(native.linkProbe());\n");
     sb.append("if (init.environ_map.get(\"FEART_ALLOCS_OUT\")) |p| gc.set_allocs_out_path(p);\n");
     sb.append("log.installCrashHandler();\n");
     sb.append("gc.init_gc();\n");

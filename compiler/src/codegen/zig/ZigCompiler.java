@@ -24,14 +24,27 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
 
   private Path cacheBaseDir() { return io.cachedBase().resolve("zig-cache"); }
   public Path versionedCacheDir() { return cacheBaseDir().resolve("v" + ZIG_CACHE_VERSION); }
-  // Shared, content-addressed Zig caches: stay warm across compiles and are safe
-  // under concurrent builds (Zig locks them internally). The compiled runtime
-  // lives here, so a per-program rebuild only recompiles the changed program.
-  // They live in the per-user cache, not under io.cachedBase(): they are
-  // machine-global by nature, grow into the gigabytes, and in the test harness
-  // io.cachedBase() sits inside target/classes, which is jarred wholesale.
-  private Path zigCacheDir() { return OsCache.root().resolve("zig-cache/local"); }
+  /// Zig's content-addressed build cache (the `--cache-dir`). For real builds it
+  /// lives in the app's own output dir, so it shares the app's lifecycle: the
+  /// runtime + libgc are compiled once per app and reused on rebuild, and the
+  /// whole cache is reclaimed when the app's out/ is removed, rather than
+  /// accumulating without bound in a machine-global directory.
+  ///
+  /// The test harness is the exception: it compiles each program into a throwaway
+  /// per-test output dir, so a per-output cache would recompile libgc + the
+  /// runtime for every test. Tests therefore share one warm cache under target/
+  /// (not under target/classes, which is packed into the jar; not in the per-user
+  /// cache, which is the directory this whole change exists to keep lean).
+  private Path zigCacheDir() {
+    if (opts.fastTestBuild()) { return targetDir().resolve("fearless-zig-cache/local"); }
+    return io.output().resolve("zig-cache/local");
+  }
+  // The global cache (build runner + fetched dependency packages) is genuinely
+  // machine-global, tiny and stable, so it stays shared in the per-user cache.
   private Path zigGlobalCacheDir() { return OsCache.root().resolve("zig-cache/global"); }
+  /// The Maven/IDE build output dir (target). In the test harness, where this is
+  /// used, resources resolve to target/classes, whose parent is target.
+  private static Path targetDir() { return ResolveResource.artefact("/").getParent(); }
   // Per-compile build tree + output, under io.output() like the Java backend's
   // generated classes: the program source and binary differ per compile, so they
   // must not share a fixed path across concurrent test forks.
@@ -135,6 +148,38 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     if (Files.isDirectory(feartLib)) {
       copyTree(feartLib, targetLib);
     }
+
+    copyNativeStaticLib(workDir);
+  }
+
+  /// Stage the Rust C-ABI staticlib (the `frt_*` surface) next to the runtime so
+  /// build.zig can link it. The artefact is named `<arch>-<os>-libnative_rt.a`
+  /// using the same arch/os spelling as the JNI `.so` loader in
+  /// assets/rt/NativeRuntime.java (arch amd64/arm64; os linux/macos/windows).
+  ///
+  /// This library implements string handling and regular expressions. It is used in both the Java and Zig backends.
+  private void copyNativeStaticLib(Path workDir) throws IOException {
+    var osName = System.getProperty("os.name").toLowerCase();
+    String os;
+    if (osName.contains("linux")) { os = "linux"; }
+    else if (osName.contains("mac") || osName.contains("darwin")) { os = "macos"; }
+    else if (osName.contains("windows")) { os = "windows"; }
+    else { throw Bug.of("Unsupported OS for native runtime staticlib: " + osName); }
+
+    var archName = System.getProperty("os.arch").toLowerCase();
+    String arch = switch (archName) {
+      case "x86_64", "amd64" -> "amd64";
+      case "aarch64", "arm64" -> "arm64";
+      default -> throw Bug.of("Unsupported architecture for native runtime staticlib: " + archName);
+    };
+
+    var source = ResolveResource.artefact("/rt/libnative/static/" + arch + "-" + os + "-libnative_rt.a");
+    if (!Files.exists(source)) {
+      throw Bug.of("Cannot find the native runtime staticlib at " + source + ". Build the `native-rt` crate with `--features capi` for this host.");
+    }
+    var target = workDir.resolve("lib/native/libnative_rt.a");
+    Files.createDirectories(target.getParent());
+    Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
   }
 
   private void copyTree(Path source, Path target) throws IOException {
@@ -264,6 +309,16 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
 
           exe.root_module.addImport("libgc", c_libgc_mod);
           exe.root_module.linkLibrary(context_switch_lib);
+
+          // The Rust C-ABI native runtime (the frt_* surface). Linking the
+          // archive directly lets the linker drop its unreferenced JNI objects;
+          // only the frt_* symbols reached from native.zig are retained. The
+          // archive pulls in libc (pthread etc.), so libc must be linked.
+          // Rust objects carry an eh_personality referencing the platform
+          // unwinder (_Unwind_*); libgcc_s provides it on glibc.
+          exe.root_module.addObjectFile(b.path("lib/native/libnative_rt.a"));
+          exe.root_module.link_libc = true;
+          exe.root_module.linkSystemLibrary("gcc_s", .{});
 
           exe.use_llvm = %b;
           exe.root_module.omit_frame_pointer = false;

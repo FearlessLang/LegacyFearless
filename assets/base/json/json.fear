@@ -41,7 +41,7 @@ _JsonToStr: {
     .join ", ",
   .escape(s: Str): Str -> Block#
     .let[Regex] mustEscape = {Regexs#"[\\U{0000}-\\U{001F}]"} // unicode control characters
-    .return {AtomiseStr#s
+    .return {s.codepoints
       .map{ch -> Block#
         .if {ch == "\\"} .return {"\\\\"}
         .if {ch == "\n"} .return {"\\n"}

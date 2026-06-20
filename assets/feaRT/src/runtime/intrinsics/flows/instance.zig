@@ -284,6 +284,9 @@ fn flow_size(self: FatPtr) callconv(.c) FatPtr {
     const flow = object.deref_flow(self);
     if (!flow.is_finite) return object.make_none();
     if (flow.ops.len != 0) return object.make_none();
+
+    // I'm only computing size where it would be O(1) to do so here, there is already a `.count/0` method
+    // that gives the size no matter how expensive it is to compute.
     return switch (flow.source) {
         .list => |s| object.make_some(nat_rt.make(s.items.len - s.index)),
         .range_finite => |s| blk: {
@@ -294,6 +297,7 @@ fn flow_size(self: FatPtr) callconv(.c) FatPtr {
         },
         .single => |s| object.make_some(nat_rt.make(if (s.consumed) 0 else 1)),
         .empty => object.make_some(nat_rt.make(0)),
+        .str => object.make_none(),
         .range_infinite => object.make_none(),
     };
 }

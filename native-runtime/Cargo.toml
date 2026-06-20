@@ -5,11 +5,13 @@ edition = "2021"
 
 [lib]
 name = "native_rt"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "staticlib"]
 
 [features]
 compiler-only = []
 runtime-only = []
+# C-ABI surface for the Zig runtime. Built as a staticlib, no JNI involved.
+capi = []
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

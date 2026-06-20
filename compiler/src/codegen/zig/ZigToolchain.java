@@ -148,8 +148,12 @@ public final class ZigToolchain {
       try {
         var res = http.send(
           HttpRequest.newBuilder(URI.create(url)).build(),
-          HttpResponse.BodyHandlers.ofFile(tarball,
-            StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE));
+          HttpResponse.BodyHandlers.ofFile(
+            tarball,
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING,
+            StandardOpenOption.WRITE
+          ));
         if (res.statusCode() != 200) { throw new IOException("HTTP " + res.statusCode()); }
         verifyChecksum(tarball, sha256, url);
         return;

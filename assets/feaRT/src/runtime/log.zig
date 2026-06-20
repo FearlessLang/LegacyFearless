@@ -93,6 +93,7 @@ pub const RawFreeSource = enum(u8) {
 	flow_op_release = 5,
 	fiber_destroy = 6,
 	error_release = 7,
+	map_release = 8,
 };
 
 pub const TRACE_BUF_SIZE: usize = 65536;

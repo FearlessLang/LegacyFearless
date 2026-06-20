@@ -1,6 +1,5 @@
 package codegen.zig;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import utils.Base;
 import utils.ResolveResource;
@@ -105,7 +104,6 @@ public class TestZigContainers {
     MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { .n -> n, .rn -> n } }
     """, Base.mutBaseAliases); }
 
-  @Disabled("Broken due to missing magic")
   @Test void simpleJson() { okBase(new Res("""
     "Hello!!!\\nHow are you?"
     "Hello!!!\\nHow 吣are吣 you?"
@@ -125,4 +123,39 @@ public class TestZigContainers {
     Invalid string found, expected JSON.
     Unexpected 'true' when parsing a JSON object at 1:6
     """, 0), ResolveResource.test("/json/main.fear"), ResolveResource.test("/json/pkg.fear")); }
+
+  // === LinkedHashMap (Maps.hashMap) ===
+
+  /// Insertion order is preserved, and updating an existing key replaces its
+  /// value in place without moving it (keys stay `one,two,three`).
+  @Test void mapInsertionOrder() { okBase(new Res("one,two,three=1,2,30", "", 0), """
+    package test
+    Test:Main{ sys -> Block#
+      .let[mut LinkedHashMap[Str,Nat]] m = { Maps.hashMap[Str,Nat]({k1,k2 -> k1 == k2}, {k -> k}) }
+      .do{ m.put("one", 1) }
+      .do{ m.put("two", 2) }
+      .do{ m.put("three", 3) }
+      .do{ m.put("three", 30) }
+      .let[Str] ks = { m.keys.join(",") }
+      .let[Str] vs = { m.values.map{v -> v.str}.join(",") }
+      .return{ sys.io.println(ks + "=" + vs) }
+      }
+    """, Base.mutBaseAliases); }
+
+  /// `.get` finds present keys and yields empty for absent ones; `.remove`
+  /// returns the old value and drops the entry (keys become `one,three`).
+  @Test void mapGetRemove() { okBase(new Res("2/2/none/one,three", "", 0), """
+    package test
+    Test:Main{ sys -> Block#
+      .let[mut LinkedHashMap[Str,Nat]] m = { Maps.hashMap[Str,Nat]({k1,k2 -> k1 == k2}, {k -> k}) }
+      .do{ m.put("one", 1) }
+      .do{ m.put("two", 2) }
+      .do{ m.put("three", 3) }
+      .let[Str] got = { m.get("two").match{.some(v) -> v.str, .empty -> "none"} }
+      .let[Str] removed = { m.remove("two").match{.some(v) -> v.str, .empty -> "none"} }
+      .let[Str] gone = { m.get("two").match{.some(v) -> v.str, .empty -> "none"} }
+      .let[Str] ks = { m.keys.join(",") }
+      .return{ sys.io.println(got + "/" + removed + "/" + gone + "/" + ks) }
+      }
+    """, Base.mutBaseAliases); }
 }

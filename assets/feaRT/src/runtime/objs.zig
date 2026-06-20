@@ -8,6 +8,8 @@ const alloc_recycler = @import("alloc_recycler.zig");
 // Intrinsic modules for compile-time dispatch
 const nat_rt = @import("intrinsics/nat.zig");
 const int_rt = @import("intrinsics/int.zig");
+const float_rt = @import("intrinsics/float.zig");
+const byte_rt = @import("intrinsics/byte.zig");
 const var_rt = @import("intrinsics/var.zig");
 const list_rt = @import("intrinsics/list.zig");
 const isopod_rt = @import("intrinsics/isopod.zig");
@@ -179,6 +181,8 @@ pub const FearlessValue = extern union {
 	obj: *ObjectHeader,
 	int: i64,
 	nat: u64,
+	float: f64,
+	byte: u8,
 	cell: *var_rt.VarCell,
 	iso_cell: *isopod_rt.IsoCell,
 	err_cell: *error_rt.ErrorCell,
@@ -314,6 +318,8 @@ pub fn call(receiver: FatPtr, comptime target_method: u64, args: anytype, compti
 		.primitive => {
 			if (receiver.vt == &nat_rt.VT_Nat) return nat_rt.dispatch(target_method, receiver, args);
 			if (receiver.vt == &int_rt.VT_Int) return int_rt.dispatch(target_method, receiver, args);
+			if (receiver.vt == &float_rt.VT_Float) return float_rt.dispatch(target_method, receiver, args);
+			if (receiver.vt == &byte_rt.VT_Byte) return byte_rt.dispatch(target_method, receiver, args);
 			unreachable;
 		},
 		.primitiveContainer => {

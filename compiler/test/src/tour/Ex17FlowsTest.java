@@ -741,7 +741,7 @@ public class Ex17FlowsTest {
 
   @Test void strFlow() {ok(new Res("Jello", "", 0), """
     package test
-    Test: Main{sys -> sys.io.println("Hello".flow
+    Test: Main{sys -> sys.io.println("Hello".codepoints
       .map{ch -> ch == "H" ? {.then -> "J", .else -> ch}}
       .join ""
       )}
@@ -764,7 +764,7 @@ public class Ex17FlowsTest {
       .size: Nat,
       .facts: Str -> this.size.str+" "+this.str,
       }
-    Test: Main{sys -> sys.io.println("Hello".flow
+    Test: Main{sys -> sys.io.println("Hello".codepoints
       .map{ch -> ch == "H" ? {.then -> "J", .else -> ch}}
       .scan[StrInfo](
         {.size -> 0, .str -> ""},

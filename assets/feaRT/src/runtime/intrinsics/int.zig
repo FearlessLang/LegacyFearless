@@ -51,6 +51,20 @@ pub inline fn mod(a: FatPtr, b: FatPtr) FatPtr {
 	return make(@mod(deref(a), divisor));
 }
 
+/// `**(n: Nat): Int` — exponentiation by squaring in wrapping 64-bit, matching
+/// the Java backend's `long` pow. The exponent is a Nat.
+pub inline fn pow(a: FatPtr, exp: FatPtr) FatPtr {
+	const nat_intrinsics = @import("nat.zig");
+	var base: i64 = deref(a);
+	var exp_bits: u64 = nat_intrinsics.deref(exp);
+	var res: i64 = 1;
+	while (exp_bits != 0) : (exp_bits >>= 1) {
+		if ((exp_bits & 1) != 0) res *%= base;
+		base *%= base;
+	}
+	return make(res);
+}
+
 pub inline fn abs(a: FatPtr) FatPtr {
 	const v = deref(a);
 	return make(if (v < 0) -v else v);
@@ -89,6 +103,16 @@ pub fn to_nat(a: FatPtr) FatPtr {
 	return nat_intrinsics.make(@bitCast(deref(a)));
 }
 
+pub fn to_float(a: FatPtr) FatPtr {
+	const float_intrinsics = @import("float.zig");
+	return float_intrinsics.make(@floatFromInt(deref(a)));
+}
+
+pub fn to_byte(a: FatPtr) FatPtr {
+	const byte_intrinsics = @import("byte.zig");
+	return byte_intrinsics.make(@truncate(@as(u64, @bitCast(deref(a)))));
+}
+
 // Compile-time-resolved intrinsic dispatch for Int.
 const h = objs.hash_signature;
 pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr {
@@ -98,6 +122,7 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
 		h("imm */1") => mul(self, args[0]),
 		h("imm //1") => div(self, args[0]),
 		h("imm %/1") => mod(self, args[0]),
+		h("imm **/1") => pow(self, args[0]),
 		h("imm .abs/0") => abs(self),
 		h("imm >/1") => gt(self, args[0]),
 		h("imm </1") => lt(self, args[0]),
@@ -108,6 +133,8 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
 		h("read .str/0") => @import("str.zig").int_to_str(self),
 		h("read .int/0") => self,
 		h("read .nat/0") => to_nat(self),
+		h("read .float/0") => to_float(self),
+		h("read .byte/0") => to_byte(self),
 		else => unreachable,
 	};
 }

@@ -7,6 +7,8 @@
 const std = @import("std");
 const objs = @import("../../objs.zig");
 const int_rt = @import("../int.zig");
+const native = @import("../../native.zig");
+const string_flows = @import("string_flows.zig");
 
 const FatPtr = objs.FatPtr;
 
@@ -48,6 +50,7 @@ pub const Source = union(enum) {
     range_finite: RangeSource,
     range_infinite: RangeSource,
     single: SingleSource,
+    str: string_flows.StrSource,
     empty: void,
 };
 
@@ -91,6 +94,7 @@ pub fn source_has_next(s: *Source) bool {
         .range_finite => |rs| if (rs.step > 0) rs.current < rs.end else rs.current > rs.end,
         .range_infinite => true,
         .single => |ss| !ss.consumed,
+        .str => |ss| ss.index < ss.bytes_len,
         .empty => false,
     };
 }
@@ -110,6 +114,21 @@ pub fn source_next(s: *Source) FatPtr {
         .single => |*ss| {
             ss.consumed = true;
             return ss.value;
+        },
+        .str => |*ss| {
+            const str_rt = @import("root").str_rt;
+            const start = ss.index;
+            const unit_end = switch (ss.mode) {
+                // Validated UTF-8: the leading byte gives the sequence length.
+                .codepoint => @min(start + (std.unicode.utf8ByteSequenceLength(ss.bytes_ptr[start]) catch 1), ss.bytes_len),
+                // `start` is already a grapheme boundary, so the next boundary
+                // after it is the end of the current cluster.
+                .grapheme => native.frt_grapheme_boundary_after(ss.bytes_ptr, ss.bytes_len, start),
+            };
+            ss.index = unit_end;
+            // A shared sub-Str over the owner's buffer: it takes its own
+            // reference to `owner`, so it stays valid independently of the flow.
+            return str_rt.make_shared_substr(ss.owner, ss.bytes_ptr + start, unit_end - start);
         },
         .empty => unreachable,
     }

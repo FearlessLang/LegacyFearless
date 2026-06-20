@@ -74,7 +74,12 @@ public interface Str extends base.Str_0 {
 	@Override default base.Void_0 append$mut(base.Stringable_0 other$) { throw new java.lang.Error("Unreachable code"); }
 	@Override default base.Void_0 clear$mut() { throw new java.lang.Error("Unreachable code"); }
 	@Override default Long size$imm() {
-		return (long) this.graphemes().length;
+		var utf8 = this.utf8();
+		long count = 0;
+		for (int i = utf8.position(), end = utf8.limit(); i < end; ++i) {
+			if ((utf8.get(i) & 0xC0) != 0x80) { ++count; }
+		}
+		return count;
 	}
 	@Override default base.Void_0 assertEq$imm(Str other$) {
 		return _StrHelpers_0.$self.assertEq$imm(this, other$);
@@ -91,6 +96,21 @@ public interface Str extends base.Str_0 {
 			var str = (Str) _str;
 			return acc.isEmpty$read() == True_0.$self ? acc.$plus$mut(str) : acc.$plus$mut(this).$plus$mut(str);
 		});
+	}
+
+	/** Byte offset of the start of codepoint index {@code cp}, scanning forward from the buffer position.
+	 *  {@code cp} equal to the codepoint count returns the buffer's byte length. */
+	default int codepointByteOffset(long cp) {
+		var utf8 = this.utf8();
+		int len = utf8.remaining();
+		long seen = 0;
+		for (int i = 0; i < len; ++i) {
+			if ((utf8.get(utf8.position() + i) & 0xC0) != 0x80) {
+				if (seen == cp) { return i; }
+				++seen;
+			}
+		}
+		return len;
 	}
 
 	@Override default Str substring$imm(long start_m$, long end_m$) {
@@ -123,11 +143,11 @@ public interface Str extends base.Str_0 {
 		return fromTrustedUtf8(wrap(res));
 	}
 
-	@Override default Flow_1 flow$imm() {
+	@Override default Flow_1 codepoints$imm() {
 		var size = size$imm();
-		return Flow_0.$self.fromOp$imm(this._flow$imm(0, size), size);
+		return Flow_0.$self.fromOp$imm(this._codepoints$imm(0, size), size);
 	}
-	default FlowOp_1 _flow$imm(long start, long end_) {
+	default FlowOp_1 _codepoints$imm(long start, long end_) {
 		return new FlowOp_1() {
 			long cur = start;
 			long end = end_;
@@ -163,7 +183,62 @@ public interface Str extends base.Str_0 {
 				var mid = this.cur + (size / 2);
 				var end_ = this.end;
 				this.end = mid;
-				return Opts_0.$self.$hash$imm(_flow$imm(mid, end_));
+				return Opts_0.$self.$hash$imm(_codepoints$imm(mid, end_));
+			}
+			@Override public Bool_0 canSplit$read() {
+				return this.end - this.cur > 1 ? True_0.$self : False_0.$self;
+			}
+		};
+	}
+
+	@Override default Flow_1 graphemes$imm() {
+		var utf8 = this.utf8();
+		var starts = this.graphemes();
+		long count = starts.length;
+		return Flow_0.$self.fromOp$imm(this._graphemes$imm(utf8, starts, 0, count), count);
+	}
+	default FlowOp_1 _graphemes$imm(ByteBuffer utf8, int[] starts, long start, long end_) {
+		return new FlowOp_1() {
+			long cur = start;
+			long end = end_;
+			private Str graphemeAt(long i) {
+				int idx = (int) i;
+				int from = starts[idx];
+				int to = idx + 1 < starts.length ? starts[idx + 1] : utf8.remaining();
+				return fromTrustedUtf8(utf8.slice(from, to - from));
+			}
+			@Override public Bool_0 isFinite$mut() {
+				return True_0.$self;
+			}
+			@Override public Void_0 step$mut(_Sink_1 sink_m$) {
+				if (this.cur >= this.end) {
+					sink_m$.stopDown$mut();
+					return Void_0.$self;
+				}
+				sink_m$.$hash$mut(graphemeAt(this.cur++));
+				return Void_0.$self;
+			}
+			@Override public Void_0 stopUp$mut() {
+				this.cur = starts.length;
+				return Void_0.$self;
+			}
+			@Override public Bool_0 isRunning$mut() {
+				return this.cur >= this.end ? False_0.$self : True_0.$self;
+			}
+			@Override public Void_0 for$mut(_Sink_1 downstream_m$) {
+				for (; this.cur < end; ++this.cur) {
+					downstream_m$.$hash$mut(graphemeAt(this.cur));
+				}
+				downstream_m$.stopDown$mut();
+				return Void_0.$self;
+			}
+			@Override public Opt_1 split$mut() {
+				var size = this.end - this.cur;
+				if (size <= 1) { return Opt_1.$self; }
+				var mid = this.cur + (size / 2);
+				var end_ = this.end;
+				this.end = mid;
+				return Opts_0.$self.$hash$imm(_graphemes$imm(utf8, starts, mid, end_));
 			}
 			@Override public Bool_0 canSplit$read() {
 				return this.end - this.cur > 1 ? True_0.$self : False_0.$self;
@@ -192,11 +267,10 @@ public interface Str extends base.Str_0 {
 		private final ByteBuffer UTF8;
 		private final long size;
 		public SubStr(Str all, int start, int end) {
-			var graphemes = all.graphemes();
 			var utf8 = all.utf8();
 			assert utf8.position() == 0 : "SubStr position must be 0";
-			var index = start == graphemes.length ? utf8.remaining() : graphemes[start];
-			var endIdx = end == graphemes.length ? utf8.remaining() : graphemes[end];
+			var index = all.codepointByteOffset(start);
+			var endIdx = all.codepointByteOffset(end);
 			var byteSize = endIdx - index;
 			assert byteSize >= 0 : "SubStr byteSize must be >= 0, was "+byteSize;
 			this.UTF8 = utf8.slice(index, byteSize);

@@ -57,7 +57,12 @@ public interface Str extends base.Str_0 {
 		return fromTrustedUtf8(res);
 	}
 	@Override default Long size$imm() {
-		return (long) this.graphemes().length;
+		var utf8 = this.utf8();
+		long count = 0;
+		for (int i = utf8.position(), end = utf8.limit(); i < end; ++i) {
+			if ((utf8.get(i) & 0xC0) != 0x80) { ++count; }
+		}
+		return count;
 	}
 	@Override default base.Void_0 assertEq$imm(Str other$) {
 		return _StrHelpers_0.$self.assertEq$imm(this, other$);

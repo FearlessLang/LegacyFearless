@@ -291,12 +291,12 @@ public class TestJavaOptimisations {
     Test_0 $self = new Test_0Impl();
     base.Void_0 $hash$imm(base.caps.System_0 sys_m$);
     static base.Void_0 $hash$imm$fun(base.caps.System_0 sys_m$, test.Test_0 $this) {
-      return sys_m$.io$mut().println$mut(((rt.Str)((base.flows.Flow_1)((base.flows.Flow_1)rt.flows.FlowCreator.fromFlow(rt.flows.dataParallel.DataParallelFlowK.$self, Str$3297469917561599766$Str$.$self.flow$imm())).map$mut(test.Fear[###]$_0.$self)).join$mut(Str$14492805990617963705$Str$.$self)));
+      return sys_m$.io$mut().println$mut(((rt.Str)((base.flows.Flow_1)((base.flows.Flow_1)rt.flows.FlowCreator.fromFlow(rt.flows.dataParallel.DataParallelFlowK.$self, Str$3297469917561599766$Str$.$self.codepoints$imm())).map$mut(test.Fear[###]$_0.$self)).join$mut(Str$14492805990617963705$Str$.$self)));
     }
     }
     """, "/test/Test_0.java", """
     package test
-    Test: Main{sys -> sys.io.println("Hello".flow
+    Test: Main{sys -> sys.io.println("Hello".codepoints
       .map{ch -> ch == "H" ? {.then -> "J", .else -> ch}}
       .join ""
       )}

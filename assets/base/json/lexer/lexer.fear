@@ -68,9 +68,6 @@ _LexStartingToken: Actor[mut _LexerCtx,Str,Token]{downstream, ctx, e -> Block#
       ctx.mode(_LexerModes.digits),
       ActorRes.continue
       )}
-  // TODO: this is broken because we could have `"<joining char>"` which would make `"<joining char>` the first
-  // item in our list. JSON spec requires us to parse as UTF8 chars not as grapheme clusters, so we need to add a
-  // .utf8 method to Str which returns a Bytes or List[Byte] or something like that.
   .if {e == "\""} .return {Block#(
     ctx.mode(_LexerModes.string),
     ActorRes.continue

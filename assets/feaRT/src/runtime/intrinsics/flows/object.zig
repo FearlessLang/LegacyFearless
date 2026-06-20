@@ -9,10 +9,12 @@ const std = @import("std");
 const objs = @import("../../objs.zig");
 const gc = @import("../../gc.zig");
 const list_rt = @import("../list.zig");
+const native = @import("../../native.zig");
 const root = @import("root");
 const pb = root.pkg_base;
 
 const types = @import("types.zig");
+const string_flows = @import("string_flows.zig");
 const FatPtr = objs.FatPtr;
 
 const ArrayList = std.ArrayList(FatPtr);
@@ -64,6 +66,16 @@ pub fn flow_drop(header: *anyopaque) callconv(.c) void {
 }
 
 fn release_source(f: *types.FeartFlow) void {
+    // String sources own their owner Str directly (graphemes use a stateless
+    // native lookup, so there is no cursor to release).
+    switch (f.source) {
+        .str => |ss| {
+            ss.owner.rc_decrement();
+            return;
+        },
+        else => {},
+    }
+
     if (f.source_owner) |owner| {
         owner.rc_decrement();
         return;
@@ -74,6 +86,7 @@ fn release_source(f: *types.FeartFlow) void {
         // shares items out instead of moving them.
         .list => |ls| for (ls.items) |item| item.rc_decrement(),
         .single => |ss| if (!ss.consumed) ss.value.rc_decrement(),
+        .str => unreachable, // handled above
         .range_finite, .range_infinite, .empty => {},
     }
 }
@@ -88,6 +101,9 @@ fn retain_source(source: types.Source, source_owner: ?FatPtr) ?FatPtr {
         .single => |ss| {
             if (!ss.consumed) _ = ss.value.share();
         },
+        // The caller bit-copies `source` (including the owner words), so just
+        // bump the owner's refcount to match the new flow's reference.
+        .str => |ss| _ = ss.owner.share(),
         .range_finite, .range_infinite, .empty => {},
     }
     return null;
@@ -253,6 +269,60 @@ pub fn split_flow(flow: *types.FeartFlow) ?struct { left: *types.FeartFlow, righ
             };
             return .{ .left = left, .right = right };
         },
+        .str => |ss| {
+            // Split the live window `[index, bytes_len)` at the first unit
+            // boundary at/after its byte midpoint. Codepoint boundaries are
+            // found in pure Zig (skip continuation bytes); grapheme boundaries
+            // via the one-shot native lookup. Each half is re-based to its own
+            // buffer start with `index = 0` and takes its own reference to
+            // `owner`. Half-open: left = [start, mid), right = [mid, end).
+            const abs_start = ss.index;
+            const abs_end = ss.bytes_len;
+            if (abs_end - abs_start < 2) return null;
+            const midpoint = abs_start + (abs_end - abs_start) / 2;
+            const mid = switch (ss.mode) {
+                .codepoint => blk: {
+                    var m = midpoint;
+                    while (m < abs_end and (ss.bytes_ptr[m] & 0xC0) == 0x80) m += 1;
+                    break :blk m;
+                },
+                .grapheme => native.frt_grapheme_boundary_after(ss.bytes_ptr, abs_end, midpoint),
+            };
+            if (mid <= abs_start or mid >= abs_end) return null;
+            const left = gc.recycleAlloc(types.FeartFlow);
+            const right = gc.recycleAlloc(types.FeartFlow);
+            retain_ops(flow);
+            retain_ops(flow);
+            left.* = .{
+                .source = .{ .str = .{
+                    .bytes_ptr = ss.bytes_ptr + abs_start,
+                    .bytes_len = mid - abs_start,
+                    .index = 0,
+                    .mode = ss.mode,
+                    .owner = ss.owner.share(),
+                } },
+                .source_owner = null,
+                .ops = flow.ops,
+                .ops_ref_count = flow.ops_ref_count,
+                .is_finite = true,
+                .ref_count = std.atomic.Value(u32).init(1),
+            };
+            right.* = .{
+                .source = .{ .str = .{
+                    .bytes_ptr = ss.bytes_ptr + mid,
+                    .bytes_len = abs_end - mid,
+                    .index = 0,
+                    .mode = ss.mode,
+                    .owner = ss.owner.share(),
+                } },
+                .source_owner = null,
+                .ops = flow.ops,
+                .ops_ref_count = flow.ops_ref_count,
+                .is_finite = true,
+                .ref_count = std.atomic.Value(u32).init(1),
+            };
+            return .{ .left = left, .right = right };
+        },
         // single (count<=1) and empty have nothing to split. range_infinite
         // can't produce two finite halves; the Java InfiniteRangeOp also
         // returns empty from split$mut.
@@ -300,6 +370,20 @@ pub fn make_flow_from_list(comptime vt: *const objs.VTable, list_fp: FatPtr) Fat
     const al = list_rt.deref_list(list_fp);
     const flow = create_flow(.{ .list = .{ .items = al.items, .index = 0 } }, true);
     flow.source_owner = list_fp;
+    return make_flow_fp(vt, flow);
+}
+
+// Flow over a string's codepoints / graphemes. `owner` is the Str whose buffer
+// `bytes` borrows; the StrSource takes the one reference (released on drop) and
+// `source_owner` stays null — string sources carry their owner in the source.
+pub fn make_flow_from_str(comptime vt: *const objs.VTable, owner: FatPtr, bytes: []const u8, mode: string_flows.StrSourceMode) FatPtr {
+    const flow = create_flow(.{ .str = .{
+        .bytes_ptr = bytes.ptr,
+        .bytes_len = bytes.len,
+        .index = 0,
+        .mode = mode,
+        .owner = owner,
+    } }, true);
     return make_flow_fp(vt, flow);
 }
 

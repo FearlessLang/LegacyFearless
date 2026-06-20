@@ -1,7 +1,7 @@
 package base.json
 
 ParseJson: {#(rawInput: Str): mut Action[Json] -> ValidateInput#(rawInput).andThen{input ->
-  {res -> Try#{AtomiseStr#input
+  {res -> Try#{input.codepoints
     .actor[mut _LexerCtx,Token](_LexerCtxs#, LexJson)
     .actor[mut Var[mut _ParserActor],Json](
       Vars#[mut _ParserActor](mut _TopLevelParser),

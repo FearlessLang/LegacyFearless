@@ -63,7 +63,8 @@ public record ZigMagicImpls(
       if (lit.isPresent()) {
         var decoded = new FearlessStringHandler(FearlessStringHandler.StringKind.Unicode)
           .toJavaString(lit.get()).get();
-        return Optional.of("str_rt.make_str_from_literal(\"" + escapeZigStr(decoded) + "\")");
+        var ctor = e.t().mdf().isMut() ? "make_mut_str_from_literal" : "make_str_from_literal";
+        return Optional.of("str_rt." + ctor + "(\"" + escapeZigStr(decoded) + "\")");
       }
       return e.accept(gen, true).describeConstable();
     };
@@ -81,8 +82,37 @@ public record ZigMagicImpls(
     return () -> Optional.of("rt.obj_k_singleton(&list_rt.VT_UListFactory)");
   }
 
-  @Override public MagicTrait<MIR.E, String> float_(MIR.E e) { return EMPTY; }
-  @Override public MagicTrait<MIR.E, String> byte_(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> float_(MIR.E e) {
+    var name = e.t().name().orElseThrow();
+    return () -> {
+      var lit = getLiteral(p, name);
+      try {
+        return lit
+          .map(lambdaName -> Double.parseDouble(lambdaName.replace("_", "")))
+          // Emit the bit pattern so -0.0, subnormals, NaN, infinities all survive
+          // exactly, matching the Java backend's Double semantics.
+          .map(d -> String.format("float_rt.make(@as(f64, @bitCast(@as(u64, 0x%016x))))", Double.doubleToRawLongBits(d)))
+          .orElseGet(() -> e.accept(gen, true)).describeConstable();
+      } catch (NumberFormatException ignored) {
+        throw Fail.invalidNum(lit.orElse(name.toString()), "Float");
+      }
+    };
+  }
+
+  @Override public MagicTrait<MIR.E, String> byte_(MIR.E e) {
+    var name = e.t().name().orElseThrow();
+    return () -> {
+      var lit = getLiteral(p, name);
+      try {
+        // Fearless bytes are u8 (unsigned); parse as an unsigned long then mask to a byte.
+        return lit
+          .map(lambdaName -> "byte_rt.make(" + (Long.parseUnsignedLong(lambdaName.replace("_", ""), 10) & 0xff) + ")")
+          .orElseGet(() -> e.accept(gen, true)).describeConstable();
+      } catch (NumberFormatException ignored) {
+        throw Fail.invalidNum(lit.orElse(name.toString()), "Byte");
+      }
+    };
+  }
   @Override public MagicTrait<MIR.E, String> asciiStr(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> debug(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> refK(MIR.E e) { return EMPTY; }
@@ -123,8 +153,21 @@ public record ZigMagicImpls(
   @Override public MagicTrait<MIR.E, String> pipelineParallelSinkK(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> dataParallelFlowK(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> assert_(MIR.E e) { return EMPTY; }
-  @Override public MagicTrait<MIR.E, String> cheapHash(MIR.E e) { return EMPTY; }
-  @Override public MagicTrait<MIR.E, String> regexK(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> cheapHash(MIR.E e) {
+    return () -> Optional.of("hash_rt.make_cheap_hash()");
+  }
+  @Override public MagicTrait<MIR.E, String> regexK(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&regex_rt.VT_Regexs)");
+  }
+  @Override public MagicTrait<MIR.E, String> mapK(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&map_rt.VT_Maps)");
+  }
+  @Override public MagicTrait<MIR.E, String> utf16(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&str_rt.VT_UTF16)");
+  }
+  @Override public MagicTrait<MIR.E, String> utf8(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&str_rt.VT_UTF8)");
+  }
 
   private static String escapeZigStr(String s) {
     var sb = new StringBuilder();

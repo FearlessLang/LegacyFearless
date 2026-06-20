@@ -52,6 +52,19 @@ pub inline fn mod(a: FatPtr, b: FatPtr) FatPtr {
 	return make(deref(a) % divisor);
 }
 
+/// `**(n: Nat): Nat` — exponentiation by squaring in wrapping 64-bit, matching
+/// the Java backend's `long` pow.
+pub inline fn pow(a: FatPtr, exp: FatPtr) FatPtr {
+	var base: u64 = deref(a);
+	var exp_bits: u64 = deref(exp);
+	var res: u64 = 1;
+	while (exp_bits != 0) : (exp_bits >>= 1) {
+		if ((exp_bits & 1) != 0) res *%= base;
+		base *%= base;
+	}
+	return make(res);
+}
+
 pub inline fn abs(a: FatPtr) FatPtr {
 	return a; // Nat is always non-negative
 }
@@ -92,13 +105,15 @@ pub fn to_nat(a: FatPtr) FatPtr {
 }
 
 pub fn to_float(a: FatPtr) FatPtr {
-	_ = a;
-	@panic("TODO: Floats");
+	const float_intrinsics = @import("float.zig");
+	// Matches Java's `(double)long`: the bits are interpreted as signed.
+	const signed: i64 = @bitCast(deref(a));
+	return float_intrinsics.make(@floatFromInt(signed));
 }
 
 pub fn to_byte(a: FatPtr) FatPtr {
-	_ = a;
-	@panic("TODO: Bytes");
+	const byte_intrinsics = @import("byte.zig");
+	return byte_intrinsics.make(@truncate(deref(a)));
 }
 
 // Bitwise
@@ -138,6 +153,7 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
 		h("imm */1") => mul(self, args[0]),
 		h("imm //1") => div(self, args[0]),
 		h("imm %/1") => mod(self, args[0]),
+		h("imm **/1") => pow(self, args[0]),
 		h("imm .abs/0") => abs(self),
 		h("imm >/1") => gt(self, args[0]),
 		h("imm </1") => lt(self, args[0]),
@@ -148,6 +164,8 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
 		h("read .str/0") => @import("str.zig").int_to_str(self),
 		h("read .int/0") => to_int(self),
 		h("read .nat/0") => self,
+		h("read .float/0") => to_float(self),
+		h("read .byte/0") => to_byte(self),
 		h("imm .shiftLeft/1") => shift_left(self, args[0]),
 		h("imm .shiftRight/1") => shift_right(self, args[0]),
 		h("imm .xor/1") => bitwise_xor(self, args[0]),

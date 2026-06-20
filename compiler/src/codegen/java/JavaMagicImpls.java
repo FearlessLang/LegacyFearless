@@ -602,7 +602,10 @@ public record JavaMagicImpls(
         }
       }
 
-      if (m.equals(new Id.MethName(".flow", 0)) || isMagic(Magic.SafeFlowSource, call.recv())) {
+      if (m.equals(new Id.MethName(".flow", 0))
+          || m.equals(new Id.MethName(".codepoints", 0))
+          || m.equals(new Id.MethName(".graphemes", 0))
+          || isMagic(Magic.SafeFlowSource, call.recv())) {
         if (parallelConstr.isPresent()) {
           var flowMethName = StringIds.$self.getMName(call.mdf(), call.name());
           var argList = args.stream()

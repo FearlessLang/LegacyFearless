@@ -262,10 +262,11 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     var recvT = (MIR.MT.Usual) recv.t();
     var recvIT = recvT.it();
     Optional<String> literal = Magic.getLiteral(p, recvIT.name());
+    var isStrFlowSource = e.name().name().equals(".codepoints") || e.name().name().equals(".graphemes");
+    if (isStrFlowSource && (literal.map(Magic::isStringLiteral).orElse(recvIT.name().equals(Magic.Str)))) {
+      return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
+    }
     if (e.name().name().equals(".flow")) {
-      if (literal.map(Magic::isStringLiteral).orElse(recvIT.name().equals(Magic.Str))) {
-        return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
-      }
       if (recvIT.name().equals(new Id.DecId("base.LList", 1))) {
         var flowElem = recvIT.ts().getFirst();
         if (recvT.mdf().is(Mdf.read, Mdf.imm)) {

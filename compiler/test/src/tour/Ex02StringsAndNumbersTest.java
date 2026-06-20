@@ -102,11 +102,10 @@ If you want to avoid worrying about representation details, consider just using 
 
 # Strings
 
-Fearless `Str` encode sequences of extended grapheme clusters (Unicode Annex 29), using Unicode (UTF-8) as its internal encoding.
-For simplicity Fearless do not have a dedicate extended grapheme clusters type, and elements of the string are strings of length one.
-Unicode Annex 29 is a non-trivial standard allowing surprising behaviour like the length of the concatenation of two strings may not be
-the sum of the length of the two original strings, for example if one string ends or starts with a joining character.
-We are considering also supporting another string type with a more intuitive semantic and working only on a very limited charset.
+Fearless `Str` encode sequences of Unicode codepoints, using Unicode (UTF-8) as its internal encoding.
+For simplicity Fearless do not have a dedicated codepoint type, and elements of the string are strings of length one.
+Indexing operations like `.size`, `.substring` and `.charAt` are codepoint-indexed, so they are stable and Unicode-version-independent.
+For extended grapheme clusters (Unicode Annex 29) you can opt in via `.graphemes`, which is Unicode-version-dependent.
 Here the methods supported by Str:
 ```
   read .str: Str,
@@ -114,14 +113,14 @@ Here the methods supported by Str:
 //#re-add   read .nat: mut Action[Nat],
 //#re-add   read .float: mut Action[Float],
 //#re-add   read .num: mut Action[Num],
-  .size: Nat,
+  .size: Nat, // codepoint count
   .isEmpty: Bool,
   +(other: Stringable): Str,
   ==(other: Str): Bool,
   !=(other: Str): Bool,
-  .substring(begin: Nat, end: Nat): Str,
+  .substring(begin: Nat, end: Nat): Str, // codepoint-indexed
   .substringLast(begin: Nat,end: Nat): Str,
-  .charAt(index: Nat): Str,
+  .charAt(index: Nat): Str, // codepoint-indexed
   .normalise: Str,
 //#re-add .startsWith(s: Str): Bool,
 //#re-add .endsWith(s: Str): Bool,
@@ -130,7 +129,8 @@ Here the methods supported by Str:
 //#re-add .replaceAll(old:Str,new:Str): Str,
   .assertEq(other: Str): Void,
   .assertEq(other: Str, message: Str): Void,
-  .flow
+  .codepoints, // flow over codepoints
+  .graphemes,  // flow over extended grapheme clusters
   mut .append(str: Str): Void,
   mut .truncate(index: Nat): Void,
   mut .clear: Void

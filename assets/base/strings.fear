@@ -1,6 +1,7 @@
 package base
 Str: Sealed,Stringable,base.flows.Joinable[Str],ToHash{
   read .isEmpty: Bool,
+  /// The number of Unicode codepoints in the string.
   .size: Nat,
   +(other: read Stringable): Str,
   ==(other: Str): Bool,
@@ -8,14 +9,21 @@ Str: Sealed,Stringable,base.flows.Joinable[Str],ToHash{
   .startsWith(other: Str): Bool,
   .assertEq(other: Str): Void,
   .assertEq(message: Str, other: Str): Void,
+  /// Codepoint-indexed substring. Will throw when an out of bounds index is requested.
   .substring(start: Nat, end: Nat): Str,
+  /// Codepoint-indexed access, returning a one-codepoint Str.
   .charAt(index: Nat): Str,
   /// Normalise using NFC. See https://www.unicode.org/reports/tr15/ for more information.
   .normalise: Str,
   mut .append(other: read Stringable): Void,
   mut +(other: read Stringable): mut Str,
   mut .clear: Void,
-  .flow: mut Flow[Str],
+  /// A flow over the Unicode codepoints of this string, each as a one-codepoint Str.
+  .codepoints: mut Flow[Str],
+  /// A flow over the extended grapheme clusters of this string, each as a Str.
+  /// The groupings of codepoints into clusters is Unicode-version-dependent and cannot be relied upon to
+  /// be consistent across versions of the Unicode standard.
+  .graphemes: mut Flow[Str],
 
   // Conversions
   .float: mut Action[Float],
@@ -34,20 +42,6 @@ UTF16: Sealed{
 
 UTF8: Sealed{
   .fromBytes(utf8Bytes: read List[Byte]): mut Action[Str] -> Magic!,
-  }
-
-AtomiseStr: {
-  /// Go through a unicode string byte-by-byte splitting it into a flow of the smallest possible character groupings
-  /// that make up one valid unicode codepoint. This is useful for tokenising unicode strings where you do not want
-  /// joining characters to be significant.
-  #(raw: Str): mut Flow[Str] -> raw.utf8.flow
-    .actor[mut UList[Byte], Str](UList#, {downstream, buffer, byte -> Block#
-      .do {buffer.add(byte)}
-      .return {UTF8.fromBytes(buffer.list).run{
-        .ok(str) -> Block#(buffer.clear, downstream#str, {}),
-        .info(_) -> {},
-        }}
-      }),
   }
 
 SimpleStr: Str{}
@@ -69,7 +63,8 @@ _StrInstance: Str{
   .normalise -> Magic!,
   .append(_) -> Magic!,
   .clear -> Magic!,
-  .flow -> Magic!,
+  .codepoints -> Magic!,
+  .graphemes -> Magic!,
   .join(_) -> Magic!,
   .hash(h) -> Magic!,
   .float -> Magic!,
