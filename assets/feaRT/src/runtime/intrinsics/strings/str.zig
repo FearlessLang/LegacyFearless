@@ -1,21 +1,18 @@
 const std = @import("std");
-const objs = @import("../objs.zig");
-const bool_intrinsics = @import("bool.zig");
-const int_intrinsics = @import("int.zig");
-const nat_intrinsics = @import("nat.zig");
-const byte_intrinsics = @import("byte.zig");
-const list_intrinsics = @import("list.zig");
-const gc = @import("../gc.zig");
+const objs = @import("../../objs.zig");
+const bool_intrinsics = @import("../bool.zig");
+const nat_intrinsics = @import("../nat.zig");
+const byte_intrinsics = @import("../byte.zig");
+const list_intrinsics = @import("../list.zig");
+const gc = @import("../../gc.zig");
 const root = @import("root");
 const pb = root.pkg_base;
+
+const mut_str = @import("mut_str.zig");
 
 const FatPtr = objs.FatPtr;
 const FearlessValue = objs.FearlessValue;
 const h = objs.hash_signature;
-
-// ==========================================
-// Captures
-// ==========================================
 
 /// How an immutable string relates to the bytes it points at:
 ///   - `borrowed`: the bytes outlive this object independently (a rodata
@@ -43,23 +40,11 @@ pub const StrCaptures = extern struct {
     owner_vt: usize, // owner FatPtr.vt as usize
 };
 
-/// Mutable string: a GC-allocated growable buffer mutated in place on the heap
-/// object. `len` bytes are live; `cap` bytes are allocated.
-pub const MutStrCaptures = extern struct {
-    buf_ptr: usize, // [*]u8 stored as usize
-    len: i64,
-    cap: i64,
-};
-
-// ==========================================
-// Slice access (shared by both string kinds)
-// ==========================================
-
 /// The live UTF-8 bytes of any Fearless string, immutable or mutable. Read-only
 /// thunks use this so they can be registered on both `VT_Str` and `VT_MutStr`.
 pub fn deref_str(fp: FatPtr) []const u8 {
-    if (fp.vt == &VT_MutStr) {
-        const caps = objs.deref(MutStrCaptures, fp);
+    if (fp.vt == &mut_str.VT_MutStr) {
+        const caps = objs.deref(mut_str.MutStrCaptures, fp);
         const ptr: [*]const u8 = @ptrFromInt(caps.buf_ptr);
         return ptr[0..@intCast(caps.len)];
     }
@@ -67,17 +52,6 @@ pub fn deref_str(fp: FatPtr) []const u8 {
     const ptr: [*]const u8 = @ptrFromInt(caps.ptr);
     return ptr[0..@intCast(caps.len)];
 }
-
-/// Mutable view of a `VT_MutStr`'s captures, for in-place append/clear.
-fn deref_mut_caps(fp: FatPtr) *MutStrCaptures {
-    const Layout = objs.GenObjectLayoutType(MutStrCaptures);
-    const self: *Layout = @ptrCast(@alignCast(fp.boxed_value()));
-    return &self.captures;
-}
-
-// ==========================================
-// Constructors
-// ==========================================
 
 /// A throwaway singleton used as the `owner` of non-`shared` strings; sharing
 /// and releasing it are no-ops (singleton storage mode).
@@ -110,7 +84,7 @@ pub fn make_shared_substr(owner: FatPtr, ptr: [*]const u8, len: usize) FatPtr {
 /// `owner` is consumed by value: its words are stored verbatim. For `shared`
 /// strings the caller must have already taken the reference it is donating
 /// (see `make_shared_substr`); for the others `owner` is the no-op sentinel.
-fn make_str_full(ptr: [*]const u8, len: usize, owns: Ownership, owner: FatPtr) FatPtr {
+pub fn make_str_full(ptr: [*]const u8, len: usize, owns: Ownership, owner: FatPtr) FatPtr {
     return objs.obj_k(StrCaptures, &VT_Str, .{
         .ptr = @intFromPtr(ptr),
         .len = @as(i64, @intCast(len)),
@@ -129,14 +103,14 @@ pub fn make_str_from_literal(comptime s: []const u8) FatPtr {
 /// Allocate a `len`-byte buffer for string data. Routes small buffers through
 /// the per-thread recycler pool and degrades to a fresh GC allocation for
 /// larger ones, keeping the bdwgc alloc lock off the common small-string path.
-fn alloc_bytes(len: usize) []u8 {
+pub fn alloc_bytes(len: usize) []u8 {
     return gc.recycleAllocSlice(u8, len);
 }
 
 /// Release a string-data buffer through the destroyer worker — a batched,
 /// off-thread `GC_free` — rather than a synchronous `GC_free` that would take
 /// the global alloc lock on the calling thread.
-fn free_bytes(ptr: [*]u8) void {
+pub fn free_bytes(ptr: [*]u8) void {
     gc.free(@ptrCast(ptr));
 }
 
@@ -149,47 +123,27 @@ pub fn make_str_copy(bytes: []const u8) FatPtr {
     return make_owned_str(buf.ptr, bytes.len);
 }
 
-/// Create a mutable string seeded with `s` (used by `mut ""` and `mut "lit"`).
-pub fn make_mut_str_from_literal(comptime s: []const u8) FatPtr {
-    return make_mut_str_bytes(s);
-}
-
-fn make_mut_str_bytes(seed: []const u8) FatPtr {
-    const cap = @max(@as(usize, 16), seed.len);
-    const buf = alloc_bytes(cap);
-    @memcpy(buf[0..seed.len], seed);
-    return objs.obj_k(MutStrCaptures, &VT_MutStr, .{
-        .buf_ptr = @intFromPtr(buf.ptr),
-        .len = @intCast(seed.len),
-        .cap = @intCast(cap),
-    });
-}
-
-// ==========================================
-// Small Fearless-object helpers (Action / Info)
-// ==========================================
-
 /// Wrap a message `Str` as a `base.Info` (mirrors `Infos.msg msg`). Consumes
 /// the single reference held by `msg`.
 pub fn make_info_msg(msg: FatPtr) FatPtr {
     return objs.call(objs.obj_k_singleton(&pb.VT_Infos_0), comptime h("imm .msg/1"), .{msg}, @src());
 }
-fn make_action_ok(x: FatPtr) FatPtr {
+pub fn make_action_ok(x: FatPtr) FatPtr {
     return objs.call(objs.obj_k_singleton(&pb.VT_Actions_0), comptime h("imm .ok/1"), .{x}, @src());
 }
-fn make_action_info(info: FatPtr) FatPtr {
+pub fn make_action_info(info: FatPtr) FatPtr {
     return objs.call(objs.obj_k_singleton(&pb.VT_Actions_0), comptime h("imm .info/1"), .{info}, @src());
 }
 
+pub fn make_void() FatPtr {
+    return objs.obj_k_singleton(&pb.VT_Void_0);
+}
+
 /// Raise a deterministic `FearlessError` carrying `Infos.msg(<msg>)`.
-fn raise(comptime msg: []const u8) noreturn {
+pub fn raise(comptime msg: []const u8) noreturn {
     const errors = @import("root").errors;
     errors.throwDeterministic(make_info_msg(make_str_from_literal(msg)));
 }
-
-// ==========================================
-// Codepoint scanning helpers
-// ==========================================
 
 /// Number of Unicode codepoints: one per non-continuation byte.
 fn codepoint_count(data: []const u8) u64 {
@@ -214,13 +168,9 @@ fn codepoint_byte_offset(data: []const u8, cp: u64) usize {
     return data.len;
 }
 
-// ==========================================
-// Read-only methods (shared by VT_Str + VT_MutStr)
-// ==========================================
-
 /// `+(other: read Stringable): Str` — coerce `other` via `.str`, then build a
 /// fresh owned immutable string. Always immutable, even on a mutable receiver.
-fn str_concat(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
+pub fn str_concat(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     const other_str = objs.call(other, comptime h("read .str/0"), .{}, @src());
     defer other_str.rc_decrement();
@@ -233,29 +183,29 @@ fn str_concat(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
     return make_owned_str(buf.ptr, sa.len + sb.len);
 }
 
-fn str_eq(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
+pub fn str_eq(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     defer other.rc_decrement();
     return bool_intrinsics.to_bool(std.mem.eql(u8, deref_str(self), deref_str(other)));
 }
 
-fn str_neq(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
+pub fn str_neq(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     defer other.rc_decrement();
     return bool_intrinsics.to_bool(!std.mem.eql(u8, deref_str(self), deref_str(other)));
 }
 
-fn str_size(self: FatPtr) callconv(.c) FatPtr {
+pub fn str_size(self: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     return nat_intrinsics.make(codepoint_count(deref_str(self)));
 }
 
-fn str_is_empty(self: FatPtr) callconv(.c) FatPtr {
+pub fn str_is_empty(self: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     return bool_intrinsics.to_bool(deref_str(self).len == 0);
 }
 
-fn str_starts_with(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
+pub fn str_starts_with(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     defer other.rc_decrement();
     const a = deref_str(self);
@@ -265,7 +215,7 @@ fn str_starts_with(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
 
 /// `.substring(start, end)` — codepoint-indexed. Immutable receivers yield a
 /// zero-copy shared slice that keeps the receiver alive; see `slice_of`.
-fn str_substring(self: FatPtr, start_fp: FatPtr, end_fp: FatPtr) callconv(.c) FatPtr {
+pub fn str_substring(self: FatPtr, start_fp: FatPtr, end_fp: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     const data = deref_str(self);
     const start = nat_intrinsics.deref(start_fp);
@@ -281,19 +231,19 @@ fn str_substring(self: FatPtr, start_fp: FatPtr, end_fp: FatPtr) callconv(.c) Fa
 /// receivers (stable buffers) share the slice zero-copy and keep the receiver
 /// alive (`make_shared_substr`); mutable receivers must copy, since their buffer
 /// can be reallocated or freed by a later `.append`/`mut +`.
-fn slice_of(self: FatPtr, data: []const u8, start_byte: usize, end_byte: usize) FatPtr {
+pub fn slice_of(self: FatPtr, data: []const u8, start_byte: usize, end_byte: usize) FatPtr {
     const sub = data[start_byte..end_byte];
-    if (self.vt == &VT_MutStr) return make_str_copy(sub);
+    if (self.vt == &mut_str.VT_MutStr) return make_str_copy(sub);
     return make_shared_substr(self, sub.ptr, sub.len);
 }
 
-fn str_char_at(self: FatPtr, index_fp: FatPtr) callconv(.c) FatPtr {
+pub fn str_char_at(self: FatPtr, index_fp: FatPtr) callconv(.c) FatPtr {
     const index = nat_intrinsics.deref(index_fp);
     return str_substring(self, index_fp, nat_intrinsics.make(index + 1));
 }
 
 /// `.normalise` — NFC. Reuses the input when already normalised.
-fn str_normalise(self: FatPtr) callconv(.c) FatPtr {
+pub fn str_normalise(self: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     const native = @import("root").native;
     const data = deref_str(self);
@@ -315,7 +265,7 @@ fn str_normalise(self: FatPtr) callconv(.c) FatPtr {
 /// trampolines reference generated `pkg_base` List symbols. A minimal base that
 /// never pulls in `List` lacks those symbols, so this method is comptime-elided
 /// there (it is unreachable in such a build — nothing can produce a `List`).
-fn str_utf8(self: FatPtr) callconv(.c) FatPtr {
+pub fn str_utf8(self: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(pb, "List_1__Zdotiter_0_mut_Zfun")) {
         defer self.rc_decrement();
         const data = deref_str(self);
@@ -327,7 +277,7 @@ fn str_utf8(self: FatPtr) callconv(.c) FatPtr {
 }
 
 /// `.hash(hasher)` — feed this string into the hasher, return the hasher.
-fn str_hash(self: FatPtr, hasher: FatPtr) callconv(.c) FatPtr {
+pub fn str_hash(self: FatPtr, hasher: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     return objs.call(hasher, comptime h("mut .str/1"), .{self.share()}, @src());
 }
@@ -339,7 +289,7 @@ fn str_hash(self: FatPtr, hasher: FatPtr) callconv(.c) FatPtr {
 /// The result wraps base `Action`/`Info`/`Float` types; a minimal base lacking
 /// them (e.g. an imm program that never parses a float) comptime-elides this —
 /// nothing there can produce the `Action[Float]` this returns.
-fn str_float(self: FatPtr) callconv(.c) FatPtr {
+pub fn str_float(self: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(pb, "VT_Actions_0")) {
         defer self.rc_decrement();
         const native = @import("root").native;
@@ -364,7 +314,7 @@ fn invalid_float_msg(data: []const u8) FatPtr {
 }
 
 fn float_make(v: f64) FatPtr {
-    return @import("float.zig").make(v);
+    return @import("../float.zig").make(v);
 }
 
 /// `.codepoints` / `.graphemes` — a `Flow[Str]` over the string's units. The
@@ -374,7 +324,7 @@ fn float_make(v: f64) FatPtr {
 /// flow runtime's `VT_Flow` and its `pkg_base_flows` references. A minimal base
 /// without `base.flows` cannot reach these (no `Flow` type exists), so they are
 /// comptime-elided there.
-fn str_codepoints(self: FatPtr) callconv(.c) FatPtr {
+pub fn str_codepoints(self: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(root, "pkg_base_flows")) {
         defer self.rc_decrement();
         const flow_rt = @import("root").flow_rt;
@@ -382,7 +332,7 @@ fn str_codepoints(self: FatPtr) callconv(.c) FatPtr {
     }
     unreachable;
 }
-fn str_graphemes(self: FatPtr) callconv(.c) FatPtr {
+pub fn str_graphemes(self: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(root, "pkg_base_flows")) {
         defer self.rc_decrement();
         const flow_rt = @import("root").flow_rt;
@@ -393,7 +343,7 @@ fn str_graphemes(self: FatPtr) callconv(.c) FatPtr {
 
 /// Join a `Flow[Str]` using the receiver as the separator. Materialises the flow
 /// into a List, then concatenates with the separator between elements.
-fn str_join(separator: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
+pub fn str_join(separator: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
     const list = objs.call(flow, comptime h("mut .list/0"), .{}, @src());
     defer separator.rc_decrement();
     defer list.rc_decrement();
@@ -423,11 +373,7 @@ fn str_join(separator: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
     return make_owned_str(buf.ptr, total_len);
 }
 
-// ==========================================
-// VT_Str (immutable)
-// ==========================================
-
-fn str_str_self(self: FatPtr) callconv(.c) FatPtr {
+pub fn str_str_self(self: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     return self.share();
 }
@@ -471,227 +417,3 @@ pub const VT_Str: objs.VTable = .{
     },
     .drop_fn = str_drop,
 };
-
-// ==========================================
-// VT_MutStr (mutable)
-// ==========================================
-
-fn mut_str_ensure(caps: *MutStrCaptures, additional: usize) void {
-    const len: usize = @intCast(caps.len);
-    const cap: usize = @intCast(caps.cap);
-    if (cap - len >= additional) return;
-    const grown = cap * 3 / 2 + 1;
-    const new_cap = @max(len + additional, grown);
-    const old: [*]u8 = @ptrFromInt(caps.buf_ptr);
-    const new_buf = alloc_bytes(new_cap);
-    @memcpy(new_buf[0..len], old[0..len]);
-    free_bytes(old);
-    caps.buf_ptr = @intFromPtr(new_buf.ptr);
-    caps.cap = @intCast(new_cap);
-}
-
-fn mut_str_append_bytes(caps: *MutStrCaptures, src: []const u8) void {
-    mut_str_ensure(caps, src.len);
-    const buf: [*]u8 = @ptrFromInt(caps.buf_ptr);
-    const len: usize = @intCast(caps.len);
-    @memcpy(buf[len .. len + src.len], src);
-    caps.len += @intCast(src.len);
-}
-
-/// `mut .append(other: read Stringable): Void` — append `other.str`.
-fn mut_str_append(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
-    const other_str = objs.call(other, comptime h("read .str/0"), .{}, @src());
-    defer other_str.rc_decrement();
-    mut_str_append_bytes(deref_mut_caps(self), deref_str(other_str));
-    return make_void();
-}
-
-/// `mut +(other): mut Str` — append and return self.
-fn mut_str_plus(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    const other_str = objs.call(other, comptime h("read .str/0"), .{}, @src());
-    defer other_str.rc_decrement();
-    mut_str_append_bytes(deref_mut_caps(self), deref_str(other_str));
-    return self; // transfer our receiver reference back to the caller
-}
-
-/// `mut .clear: Void` — reset length, keep capacity. Snapshots taken via `.str`
-/// are copies and stay unaffected.
-fn mut_str_clear(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
-    deref_mut_caps(self).len = 0;
-    return make_void();
-}
-
-/// `read .str: Str` — an immutable snapshot copy, decoupled from later mutation.
-fn mut_str_str(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
-    return make_str_copy(deref_str(self));
-}
-
-fn mut_str_drop(header: *anyopaque) callconv(.c) void {
-    const Layout = objs.GenObjectLayoutType(MutStrCaptures);
-    const self: *const Layout = @ptrCast(@alignCast(header));
-    free_bytes(@ptrFromInt(self.captures.buf_ptr));
-}
-
-pub const VT_MutStr: objs.VTable = .{
-    .type_name = "base.Str/0",
-    .hashes = &.{
-        // Read surface (shared thunks)
-        h("imm +/1"),          h("imm ==/1"),         h("imm !=/1"),
-        h("imm .size/0"),      h("read .isEmpty/0"),  h("imm .startsWith/1"),
-        h("imm .substring/2"), h("imm .charAt/1"),    h("imm .normalise/0"),
-        h("imm .codepoints/0"), h("imm .graphemes/0"), h("imm .utf8/0"),
-        h("imm .float/0"),     h("read .hash/1"),     h("imm .join/1"),
-        // Mutable surface + snapshot .str
-        h("read .str/0"),      h("mut .append/1"),    h("mut +/1"),
-        h("mut .clear/0"),
-    },
-    .methods = &.{
-        @ptrCast(&str_concat),      @ptrCast(&str_eq),         @ptrCast(&str_neq),
-        @ptrCast(&str_size),        @ptrCast(&str_is_empty),   @ptrCast(&str_starts_with),
-        @ptrCast(&str_substring),   @ptrCast(&str_char_at),    @ptrCast(&str_normalise),
-        @ptrCast(&str_codepoints),  @ptrCast(&str_graphemes),  @ptrCast(&str_utf8),
-        @ptrCast(&str_float),       @ptrCast(&str_hash),       @ptrCast(&str_join),
-        @ptrCast(&mut_str_str),     @ptrCast(&mut_str_append), @ptrCast(&mut_str_plus),
-        @ptrCast(&mut_str_clear),
-    },
-    .method_names = &.{
-        "imm +/1",          "imm ==/1",         "imm !=/1",
-        "imm .size/0",      "read .isEmpty/0",  "imm .startsWith/1",
-        "imm .substring/2", "imm .charAt/1",    "imm .normalise/0",
-        "imm .codepoints/0", "imm .graphemes/0", "imm .utf8/0",
-        "imm .float/0",     "read .hash/1",     "imm .join/1",
-        "read .str/0",      "mut .append/1",    "mut +/1",
-        "mut .clear/0",
-    },
-    .drop_fn = mut_str_drop,
-};
-
-// ==========================================
-// UTF16 / UTF8 singletons
-// ==========================================
-
-/// Encode a Unicode scalar as UTF-8 into a fresh owned string. Invalid scalars
-/// (surrogates / out of range) fall back to U+FFFD, matching how the Java
-/// backend's `new String(int[]{cp})` round-trips unmappable code points.
-fn encode_scalar(cp: u32) FatPtr {
-    var buf: [4]u8 = undefined;
-    const scalar: u21 = if (cp <= 0x10FFFF) @intCast(cp) else 0xFFFD;
-    const n = std.unicode.utf8Encode(scalar, &buf) catch std.unicode.utf8Encode(0xFFFD, &buf) catch unreachable;
-    return make_str_copy(buf[0..n]);
-}
-
-fn utf16_from_code_point(self: FatPtr, cp_fp: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
-    return encode_scalar(@intCast(nat_intrinsics.deref(cp_fp)));
-}
-
-fn utf16_from_surrogate_pair(self: FatPtr, high_fp: FatPtr, low_fp: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
-    const high = nat_intrinsics.deref(high_fp);
-    const low = nat_intrinsics.deref(low_fp);
-    // const cp: u32 = @intCast(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00));
-    const cp: u32 = if (high >= 0xD800 and high <= 0xDBFF and low >= 0xDC00 and low <= 0xDFFF)
-        @intCast(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00))
-    else
-        0xFFFD;
-    return encode_scalar(cp);
-}
-
-fn utf16_is_surrogate(self: FatPtr, cp_fp: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
-    const cp = nat_intrinsics.deref(cp_fp);
-    return bool_intrinsics.to_bool(cp >= 0xD800 and cp < 0xE000);
-}
-
-pub const VT_UTF16: objs.VTable = .{
-    .type_name = "base.UTF16/0",
-    .hashes = &.{
-        h("imm .fromCodePoint/1"),
-        h("imm .fromSurrogatePair/2"),
-        h("imm .isSurrogate/1"),
-    },
-    .methods = &.{
-        @ptrCast(&utf16_from_code_point),
-        @ptrCast(&utf16_from_surrogate_pair),
-        @ptrCast(&utf16_is_surrogate),
-    },
-    .method_names = &.{
-        "imm .fromCodePoint/1",
-        "imm .fromSurrogatePair/2",
-        "imm .isSurrogate/1",
-    },
-    .storage_mode = .singleton,
-};
-
-/// `UTF8.fromBytes(list): Action[Str]` — validate the bytes as UTF-8.
-fn utf8_from_bytes(self: FatPtr, list_fp: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
-    defer list_fp.rc_decrement();
-    const al = list_intrinsics.deref_list(list_fp);
-    if (al.items.len == 0) return make_action_ok(make_str("".ptr, 0));
-    const buf = alloc_bytes(al.items.len);
-    for (al.items, 0..) |item, i| buf[i] = byte_intrinsics.deref(item);
-    if (std.unicode.utf8ValidateSlice(buf)) {
-        return make_action_ok(make_owned_str(buf.ptr, buf.len));
-    }
-    free_bytes(buf.ptr);
-    return make_action_info(make_info_msg(make_str_from_literal("Invalid UTF-8 byte sequence")));
-}
-
-pub const VT_UTF8: objs.VTable = .{
-    .type_name = "base.UTF8/0",
-    .hashes = &.{h("imm .fromBytes/1")},
-    .methods = &.{@ptrCast(&utf8_from_bytes)},
-    .method_names = &.{"imm .fromBytes/1"},
-    .storage_mode = .singleton,
-};
-
-fn make_void() FatPtr {
-    return objs.obj_k_singleton(&pb.VT_Void_0);
-}
-
-// ==========================================
-// Numeric → string (used by Int/Nat/Byte/Float intrinsics)
-// ==========================================
-
-/// Convert an Int/Nat (i64/u64) to a decimal string. Allocates via GC.
-pub fn int_to_str(n: FatPtr) FatPtr {
-    const uval: u64 = if (n.vt == &nat_intrinsics.VT_Nat) nat_intrinsics.deref(n) else @bitCast(int_intrinsics.deref(n));
-    var buf: [20]u8 = undefined; // max u64 decimal digits
-    var len: usize = 0;
-    if (uval == 0) {
-        buf[0] = '0';
-        len = 1;
-    } else {
-        var tmp = uval;
-        while (tmp > 0) : (len += 1) {
-            buf[len] = @intCast('0' + (tmp % 10));
-            tmp /= 10;
-        }
-        var i: usize = 0;
-        var j: usize = len - 1;
-        while (i < j) {
-            const t = buf[i];
-            buf[i] = buf[j];
-            buf[j] = t;
-            i += 1;
-            j -= 1;
-        }
-    }
-    return make_str_copy(buf[0..len]);
-}
-
-/// Format a Float (f64) exactly as Rust's `f64::to_string`, routed through the
-/// native runtime so the output is byte-identical to the Java backend.
-pub fn float_to_str(f: FatPtr) FatPtr {
-    const native = @import("root").native;
-    const float_intrinsics = @import("float.zig");
-    const v = float_intrinsics.deref(f);
-    var buf: [native.FRT_F64_STR_MAX]u8 = undefined;
-    const needed = native.frt_f64_to_str(v, &buf, buf.len);
-    std.debug.assert(needed <= buf.len);
-    return make_str_copy(buf[0..needed]);
-}

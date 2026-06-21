@@ -2,7 +2,7 @@ const std = @import("std");
 const objs = @import("../../objs.zig");
 const gc = @import("../../gc.zig");
 const process = @import("../../process_singletons.zig");
-const str_rt = @import("../str.zig");
+const str_rt = @import("../strings/index.zig");
 const pb = @import("root").pkg_base;
 
 const FatPtr = objs.FatPtr;

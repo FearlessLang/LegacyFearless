@@ -123,7 +123,7 @@ class ZigProgramBuilder {
     sb.append("pub const byte_rt = @import(\"runtime/intrinsics/byte.zig\");\n");
     sb.append("pub const gc = @import(\"runtime/gc.zig\");\n");
     sb.append("pub const process = @import(\"runtime/process_singletons.zig\");\n");
-    sb.append("pub const str_rt = @import(\"runtime/intrinsics/str.zig\");\n");
+    sb.append("pub const str_rt = @import(\"runtime/intrinsics/strings/index.zig\");\n");
     sb.append("pub const regex_rt = @import(\"runtime/intrinsics/regex.zig\");\n");
     sb.append("pub const hash_rt = @import(\"runtime/intrinsics/hash.zig\");\n");
     sb.append("pub const map_rt = @import(\"runtime/intrinsics/map.zig\");\n");

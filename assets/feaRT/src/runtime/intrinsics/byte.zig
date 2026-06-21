@@ -157,7 +157,7 @@ pub fn to_byte(a: FatPtr) FatPtr {
 }
 
 pub fn to_str(a: FatPtr) FatPtr {
-    const str_intrinsics = @import("str.zig");
+    const str_intrinsics = @import("strings/index.zig");
     const nat_intrinsics = @import("nat.zig");
     return str_intrinsics.int_to_str(nat_intrinsics.make(deref(a)));
 }

@@ -130,7 +130,7 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
 		h("imm <=/1") => lte(self, args[0]),
 		h("imm ==/1") => eq(self, args[0]),
 		h("imm !=/1") => neq(self, args[0]),
-		h("read .str/0") => @import("str.zig").int_to_str(self),
+		h("read .str/0") => @import("strings/index.zig").int_to_str(self),
 		h("read .int/0") => self,
 		h("read .nat/0") => to_nat(self),
 		h("read .float/0") => to_float(self),

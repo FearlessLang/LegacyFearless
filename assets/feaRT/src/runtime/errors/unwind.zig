@@ -7,7 +7,7 @@ const objs = @import("../objs.zig");
 const gc = @import("../gc.zig");
 const heartbeat = @import("../heartbeat.zig");
 const scope_mod = @import("../scope.zig");
-const str_rt = @import("../intrinsics/str.zig");
+const str_rt = @import("../intrinsics/strings/index.zig");
 const trace = @import("./trace.zig");
 const build_options = @import("build_options");
 

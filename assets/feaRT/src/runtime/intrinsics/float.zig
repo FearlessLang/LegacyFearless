@@ -177,7 +177,7 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
         h("imm .isInfinite/0") => is_infinite(self),
         h("imm .isPosInfinity/0") => is_pos_infinity(self),
         h("imm .isNegInfinity/0") => is_neg_infinity(self),
-        h("read .str/0") => @import("str.zig").float_to_str(self),
+        h("read .str/0") => @import("strings/index.zig").float_to_str(self),
         h("read .int/0") => to_int(self),
         h("read .nat/0") => to_nat(self),
         h("read .byte/0") => to_byte(self),

@@ -4,7 +4,7 @@ const nat_rt = @import("nat.zig");
 const int_rt = @import("int.zig");
 const float_rt = @import("float.zig");
 const byte_rt = @import("byte.zig");
-const str_rt = @import("str.zig");
+const str_rt = @import("strings/index.zig");
 
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;

@@ -4,7 +4,7 @@ const WriteLock = @import("../../sync/write_lock.zig").WriteLock;
 
 const FatPtr = objs.FatPtr;
 
-const str_rt = @import("../str.zig");
+const str_rt = @import("../strings/index.zig");
 const path_rt = @import("path.zig");
 const env_rt = @import("env.zig");
 const pb = @import("root").pkg_base;
