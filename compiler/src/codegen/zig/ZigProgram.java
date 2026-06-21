@@ -132,7 +132,7 @@ class ZigProgramBuilder {
     sb.append("pub const list_rt = @import(\"runtime/intrinsics/list.zig\");\n");
     sb.append("pub const isopod_rt = @import(\"runtime/intrinsics/isopod.zig\");\n");
     sb.append("pub const flow_rt = @import(\"runtime/intrinsics/flow.zig\");\n");
-    sb.append("pub const try_rt = @import(\"runtime/try.zig\");\n");
+    sb.append("pub const try_rt = @import(\"runtime/intrinsics/try.zig\");\n");
     sb.append("pub const error_rt = @import(\"runtime/error.zig\");\n");
     sb.append("pub const errors = @import(\"runtime/errors/errors.zig\");\n");
     sb.append("pub const shadow_stack_mod = @import(\"runtime/shadow_stack.zig\");\n");

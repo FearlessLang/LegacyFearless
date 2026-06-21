@@ -1,6 +1,6 @@
 const objs = @import("../objs.zig");
 const io = @import("caps/io.zig");
-const try_rt = @import("../try.zig");
+const try_rt = @import("try.zig");
 
 const FatPtr = objs.FatPtr;
 

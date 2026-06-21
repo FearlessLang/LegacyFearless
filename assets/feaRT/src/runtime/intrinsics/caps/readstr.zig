@@ -3,7 +3,7 @@ const objs = @import("../../objs.zig");
 const gc = @import("../../gc.zig");
 const process = @import("../../process_singletons.zig");
 const str_rt = @import("../strings/index.zig");
-const pb = @import("root").pkg_base;
+const actions = @import("../../conversions/actions.zig");
 
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
@@ -57,41 +57,4 @@ fn readstr_run(self: FatPtr, m: FatPtr) callconv(.c) FatPtr {
     return objs.call(m, comptime h("mut .ok/1"), .{str_rt.make_owned_str(data.ptr, data.len)}, @src());
 }
 
-fn T_map(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__Zdotmap_1_mut_Zfun(f_m, self_m);
-}
-fn T_andThen(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__ZdotandThen_1_mut_Zfun(f_m, self_m);
-}
-fn T_mapInfo(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__ZdotmapInfo_1_mut_Zfun(f_m, self_m);
-}
-fn T_bang(self_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__Zbang_0_mut_Zfun(self_m);
-}
-fn T_ok(self_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__Zdotok_0_mut_Zfun(self_m);
-}
-fn T_info(self_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__Zdotinfo_0_mut_Zfun(self_m);
-}
-
-pub const VT_ReadStrAction: objs.VTable = .{
-    .type_name = "base.Action/1",
-    .hashes = &.{
-        h("mut .run/1"),     h("mut .map/1"), h("mut .andThen/1"),
-        h("mut .mapInfo/1"), h("mut !/0"),    h("mut .ok/0"),
-        h("mut .info/0"),
-    },
-    .methods = &.{
-        @ptrCast(&readstr_run), @ptrCast(&T_map),  @ptrCast(&T_andThen),
-        @ptrCast(&T_mapInfo),   @ptrCast(&T_bang), @ptrCast(&T_ok),
-        @ptrCast(&T_info),
-    },
-    .method_names = &.{
-        "mut .run/1",     "mut .map/1", "mut .andThen/1",
-        "mut .mapInfo/1", "mut !/0",    "mut .ok/0",
-        "mut .info/0",
-    },
-    .drop_fn = readstr_drop,
-};
+pub const VT_ReadStrAction = actions.ActionVTable("<runtime read-str action>", &readstr_run, &readstr_drop);

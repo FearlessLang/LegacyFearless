@@ -1,16 +1,17 @@
 const std = @import("std");
-const objs = @import("objs.zig");
-const gc = @import("gc.zig");
-const error_rt = @import("error.zig");
-const unwind = @import("errors/unwind.zig");
-const fiber_mod = @import("fiber.zig");
-const worker_mod = @import("worker.zig");
-const shadow_stack = @import("shadow_stack.zig");
-const scope_mod = @import("scope.zig");
-const trace = @import("errors/trace.zig");
+const objs = @import("../objs.zig");
+const gc = @import("../gc.zig");
+const error_rt = @import("../error.zig");
+const unwind = @import("../errors/unwind.zig");
+const fiber_mod = @import("../fiber.zig");
+const worker_mod = @import("../worker.zig");
+const shadow_stack = @import("../shadow_stack.zig");
+const scope_mod = @import("../scope.zig");
+const trace = @import("../errors/trace.zig");
 const build_options = @import("build_options");
 const root = @import("root");
 const pb = root.pkg_base;
+const actions = @import("../conversions/actions.zig");
 
 const FatPtr = objs.FatPtr;
 const Fiber = fiber_mod.Fiber;
@@ -131,43 +132,7 @@ fn tryaction_run(self: FatPtr, m: FatPtr) callconv(.c) FatPtr {
     }
 }
 
-fn T_tryaction_map(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__Zdotmap_1_mut_Zfun(f_m, self_m);
-}
-fn T_tryaction_andThen(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__ZdotandThen_1_mut_Zfun(f_m, self_m);
-}
-fn T_tryaction_mapInfo(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__ZdotmapInfo_1_mut_Zfun(f_m, self_m);
-}
-fn T_tryaction_bang(self_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__Zbang_0_mut_Zfun(self_m);
-}
-fn T_tryaction_ok(self_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__Zdotok_0_mut_Zfun(self_m);
-}
-fn T_tryaction_info(self_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__Zdotinfo_0_mut_Zfun(self_m);
-}
-
-pub const VT_TryAction: objs.VTable = .{
-    .type_name = "base.Action/1",
-    .hashes = &.{
-        h("mut .run/1"),  h("mut .map/1"), h("mut .andThen/1"),
-        h("mut .mapInfo/1"), h("mut !/0"),  h("mut .ok/0"),
-        h("mut .info/0"),
-    },
-    .methods = &.{
-        @as(*const anyopaque, @ptrCast(&tryaction_run)), @as(*const anyopaque, @ptrCast(&T_tryaction_map)), @as(*const anyopaque, @ptrCast(&T_tryaction_andThen)),
-        @as(*const anyopaque, @ptrCast(&T_tryaction_mapInfo)), @as(*const anyopaque, @ptrCast(&T_tryaction_bang)), @as(*const anyopaque, @ptrCast(&T_tryaction_ok)),
-        @as(*const anyopaque, @ptrCast(&T_tryaction_info)),
-    },
-    .method_names = &.{
-        "mut .run/1",  "mut .map/1", "mut .andThen/1",
-        "mut .mapInfo/1", "mut !/0",  "mut .ok/0",
-        "mut .info/0",
-    },
-};
+pub const VT_TryAction = actions.ActionVTable("<runtime try action>", &tryaction_run, null);
 
 // ------------------------------------------
 // Try / CapTry factory singletons
