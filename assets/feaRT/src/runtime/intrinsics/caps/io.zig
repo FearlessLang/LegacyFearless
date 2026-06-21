@@ -5,9 +5,12 @@ const WriteLock = @import("../../sync/write_lock.zig").WriteLock;
 const FatPtr = objs.FatPtr;
 
 const str_rt = @import("../str.zig");
+const path_rt = @import("path.zig");
+const env_rt = @import("env.zig");
+const pb = @import("root").pkg_base;
 
 fn make_void() FatPtr {
-    return objs.obj_k_singleton(&@import("root").pkg_base.VT_Void_0);
+    return objs.obj_k_singleton(&pb.VT_Void_0);
 }
 
 var stdout_lock: WriteLock = .{};
@@ -61,27 +64,57 @@ fn io_println_err(self: FatPtr, msg: FatPtr) callconv(.c) FatPtr {
     return make_void();
 }
 
+fn io_accessRW(self: FatPtr, path: FatPtr) callconv(.c) FatPtr {
+    _ = self;
+    defer path.rc_decrement();
+    return path_rt.rw_from_cwd(path);
+}
+
+fn io_accessR(self: FatPtr, path: FatPtr) callconv(.c) FatPtr {
+    _ = self;
+    defer path.rc_decrement();
+    return path_rt.read_from_cwd(path);
+}
+
+fn io_accessW(self: FatPtr, path: FatPtr) callconv(.c) FatPtr {
+    _ = self;
+    defer path.rc_decrement();
+    return path_rt.write_from_cwd(path);
+}
+
+fn io_env(self: FatPtr) callconv(.c) FatPtr {
+    _ = self;
+    return env_rt.make_env();
+}
+
+fn io_iso(self: FatPtr) callconv(.c) FatPtr {
+    return self;
+}
+fn io_self(self: FatPtr) callconv(.c) FatPtr {
+    return self;
+}
+
 const h = objs.hash_signature;
 
 pub const VT_IO: objs.VTable = .{
     .type_name = "base.caps.IO/0",
     .hashes = &.{
-        h("mut .print/1"),
-        h("mut .println/1"),
-        h("mut .printErr/1"),
-        h("mut .printlnErr/1"),
+        h("mut .print/1"),    h("mut .println/1"),  h("mut .printErr/1"),
+        h("mut .printlnErr/1"), h("mut .accessR/1"), h("mut .accessW/1"),
+        h("mut .accessRW/1"), h("mut .env/0"),      h("mut .iso/0"),
+        h("mut .self/0"),
     },
     .method_names = &.{
-        "mut .print/1",
-        "mut .println/1",
-        "mut .printErr/1",
-        "mut .printlnErr/1",
+        "mut .print/1",    "mut .println/1",  "mut .printErr/1",
+        "mut .printlnErr/1", "mut .accessR/1", "mut .accessW/1",
+        "mut .accessRW/1", "mut .env/0",      "mut .iso/0",
+        "mut .self/0",
     },
     .methods = &.{
-        @ptrCast(&io_print),
-        @ptrCast(&io_println),
-        @ptrCast(&io_print_err),
-        @ptrCast(&io_println_err),
+        @ptrCast(&io_print),    @ptrCast(&io_println),  @ptrCast(&io_print_err),
+        @ptrCast(&io_println_err), @ptrCast(&io_accessR), @ptrCast(&io_accessW),
+        @ptrCast(&io_accessRW), @ptrCast(&io_env),      @ptrCast(&io_iso),
+        @ptrCast(&io_self),
     },
     .storage_mode = .singleton,
 };

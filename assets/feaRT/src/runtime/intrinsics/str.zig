@@ -142,7 +142,7 @@ fn free_bytes(ptr: [*]u8) void {
 
 /// Copy `bytes` into a fresh buffer and wrap it as an owned immutable string.
 /// An empty input needs no allocation — return a borrowed empty literal.
-fn make_str_copy(bytes: []const u8) FatPtr {
+pub fn make_str_copy(bytes: []const u8) FatPtr {
     if (bytes.len == 0) return make_str("".ptr, 0);
     const buf = alloc_bytes(bytes.len);
     @memcpy(buf, bytes);
@@ -169,7 +169,9 @@ fn make_mut_str_bytes(seed: []const u8) FatPtr {
 // Small Fearless-object helpers (Action / Info)
 // ==========================================
 
-fn make_info_msg(msg: FatPtr) FatPtr {
+/// Wrap a message `Str` as a `base.Info` (mirrors `Infos.msg msg`). Consumes
+/// the single reference held by `msg`.
+pub fn make_info_msg(msg: FatPtr) FatPtr {
     return objs.call(objs.obj_k_singleton(&pb.VT_Infos_0), comptime h("imm .msg/1"), .{msg}, @src());
 }
 fn make_action_ok(x: FatPtr) FatPtr {

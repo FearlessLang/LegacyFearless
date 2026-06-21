@@ -2,21 +2,13 @@ const std = @import("std");
 const alloc_recycler = @import("alloc_recycler.zig");
 const log = @import("log.zig");
 const destroyer = @import("destroyer.zig");
+const process = @import("process_singletons.zig");
 
 const libgc = @import("libgc");
-
-/// Set by `main` from `init.io`. Used by `dump_allocs`/`track_record` to drive
-/// `std.Io.Mutex` and to write the allocs TSV. Single-threaded with respect to
-/// startup — set once before any worker thread is spawned.
-pub var runtime_io: std.Io = undefined;
 
 /// Set by `main` from `init.environ_map.get("FEART_ALLOCS_OUT")`. `null` means
 /// fall back to the default path.
 pub var allocs_out_path: ?[]const u8 = null;
-
-pub fn set_runtime_io(io: std.Io) void {
-	runtime_io = io;
-}
 
 pub fn set_allocs_out_path(path: ?[]const u8) void {
 	allocs_out_path = path;
@@ -262,24 +254,24 @@ pub fn dump_rc_delta() void {
 /// `addr2line -e ./zig-out/bin/feart -f -i 0xADDR`.
 pub fn dump_allocs() void {
 	if (!TRACK_ALLOCS) return;
-	track_lock.lockUncancelable(runtime_io);
-	defer track_lock.unlock(runtime_io);
+	track_lock.lockUncancelable(process.runtime_io);
+	defer track_lock.unlock(process.runtime_io);
 	if (!track_initialized) return;
 
 	const out_path: []const u8 = allocs_out_path orelse "feart-allocs.tsv";
 
-	const file = std.Io.Dir.cwd().createFile(runtime_io, out_path, .{}) catch |e| {
+	const file = std.Io.Dir.cwd().createFile(process.runtime_io, out_path, .{}) catch |e| {
 		std.debug.print("[track_allocs] failed to open {s}: {s}\n", .{ out_path, @errorName(e) });
 		return;
 	};
-	defer file.close(runtime_io);
+	defer file.close(process.runtime_io);
 	var line_buf: [128]u8 = undefined;
 	const header = "# addr\tcount\tbytes\n";
-	file.writeStreamingAll(runtime_io, header) catch {};
+	file.writeStreamingAll(process.runtime_io, header) catch {};
 	var it = track_table.iterator();
 	while (it.next()) |kv| {
 		const line = std.fmt.bufPrint(&line_buf, "0x{x}\t{d}\t{d}\n", .{ kv.key_ptr.*, kv.value_ptr.count, kv.value_ptr.bytes }) catch break;
-		file.writeStreamingAll(runtime_io, line) catch break;
+		file.writeStreamingAll(process.runtime_io, line) catch break;
 	}
 	std.debug.print("[track_allocs] wrote {d} call sites to {s}\n", .{ track_table.count(), out_path });
 }
@@ -291,8 +283,8 @@ var track_initialized: bool = false;
 
 fn track_record(ret_addr: usize, len: usize) void {
 	if (!TRACK_ALLOCS) return;
-	track_lock.lockUncancelable(runtime_io);
-	defer track_lock.unlock(runtime_io);
+	track_lock.lockUncancelable(process.runtime_io);
+	defer track_lock.unlock(process.runtime_io);
 	if (!track_initialized) return;
 	const gop = track_table.getOrPut(ret_addr) catch return;
 	if (!gop.found_existing) gop.value_ptr.* = .{ .count = 0, .bytes = 0 };

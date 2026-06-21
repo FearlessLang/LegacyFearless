@@ -5,7 +5,8 @@ CapTry: ToIso[CapTry]{
   /// This method upholds strong exception safety, so you can observe changes to the program state
   /// from any exception-causing code.
   mut #[R:*](try: read F[R]): mut Action[R],
-  /// This method gets the system object capability, however any violations of strong exception safety
+  /// This method can be used to expose object capabilities and other isolated references,
+  /// to the `try` function. However any violations of strong exception safety
   /// can only be observed with an object capability because System is the only external mutable reference.
   mut #[T:**,R:*](data: iso T, try: read F[iso T,R]): mut Action[R],
   }

@@ -1,5 +1,6 @@
 const std = @import("std");
 const gc = @import("gc.zig");
+const process = @import("process_singletons.zig");
 const libgc = @import("libgc");
 
 // `GC_free_inner` is the unlocked free body that bdwgc's own `GC_free` runs
@@ -76,7 +77,7 @@ fn destroyerLoop() void {
     while (true) {
         const n = head.swap(null, .acquire);
         if (n == null) {
-            std.Io.sleep(gc.runtime_io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+            std.Io.sleep(process.runtime_io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
             continue;
         }
         _ = libgc.GC_call_with_alloc_lock(freeChainLocked, n);

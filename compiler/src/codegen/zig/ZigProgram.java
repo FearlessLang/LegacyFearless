@@ -122,6 +122,7 @@ class ZigProgramBuilder {
     sb.append("pub const float_rt = @import(\"runtime/intrinsics/float.zig\");\n");
     sb.append("pub const byte_rt = @import(\"runtime/intrinsics/byte.zig\");\n");
     sb.append("pub const gc = @import(\"runtime/gc.zig\");\n");
+    sb.append("pub const process = @import(\"runtime/process_singletons.zig\");\n");
     sb.append("pub const str_rt = @import(\"runtime/intrinsics/str.zig\");\n");
     sb.append("pub const regex_rt = @import(\"runtime/intrinsics/regex.zig\");\n");
     sb.append("pub const hash_rt = @import(\"runtime/intrinsics/hash.zig\");\n");
@@ -203,7 +204,8 @@ class ZigProgramBuilder {
     var sb = new StringBuilder();
     sb.append("// === Entry Point ===\n");
     sb.append("pub fn main(init: std.process.Init) void {\n");
-    sb.append("gc.set_runtime_io(init.io);\n");
+    sb.append("process.set_runtime_io(init.io);\n");
+    sb.append("process.set_launch_args(init.minimal.args.vector);\n");
     sb.append("std.mem.doNotOptimizeAway(native.linkProbe());\n");
     sb.append("if (init.environ_map.get(\"FEART_ALLOCS_OUT\")) |p| gc.set_allocs_out_path(p);\n");
     sb.append("log.installCrashHandler();\n");

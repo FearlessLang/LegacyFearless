@@ -4,6 +4,7 @@ const switchFiber = @import("fiber.zig").switchFiber;
 const JoinObligation = @import("sync/join_obligation.zig").JoinObligation;
 const MpmcBoundedQueue = @import("sync/mpmc.zig").MpmcBoundedQueue;
 const gc = @import("gc.zig");
+const process = @import("process_singletons.zig");
 const log = @import("log.zig");
 const scope_mod = @import("scope.zig");
 const signals = @import("errors/signals.zig");
@@ -342,7 +343,7 @@ fn workerLoop(worker: *Worker) void {
 		std.atomic.spinLoopHint();
 		// std.Thread.yield() catch {};
 		// gc.maybeCollectCycles();
-		std.Io.sleep(gc.runtime_io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+		std.Io.sleep(process.runtime_io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
 	}
 
 	gc.dump_rc_delta();
