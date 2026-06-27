@@ -93,6 +93,20 @@ fn apply_op(
             result.rc_decrement();
             break :blk .{ .pass = elem };
         },
+        .map_ctx => blk: {
+            const cell: *types.CtxCell = @ptrFromInt(op.state);
+            const iso_ctx = objs.call(cell.ctx.share(), h("mut .iso/0"), .{}, @src());
+            const cval = objs.call(iso_ctx, h("mut .self/0"), .{}, @src());
+            break :blk .{ .pass = objs.call(op.closure.share(), h("read #/2"), .{ cval, elem }, @src()) };
+        },
+        .peek_ctx => blk: {
+            const cell: *types.CtxCell = @ptrFromInt(op.state);
+            const iso_ctx = objs.call(cell.ctx.share(), h("mut .iso/0"), .{}, @src());
+            const cval = objs.call(iso_ctx, h("mut .self/0"), .{}, @src());
+            const result = objs.call(op.closure.share(), h("read #/2"), .{ cval, elem.share() }, @src());
+            result.rc_decrement();
+            break :blk .{ .pass = elem };
+        },
         .filter => blk: {
             const ok = objs.call(op.closure.share(), h("read #/1"), .{elem.share()}, @src());
             const passed = ok.vt == &pb.VT_True_0;

@@ -173,6 +173,78 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
+  @Test void flowMapCtxSeq() { okBase(new Res("01 12 23 34", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Str] x = {Flow#[mut Nat](mut 1, mut 2, mut 3, mut 4)
+        .map[Ctx,Str](Ctxs#(Count.nat 0), {ctx, x -> ctx.n.str + (x.str)})
+        .join " "
+        }
+      .return {sys.io.println x}
+      }
+    Ctxs: F[mut Count[Nat], mut Ctx]{cs -> Block#
+      .return {mut Ctx: base.ToIso[Ctx]{'ctx
+        .iso -> Ctxs#(Count.nat(cs.update{c -> c + 1})),
+        .self -> ctx,
+        read .n: Nat -> cs.get,
+        }}
+      }
+    """, Base.mutBaseAliases); }
+
+  @Test void flowMapCtxImmSeq() { okBase(new Res("11 12 13 14", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Str] x = {Flow#[mut Nat](mut 1, mut 2, mut 3, mut 4)
+        .map[Ctx,Str](Ctxs#0, {ctx, x -> ctx.n.str + (x.str)})
+        .join " "
+        }
+      .return {sys.io.println x}
+      }
+    Ctxs: F[Nat, mut Ctx]{n -> Block#
+      .return {mut Ctx: base.ToIso[Ctx]{'ctx
+        .iso -> Ctxs#(n + 1),
+        .self -> ctx,
+        read .n: Nat -> n,
+        }}
+      }
+    """, Base.mutBaseAliases); }
+
+  // Splittable list source, but downgraded from DP due to the contextful map (.map/2)
+  @Test void flowMapCtxDP() { okBase(new Res("01 12 23 34", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Str] x = {Flow#[Nat](1, 2, 3, 4)
+        .map[Ctx,Str](Ctxs#(Count.nat 0), {ctx, x -> ctx.n.str + (x.str)})
+        .join " "
+        }
+      .return {sys.io.println x}
+      }
+    Ctxs: F[mut Count[Nat], mut Ctx]{cs -> Block#
+      .return {mut Ctx: base.ToIso[Ctx]{'ctx
+        .iso -> Ctxs#(Count.nat(cs.update{c -> c + 1})),
+        .self -> ctx,
+        read .n: Nat -> cs.get,
+        }}
+      }
+    """, Base.mutBaseAliases); }
+
+  @Test void flowPeekCtx() { okBase(new Res("10", "", 0), """
+    package test
+    Test: Main{sys -> sys.io.println(
+      Flow#[Nat](1, 2, 3, 4)
+        .peek[Ctx](Ctxs#(Count.nat 0), {ctx, x -> Block#(ctx.n, {})})
+        #(Flow.uSum)
+        .str
+      )}
+    Ctxs: F[mut Count[Nat], mut Ctx]{cs -> Block#
+      .return {mut Ctx: base.ToIso[Ctx]{'ctx
+        .iso -> Ctxs#(Count.nat(cs.update{c -> c + 1})),
+        .self -> ctx,
+        read .n: Nat -> cs.get,
+        }}
+      }
+    """, Base.mutBaseAliases); }
+
   // Parallel driveReduce on a multi-op pipeline. List source is splittable,
   // all ops (filter, map) are stateless, so driveReduce splits. Evens of
   // [+0..+3] are [+0, +2]; *10 gives [+0, +20]; sum = +20. Confirms multi-op

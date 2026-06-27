@@ -70,6 +70,12 @@ fn make_actor_cell(initial_state: FatPtr, callback: FatPtr) u64 {
     return @intFromPtr(state);
 }
 
+fn make_ctx_cell(ctx: FatPtr) u64 {
+    const cell = gc.recycleAlloc(types.CtxCell);
+    cell.* = .{ .ctx = ctx };
+    return @intFromPtr(cell);
+}
+
 // ==========================================
 // Intermediate ops: append one OpDesc, return a new flow
 // ==========================================
@@ -83,9 +89,14 @@ fn flow_map(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
         .flags = .{},
     }));
 }
-fn flow_map2(self: FatPtr, ignored: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer ignored.rc_decrement();
-    return flow_map(self, f);
+fn flow_map2(self: FatPtr, ctx: FatPtr, f: FatPtr) callconv(.c) FatPtr {
+    defer self.rc_decrement();
+    return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
+        .kind = .map_ctx,
+        .closure = f,
+        .state = make_ctx_cell(ctx),
+        .flags = .{ .stateless = false },
+    }));
 }
 fn flow_filter(self: FatPtr, pred: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
@@ -114,9 +125,14 @@ fn flow_peek(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
         .flags = .{},
     }));
 }
-fn flow_peek2(self: FatPtr, ignored: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer ignored.rc_decrement();
-    return flow_peek(self, f);
+fn flow_peek2(self: FatPtr, ctx: FatPtr, f: FatPtr) callconv(.c) FatPtr {
+    defer self.rc_decrement();
+    return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
+        .kind = .peek_ctx,
+        .closure = f,
+        .state = make_ctx_cell(ctx),
+        .flags = .{ .stateless = false },
+    }));
 }
 fn flow_map_filter(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();

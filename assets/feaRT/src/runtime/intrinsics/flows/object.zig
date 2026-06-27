@@ -147,6 +147,12 @@ fn release_op(op: types.OpDesc) void {
             state.callback.rc_decrement();
             gc.recycleDestroy(types.ActorState, state, .flow_op_release);
         },
+        .map_ctx, .peek_ctx => {
+            const cell: *types.CtxCell = @ptrFromInt(op.state);
+            cell.ctx.rc_decrement();
+            gc.recycleDestroy(types.CtxCell, cell, .flow_op_release);
+            op.closure.rc_decrement();
+        },
         .limit => {},
         .map, .filter, .peek, .map_filter, .flat_map => op.closure.rc_decrement(),
     }
@@ -170,6 +176,13 @@ fn clone_op(op: types.OpDesc) types.OpDesc {
                 .callback = old_state.callback.share(),
             };
             copy.state = @intFromPtr(new_state);
+        },
+        .map_ctx, .peek_ctx => {
+            const old_cell: *types.CtxCell = @ptrFromInt(op.state);
+            const new_cell = gc.recycleAlloc(types.CtxCell);
+            new_cell.* = .{ .ctx = old_cell.ctx.share() };
+            copy.state = @intFromPtr(new_cell);
+            copy.closure = op.closure.share();
         },
         .limit => {},
         .map, .filter, .peek, .map_filter, .flat_map => copy.closure = op.closure.share(),

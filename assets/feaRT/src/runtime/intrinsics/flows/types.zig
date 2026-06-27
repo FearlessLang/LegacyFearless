@@ -21,6 +21,8 @@ pub const OpKind = enum(u8) {
     scan,
     limit,
     actor,
+    map_ctx,
+    peek_ctx,
 };
 
 // Scheduler hints. Stateless ops can be duplicated across parallel splits;
@@ -75,6 +77,10 @@ pub const FeartFlow = struct {
 // by the GC through the OpDesc.state integer pointer.
 pub const ScanCell = struct { acc: FatPtr };
 pub const ActorState = struct { state_fp: FatPtr, callback: FatPtr };
+// Cell for contextful flow operations (like .map/2). The `ToIso[C]` ctx is a
+// fixed capture: each element calls `.iso` then `.self`.
+// This cell is immutable.
+pub const CtxCell = struct { ctx: FatPtr };
 
 pub const OpsRefCount = extern struct {
     value: std.atomic.Value(u32),
