@@ -1,6 +1,8 @@
 const std = @import("std");
 const objs = @import("../../objs.zig");
-const WriteLock = @import("../../sync/write_lock.zig").WriteLock;
+const reactor = @import("../../io/reactor.zig");
+const FiberMutex = @import("../../sync/fiber_mutex.zig").FiberMutex;
+const worker_mod = @import("../../worker.zig");
 
 const FatPtr = objs.FatPtr;
 
@@ -13,54 +15,59 @@ fn make_void() FatPtr {
     return objs.obj_k_singleton(&pb.VT_Void_0);
 }
 
-var stdout_lock: WriteLock = .{};
-var stderr_lock: WriteLock = .{};
+/// Serialise concurrent fibers' writes to each stream so their lines stay intact.
+/// A fiber mutex (not a spinlock): the owner parks on the reactor mid-write while
+/// holding it, so contended fibers must park rather than busy-block a worker.
+var stdout_mutex: FiberMutex = .{};
+var stderr_mutex: FiberMutex = .{};
+
+/// Write `msg`'s bytes to `fd` through the reactor, serialised on `mutex`. The
+/// `defer rc_decrement` runs after `writeAsync` returns (it parks until the write
+/// completes), so `msg`'s data stays live for the whole I/O.
+fn write_str(fd: i32, mutex: *FiberMutex, msg: FatPtr) void {
+    defer msg.rc_decrement();
+    const data = str_rt.deref_str(msg);
+    const w = worker_mod.getCurrentWorker().?;
+    mutex.acquire(w);
+    defer mutex.release();
+    _ = reactor.writeAsync(fd, data, reactor.NO_OFFSET);
+}
+
+/// As `write_str` but appends a newline atomically via a 2-iovec `writev`.
+fn writeln_str(fd: i32, mutex: *FiberMutex, msg: FatPtr) void {
+    defer msg.rc_decrement();
+    const data = str_rt.deref_str(msg);
+    const vecs = [2]std.posix.iovec_const{
+        .{ .base = data.ptr, .len = data.len },
+        .{ .base = "\n", .len = 1 },
+    };
+    const w = worker_mod.getCurrentWorker().?;
+    mutex.acquire(w);
+    defer mutex.release();
+    _ = reactor.writevAsync(fd, vecs[0..], reactor.NO_OFFSET);
+}
 
 fn io_print(self: FatPtr, msg: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer msg.rc_decrement();
-    const data = str_rt.deref_str(msg);
-    stdout_lock.acquire();
-    defer stdout_lock.release();
-    _ = std.posix.system.write(std.posix.STDOUT_FILENO, data.ptr, data.len);
+    write_str(std.posix.STDOUT_FILENO, &stdout_mutex, msg);
     return make_void();
 }
 
 fn io_println(self: FatPtr, msg: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer msg.rc_decrement();
-    const data = str_rt.deref_str(msg);
-    const vecs: [2]std.posix.iovec_const = .{
-        .{ .base = data.ptr, .len = data.len },
-        .{ .base = "\n", .len = 1 },
-    };
-    stdout_lock.acquire();
-    defer stdout_lock.release();
-    _ = std.posix.system.writev(std.posix.STDOUT_FILENO, &vecs, vecs.len);
+    writeln_str(std.posix.STDOUT_FILENO, &stdout_mutex, msg);
     return make_void();
 }
 
 fn io_print_err(self: FatPtr, msg: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer msg.rc_decrement();
-    const data = str_rt.deref_str(msg);
-    stderr_lock.acquire();
-    defer stderr_lock.release();
-    _ = std.posix.system.write(std.posix.STDERR_FILENO, data.ptr, data.len);
+    write_str(std.posix.STDERR_FILENO, &stderr_mutex, msg);
     return make_void();
 }
 
 fn io_println_err(self: FatPtr, msg: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer msg.rc_decrement();
-    const data = str_rt.deref_str(msg);
-    const vecs: [2]std.posix.iovec_const = .{
-        .{ .base = data.ptr, .len = data.len },
-        .{ .base = "\n", .len = 1 },
-    };
-    stderr_lock.acquire();
-    defer stderr_lock.release();
-    _ = std.posix.system.writev(std.posix.STDERR_FILENO, &vecs, vecs.len);
+    writeln_str(std.posix.STDERR_FILENO, &stderr_mutex, msg);
     return make_void();
 }
 

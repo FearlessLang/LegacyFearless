@@ -1,8 +1,8 @@
-// Core data types for the FeaRT Flow runtime.
-//
-// `OpDesc` is the unit of the flat op array — every fluent call on a flow
-// appends one `OpDesc` instead of wrapping the flow in a new sink object.
-// `Source` is the lazy iteration state; `FeartFlow` pairs the two.
+//! Core data types for the FeaRT Flow runtime.
+//!
+//! `OpDesc` is the unit of the flat op array -- every fluent call on a flow
+//! appends one `OpDesc` instead of wrapping the flow in a new sink object.
+//! `Source` is the lazy iteration state; `FeartFlow` pairs the two.
 
 const std = @import("std");
 const objs = @import("../../objs.zig");
@@ -27,7 +27,7 @@ pub const OpKind = enum(u8) {
 
 // Scheduler hints. Stateless ops can be duplicated across parallel splits;
 // short-circuiting ops can end the flow early; pipeline-breakers force a
-// barrier before downstream ops (sort / distinct / groupBy — none in the
+// barrier before downstream ops (sort / distinct / groupBy -- none in the
 // current trait, but the flag is wired for when they land).
 pub const OpFlags = packed struct(u8) {
     stateless: bool = true,
@@ -59,7 +59,7 @@ pub const Source = union(enum) {
 pub const FeartFlow = struct {
     source: Source,
     // When non-null, the source's items live inside this FatPtr's storage (a
-    // list intrinsic) — drop releases the FatPtr instead of walking the items
+    // list intrinsic) -- drop releases the FatPtr instead of walking the items
     // slice. Lets `make_flow_from_list` keep a List intrinsic's items alive
     // without deep-sharing every element. Range / single / empty leave this
     // null and own their source data directly.

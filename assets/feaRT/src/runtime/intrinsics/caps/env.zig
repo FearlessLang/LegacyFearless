@@ -8,10 +8,6 @@ const pb = root.pkg_base;
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
 
-/// `mut .launchArgs: base.LList[Str]` — the process command-line arguments,
-/// excluding argv[0] (the binary path). Built by folding the stored argv in
-/// reverse onto the empty `LList` singleton via dynamic `.pushFront/1`, so the
-/// first user argument ends up at the head.
 fn env_launchArgs(self: FatPtr) callconv(.c) FatPtr {
     _ = self;
     const argv = process.launch_args();

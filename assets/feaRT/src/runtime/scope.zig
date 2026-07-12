@@ -8,14 +8,14 @@
 //! The `parent` link supports nested scopes: when an inner scope is queried,
 //! cancellation bubbles up through its ancestors. This keeps cancel cheap
 //! (parent load per check, no child-list broadcast) at the cost of walking
-//! depth on each query — fine because cancel checks are hot only at chunk
+//! depth on each query -- fine because cancel checks are hot only at chunk
 //! boundaries (CHUNK_THRESHOLD in flows/exec.zig).
 //!
 //! ### Lifetime
 //! Scopes live on the GC heap (allocated by `pushScope` in the flow-instance
 //! VT). The TLS `active_scope`, `Fiber.saved_scope`, and `StolenTask.scope`
 //! are all GC-tracked roots, so the Scope stays live for as long as any of
-//! those references it — even if the terminal that pushed it has already
+//! those references it -- even if the terminal that pushed it has already
 //! returned. (Earlier revisions stack-allocated the Scope and relied on the
 //! terminal outliving every reader; that invariant proved fragile under
 //! enqueue/CAS races at low APM thresholds.)
@@ -62,7 +62,7 @@ pub const Scope = struct {
 pub threadlocal var active_scope: ?*Scope = null;
 
 /// True if the currently-active scope (or any of its ancestors) is cancelled.
-/// Null scope → false. Hot path reads this once per chunk in run_chunk; keep
+/// Null scope -> false. Hot path reads this once per chunk in run_chunk; keep
 /// the load order monotonic so the compiler doesn't pessimise the fast-path.
 pub fn currentCancelled() bool {
     if (active_scope) |s| return s.cancelled();

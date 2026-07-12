@@ -100,7 +100,7 @@ pub const TRACE_BUF_SIZE: usize = 65536;
 
 pub const TraceBuffer = struct {
 	events: [TRACE_BUF_SIZE]TraceEvent = undefined,
-	/// Atomic head counter — signal handler (heartbeat) and normal code
+	/// Atomic head counter -- signal handler (heartbeat) and normal code
 	/// both call log() on the same OS thread, so we need fetchAdd to
 	/// ensure each gets a unique slot.
 	head: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),

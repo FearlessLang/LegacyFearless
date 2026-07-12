@@ -52,7 +52,7 @@ pub inline fn mod(a: FatPtr, b: FatPtr) FatPtr {
 	return make(deref(a) % divisor);
 }
 
-/// `**(n: Nat): Nat` — exponentiation by squaring in wrapping 64-bit, matching
+/// `**(n: Nat): Nat` -- exponentiation by squaring in wrapping 64-bit, matching
 /// the Java backend's `long` pow.
 pub inline fn pow(a: FatPtr, exp: FatPtr) FatPtr {
 	var base: u64 = deref(a);
@@ -142,7 +142,7 @@ pub inline fn bitwise_or(a: FatPtr, b: FatPtr) FatPtr {
 }
 
 // Compile-time-resolved intrinsic dispatch for Nat.
-// Since target_method is comptime, the switch resolves at compile time —
+// Since target_method is comptime, the switch resolves at compile time --
 // only the matching branch survives in the emitted code.
 // The runtime cost is just the vt pointer comparison (~1 cycle).
 const h = objs.hash_signature;

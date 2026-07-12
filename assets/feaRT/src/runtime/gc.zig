@@ -19,7 +19,43 @@ const DEFAULT_RC_COLLECTION_THRESHOLD: usize = 256;
 
 threadlocal var rc_delta: usize = 0;
 
-var isSafeToCollectCycles = std.atomic.Value(bool).init(true);
+/// Starts false: a stop-the-world during startup deadlocks, because glibc
+/// masks all signals in a thread while it is inside `pthread_create`, so the
+/// collector's suspend signal can never be acknowledged by the main thread
+/// mid-spawn-loop. `WorkerPool.run` enables collection once every runtime
+/// thread exists.
+var isSafeToCollectCycles = std.atomic.Value(bool).init(false);
+
+/// Stop-the-world guard for fiber context switches. Mid-switch, the GC's
+/// recorded stack bottom (`mem_base`) and the hardware stack pointer can refer
+/// to two different fiber stacks; a collection snapshotting a thread in that
+/// window scans across disjoint mappings and segfaults in
+/// `GC_push_all_stacks`. Switches register as readers around the window;
+/// `collectCycles` is the writer and stops the world only once no thread is
+/// mid-switch, with writer priority (pending collection makes new switches
+/// spin). Everything is seq_cst: the reader's increment/re-check and the
+/// writer's flag-set/counter-read form a Dekker pair.
+var switching_threads = std.atomic.Value(usize).init(0);
+var collect_pending = std.atomic.Value(bool).init(false);
+
+/// Enter the switch window (mem_base and stack pointer about to disagree).
+/// The matching `endStackSwitch` runs on the same OS thread but in the
+/// switched-to context: the landing side of the swap carries the baton.
+pub fn beginStackSwitch() void {
+	while (true) {
+		while (collect_pending.load(.seq_cst)) std.atomic.spinLoopHint();
+		_ = switching_threads.fetchAdd(1, .seq_cst);
+		if (!collect_pending.load(.seq_cst)) return;
+		// A collection slipped in between the check and our increment; back
+		// out so its drain can complete, then wait it out.
+		_ = switching_threads.fetchSub(1, .seq_cst);
+	}
+}
+
+/// Leave the switch window: mem_base and the stack pointer agree again.
+pub fn endStackSwitch() void {
+	_ = switching_threads.fetchSub(1, .seq_cst);
+}
 
 fn gc_alloc(ctx: *anyopaque, len: usize, ptr_align: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
 	_ = ctx; _ = ptr_align;
@@ -78,6 +114,8 @@ pub fn init_gc() void {
   const recycle_pool_info = alloc_recycler.get_pool_info();
 	libgc.GC_add_roots(recycle_pool_info.start, recycle_pool_info.end);
 
+	destroyer.init();
+
 	if (TRACK_ALLOCS) {
 		track_table = std.AutoHashMap(usize, TrackEntry).init(std.heap.page_allocator);
 		track_initialized = true;
@@ -87,7 +125,7 @@ pub fn init_gc() void {
 pub inline fn recycleDestroy(comptime T: type, ptr: *T, comptime source: log.RawFreeSource) void {
     // The destroyer overlays a `?*Node` link onto the first 8 bytes of every
     // freed allocation, so anything sent its way must be ≥ 8 bytes. Pad the
-    // type at the call site if you hit this — see types.OpsRefCount for an
+    // type at the call site if you hit this -- see types.OpsRefCount for an
     // example.
     comptime std.debug.assert(@sizeOf(T) >= @sizeOf(destroyer.Node));
     const size = @sizeOf(T);
@@ -101,7 +139,7 @@ pub inline fn recycleDestroy(comptime T: type, ptr: *T, comptime source: log.Raw
 }
 
 /// Mirror of `recycleDestroy`. Try the per-thread pool first; fall back to a
-/// fresh GC_malloc on miss. Only the fallback bumps `rc_delta` — pool hits
+/// fresh GC_malloc on miss. Only the fallback bumps `rc_delta` -- pool hits
 /// reuse storage that was already counted at its original alloc, keeping the
 /// counter paired with `recycleDestroy` (which never decrements).
 pub inline fn recycleAlloc(comptime T: type) *T {
@@ -178,6 +216,13 @@ pub fn maybeCollectCycles() void {
 
 fn collectCycles() void {
 	rc_delta = 0;
+	// Single collector at a time; a concurrent loser skips: its garbage is
+	// picked up by the winner's collection.
+	if (collect_pending.cmpxchgStrong(false, true, .seq_cst, .seq_cst) != null) return;
+	defer collect_pending.store(false, .seq_cst);
+	// Drain mid-switch threads; new switches spin on `collect_pending`, so
+	// this terminates within a register-swap's time.
+	while (switching_threads.load(.seq_cst) != 0) std.atomic.spinLoopHint();
 	libgc.GC_enable();
 	defer libgc.GC_disable();
 	libgc.GC_gcollect();

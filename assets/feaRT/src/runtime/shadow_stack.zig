@@ -87,7 +87,7 @@ pub inline fn popAndClaim(frame_idx: usize) ?*JoinObligation {
 	return if (prev) |obl| obl else null;
 }
 
-/// Recycle a JoinObligation — pushes to current worker's freelist if possible,
+/// Recycle a JoinObligation -- pushes to current worker's freelist if possible,
 /// otherwise falls back to c_allocator.destroy.
 pub fn freeObligation(obl: *JoinObligation) void {
 	if (worker_mod.getCurrentWorker()) |w| {

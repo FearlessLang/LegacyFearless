@@ -57,7 +57,7 @@ fn mut_str_append_bytes(caps: *MutStrCaptures, src: []const u8) void {
     caps.len += @intCast(src.len);
 }
 
-/// `mut .append(other: read Stringable): Void` — append `other.str`.
+/// `mut .append(other: read Stringable): Void` -- append `other.str`.
 fn mut_str_append(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     const other_str = objs.call(other, comptime h("read .str/0"), .{}, @src());
@@ -66,7 +66,7 @@ fn mut_str_append(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
     return str.make_void();
 }
 
-/// `mut +(other): mut Str` — append and return self.
+/// `mut +(other): mut Str` -- append and return self.
 fn mut_str_plus(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
     const other_str = objs.call(other, comptime h("read .str/0"), .{}, @src());
     defer other_str.rc_decrement();
@@ -74,7 +74,7 @@ fn mut_str_plus(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
     return self; // transfer our receiver reference back to the caller
 }
 
-/// `mut .clear: Void` — reset length, keep capacity. Snapshots taken via `.str`
+/// `mut .clear: Void` -- reset length, keep capacity. Snapshots taken via `.str`
 /// are copies and stay unaffected.
 fn mut_str_clear(self: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
@@ -82,7 +82,7 @@ fn mut_str_clear(self: FatPtr) callconv(.c) FatPtr {
     return str.make_void();
 }
 
-/// `read .str: Str` — an immutable snapshot copy, decoupled from later mutation.
+/// `read .str: Str` -- an immutable snapshot copy, decoupled from later mutation.
 fn mut_str_str(self: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     return str.make_str_copy(str.deref_str(self));

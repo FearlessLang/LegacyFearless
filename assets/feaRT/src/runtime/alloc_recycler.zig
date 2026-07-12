@@ -1,15 +1,15 @@
-// Per-thread, size-classed object recycler that bypasses bdwgc's global free
-// lock for the common allocation/free pattern of small object literals.
-//
-// Correctness depends on:
-//   1. Each thread calling `register_thread()` before its first `push`. bdwgc
-//      does not scan TLS by default, so without explicit GC_add_roots the
-//      cycle collector would free pool entries from under us — and the next
-//      pop would hand back storage bdwgc has stitched into its intrinsic
-//      free list, corrupting that list on the next header write.
-//   2. The caller zeroing the captures region before `push`, so the pool
-//      slots (which the conservative scan will now traverse) don't pin
-//      children we already RC-decremented.
+//! Per-thread, size-classed object recycler that bypasses bdwgc's global free
+//! lock for the common allocation/free pattern of small object literals.
+//!
+//! Correctness depends on:
+//!   1. Each thread calling `register_thread()` before its first `push`. bdwgc
+//!      does not scan TLS by default, so without explicit GC_add_roots the
+//!      cycle collector would free pool entries from under us -- and the next
+//!      pop would hand back storage bdwgc has stitched into its intrinsic
+//!      free list, corrupting that list on the next header write.
+//!   2. The caller zeroing the captures region before `push`, so the pool
+//!      slots (which the conservative scan will now traverse) don't pin
+//!      children we already RC-decremented.
 
 const std = @import("std");
 const log = @import("log.zig");

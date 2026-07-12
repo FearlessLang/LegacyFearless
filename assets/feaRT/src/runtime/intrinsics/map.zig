@@ -10,7 +10,7 @@ const pb = root.pkg_base;
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
 
-// `base.LinkedHashMap` — an insertion-ordered map. The backing is an
+// `base.LinkedHashMap` -- an insertion-ordered map. The backing is an
 // array-backed hash map (`std.ArrayHashMapUnmanaged`): the array gives
 // insertion order, the hash index gives O(1) get/put/remove. Keys are hashed and
 // compared through the Fearless `hashFn`/`keyEq` closures the program supplied,
@@ -66,7 +66,7 @@ fn make_entry(key: FatPtr, value: FatPtr) FatPtr {
 /// A by-value view of a `MapStorage`'s closures, handed to the std map for the
 /// duration of one operation. It holds *non-owning* copies of `keyEq`/`hashFn`
 /// (same data/vt as the storage's owned refs), so `hash`/`eql` must `.share()`
-/// before each `objs.call` — `call` consumes its receiver/args, and we must not
+/// before each `objs.call` -- `call` consumes its receiver/args, and we must not
 /// drain the storage's references.
 pub const MapCtx = struct {
     keyEq: FatPtr,
@@ -217,7 +217,7 @@ fn map_values(self: FatPtr) callconv(.c) FatPtr {
     return flow_over(deref_storage(self).map.values());
 }
 
-/// `imm .flow` / `read .flow` / `mut .flowMut` — a flow of `Entry` objects in
+/// `imm .flow` / `read .flow` / `mut .flowMut` -- a flow of `Entry` objects in
 /// insertion order. `make_entry` shares the key/value into each entry (the
 /// storage keeps its refs); the entries themselves are handed to the flow.
 fn map_flow_entries(self: FatPtr) callconv(.c) FatPtr {

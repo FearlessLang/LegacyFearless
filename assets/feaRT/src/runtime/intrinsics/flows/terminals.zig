@@ -1,11 +1,11 @@
-// Terminal drivers — each pairs a ctx struct with an AcceptFn and calls
-// `run_chunk`. Accept returns `false` to request a synchronous short-circuit
-// (used by `.first`, `.findMap`, `.unorderedFindMap`).
-//
-// `any`/`all`/`none`/`find`/`first(pred)` no longer have dedicated drivers —
-// they expand through the Fearless default body in `_TerminalOps[E]` which
-// routes via `.findMap` (ordered) or `.unorderedFindMap` (cancel-safe). The
-// driver-level parallel/cancel logic lives in those two paths only.
+//! Terminal drivers -- each pairs a ctx struct with an AcceptFn and calls
+//! `run_chunk`. Accept returns `false` to request a synchronous short-circuit
+//! (used by `.first`, `.findMap`, `.unorderedFindMap`).
+//!
+//! `any`/`all`/`none`/`find`/`first(pred)` have no dedicated drivers -- they
+//! expand through the Fearless default body in `_TerminalOps[E]` which
+//! routes via `.findMap` (ordered) or `.unorderedFindMap` (cancel-safe). The
+//! driver-level parallel/cancel logic lives in those two paths only.
 
 const std = @import("std");
 const objs = @import("../../objs.zig");
@@ -107,7 +107,7 @@ pub fn drive_for(flow: *types.FeartFlow, callback: FatPtr) FatPtr {
 }
 
 // findMap (ordered) -------------------------------------------------
-// Used by `.findMap` / `.find` / `.first(pred)` — ordered semantics, so the
+// Used by `.findMap` / `.find` / `.first(pred)` -- ordered semantics, so the
 // accept fn must NOT trigger scope.request: the merge picks the leftmost
 // match, and a sibling fork could still hold an earlier match we need.
 const FindCtx = struct { predicate: FatPtr, found: ?FatPtr };

@@ -1,10 +1,10 @@
-// VT_FlowFactory — the singleton trait Zig-backing `Flow#[E](...)` and friends.
-//
-// Factory patterns follow `list.zig`'s `list_factory_N` shape: each arity has
-// an explicit handler that constructs a list-backed flow directly, rather than
-// round-tripping through Fearless-generated code. `ofIso/N` uses the same
-// primitive since, at the FatPtr layer, iso and mut are indistinguishable —
-// ownership is enforced by the Fearless type system before we get here.
+//! VT_FlowFactory -- the singleton trait Zig-backing `Flow#[E](...)` and friends.
+//!
+//! Factory patterns follow `list.zig`'s `list_factory_N` shape: each arity has
+//! an explicit handler that constructs a list-backed flow directly, rather than
+//! round-tripping through Fearless-generated code. `ofIso/N` uses the same
+//! primitive since, at the FatPtr layer, iso and mut are indistinguishable --
+//! ownership is enforced by the Fearless type system before we get here.
 
 const std = @import("std");
 const objs = @import("../../objs.zig");
@@ -21,7 +21,7 @@ const h = objs.hash_signature;
 const vt_flow = &instance.VT_Flow;
 
 // ==========================================
-// Factory singleton ctor — returned by Flow# / Flow.ofIso etc.
+// Factory singleton ctor -- returned by Flow# / Flow.ofIso etc.
 // ==========================================
 
 pub fn singleton() FatPtr {
@@ -29,7 +29,7 @@ pub fn singleton() FatPtr {
 }
 
 // ==========================================
-// # / 0..4 — construct from inline args
+// # / 0..4 -- construct from inline args
 // ==========================================
 
 fn flow_factory_0(_: FatPtr) callconv(.c) FatPtr {
@@ -60,7 +60,7 @@ fn flow_range_2(_: FatPtr, start: FatPtr, end: FatPtr) callconv(.c) FatPtr {
 }
 
 // ==========================================
-// ofIso / 1..16 — direct Zig construction (no Fearless round-trip)
+// ofIso / 1..16 -- direct Zig construction (no Fearless round-trip)
 // ==========================================
 
 fn flow_ofIso_1(_: FatPtr, a0: FatPtr) callconv(.c) FatPtr {

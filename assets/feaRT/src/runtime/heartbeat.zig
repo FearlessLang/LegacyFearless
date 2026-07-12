@@ -1,4 +1,4 @@
-//! Despite the name, the system for controlling VPF (Very Parallel Fearless) is no longer a direct implementation of
+//! Despite the name, the system for controlling VPF (Very Parallel Fearless) is not a direct implementation of
 //! Heartbeat Scheduling or even the Task Parallel Assembly Language. Instead, it is based on
 //! Automatic Parallelism Management by Westrick et. al. This is a descendant of the work on
 //! Heartbeat Scheduling, but with much better performance in practice.
@@ -36,7 +36,7 @@ pub inline fn tryPromote() void {
     const tokens_ptr = tls_tokens_ptr orelse return;
     if (tokens_ptr.* >= TOKENS_THRESHOLD) {
         tokens_ptr.* /= 2; // parent keeps half
-        // Don't promote into a cancelled subtree — stealing work we're about
+        // Don't promote into a cancelled subtree -- stealing work we're about
         // to abort just burns a thief fiber. The TLS load is cheap and the
         // parent walk in Scope.cancelled() is short (scope depth = terminal-
         // nesting depth, 1 in practice).
@@ -131,7 +131,7 @@ noinline fn doPromote(child_initial_tokens: u32) void {
     // between CAS and enqueue would leave the parent waiting on an obligation
     // that nothing will ever fulfill (the lost-task hang).
     //
-    // If the queue is full now, abandon the promotion entirely — frame's
+    // If the queue is full now, abandon the promotion entirely -- frame's
     // join_obligation is still null, so popAndClaim takes the no-promotion
     // branch and the parent runs the work itself. Recycle the prepared
     // resources and we're done.
@@ -140,7 +140,7 @@ noinline fn doPromote(child_initial_tokens: u32) void {
         worker.recycleObligation(obligation);
         worker.recycleObligation(child_obl);
         worker.recycleTask(task);
-        // Clear child_obligation back out — the frame might still be claimed
+        // Clear child_obligation back out -- the frame might still be claimed
         // by a future promotion attempt for the same frame index, and we
         // don't want a stale pointer left lying around.
         frame.child_obligation.store(null, .monotonic);

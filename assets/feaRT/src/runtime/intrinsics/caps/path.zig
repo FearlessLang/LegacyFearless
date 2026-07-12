@@ -64,7 +64,7 @@ fn resolve_path(root_bytes: []const u8, segments: FatPtr) []u8 {
 
 /// Whether `candidate` lies within `base` (equal, or a descendant on a path
 /// boundary). Both are normalised absolute paths, so a plain prefix test plus a
-/// separator-boundary check is exact — this closes the lexical `..` escape that
+/// separator-boundary check is exact -- this closes the lexical `..` escape that
 /// the Java `startsWith` check permits.
 fn is_within(base: []const u8, candidate: []const u8) bool {
     if (!std.mem.startsWith(u8, candidate, base)) return false;
@@ -104,7 +104,7 @@ fn throw_scope_violation(inner: []const u8, resolved: []u8) noreturn {
 }
 
 /// IO-level access: resolve `segments` (borrowed) against the CWD and wrap as the
-/// corresponding path capability. No containment check — this is the root.
+/// corresponding path capability. No containment check -- this is the root.
 pub fn rw_from_cwd(segments: FatPtr) FatPtr {
     const cwd = cwd_alloc();
     defer gc.free(@ptrCast(cwd.ptr));

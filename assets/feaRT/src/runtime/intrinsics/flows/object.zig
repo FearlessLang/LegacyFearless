@@ -1,9 +1,9 @@
-// Flow object layout + constructors.
-//
-// A Flow's FatPtr wraps a `FlowCaptures` whose single field is an integer
-// pointer to a heap-allocated `FeartFlow`. We keep the flow on the heap
-// (rather than inline) so append/split can create new flows cheaply without
-// re-boxing closures.
+//! Flow object layout + constructors.
+//!
+//! A Flow's FatPtr wraps a `FlowCaptures` whose single field is an integer
+//! pointer to a heap-allocated `FeartFlow`. We keep the flow on the heap
+//! (rather than inline) so append/split can create new flows cheaply without
+//! re-boxing closures.
 
 const std = @import("std");
 const objs = @import("../../objs.zig");
@@ -388,7 +388,7 @@ pub fn make_flow_from_list(comptime vt: *const objs.VTable, list_fp: FatPtr) Fat
 
 // Flow over a string's codepoints / graphemes. `owner` is the Str whose buffer
 // `bytes` borrows; the StrSource takes the one reference (released on drop) and
-// `source_owner` stays null — string sources carry their owner in the source.
+// `source_owner` stays null -- string sources carry their owner in the source.
 pub fn make_flow_from_str(comptime vt: *const objs.VTable, owner: FatPtr, bytes: []const u8, mode: string_flows.StrSourceMode) FatPtr {
     const flow = create_flow(.{ .str = .{
         .bytes_ptr = bytes.ptr,

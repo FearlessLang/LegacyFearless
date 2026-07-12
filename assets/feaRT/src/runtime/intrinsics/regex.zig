@@ -57,7 +57,7 @@ pub const VT_Regex: objs.VTable = .{
 // Regex factory (VT_Regexs)
 // ==========================================
 
-/// `Regexs#(pattern: Str): Regex` — compile the pattern, raising a deterministic
+/// `Regexs#(pattern: Str): Regex` -- compile the pattern, raising a deterministic
 /// `FearlessError` carrying the native compiler's message on failure.
 fn regexs_compile(self: FatPtr, pattern_fp: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement(); // singleton: no-op

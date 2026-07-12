@@ -1,9 +1,9 @@
-// VT_Flow: the vtable that backs every Zig-resident flow instance.
-//
-// Intermediate ops (`map`, `filter`, …) append one `OpDesc` and return a new
-// flow. Terminal ops (`fold`, `find`, …) dispatch into `terminals.zig`.
-// A handful of methods (`only`, `get`, `opt`, `let`, `join`, `#/1`) have
-// default Fearless bodies; those stay as thin delegation thunks.
+//! VT_Flow: the vtable that backs every Zig-resident flow instance.
+//!
+//! Intermediate ops (`map`, `filter`, …) append one `OpDesc` and return a new
+//! flow. Terminal ops (`fold`, `find`, …) dispatch into `terminals.zig`.
+//! A handful of methods (`only`, `get`, `opt`, `let`, `join`, `#/1`) have
+//! default Fearless bodies; those stay as thin delegation thunks.
 
 const std = @import("std");
 const objs = @import("../../objs.zig");
@@ -51,7 +51,7 @@ fn popScope(prev: ?*scope_mod.Scope) void {
     if (worker_mod.getCurrentWorker()) |w| {
         if (w.current_fiber) |f| f.saved_scope = prev;
     }
-    // No free — GC reclaims when nothing references the Scope.
+    // No free -- GC reclaims when nothing references the Scope.
 }
 
 // ==========================================

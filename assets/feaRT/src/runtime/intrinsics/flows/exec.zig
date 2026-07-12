@@ -1,10 +1,10 @@
-// Chunk executor — the opaque-to-APM inner loop.
-//
-// `run_chunk` pulls elements from a flow's source and walks each one through
-// the flat `[]OpDesc` array. User closures are invoked through `objs.call`
-// (still Fearless frames, so the heartbeat prologue sees them); the walk
-// itself stays in Zig so per-op dispatch cost is paid once per closure call,
-// not once per heartbeat check.
+//! Chunk executor -- the opaque-to-APM inner loop.
+//!
+//! `run_chunk` pulls elements from a flow's source and walks each one through
+//! the flat `[]OpDesc` array. User closures are invoked through `objs.call`
+//! (still Fearless frames, so the heartbeat prologue sees them); the walk
+//! itself stays in Zig so per-op dispatch cost is paid once per closure call,
+//! not once per heartbeat check.
 
 const std = @import("std");
 const objs = @import("../../objs.zig");
@@ -34,7 +34,7 @@ const Applied = union(enum) {
 
 // Per-iteration cancel poll. Each iteration of run_chunk's while loop calls
 // arbitrary user closures via the op chain (map closures, filter predicates,
-// flatMap inner flows, etc.) — those can be unboundedly expensive, so polling
+// flatMap inner flows, etc.) -- those can be unboundedly expensive, so polling
 // only every N=1024 elements could leave the cancel signal unobserved for
 // seconds-to-minutes. The atomic acquire-load is ~2-5 ns; on a 100M-element
 // flow that's ~200-500 ms total overhead, which is acceptable. If profiling
@@ -138,7 +138,7 @@ fn apply_op(
             op.state -= 1;
             // Emitting the last allowed element: pass it through (so it's
             // accepted) but stop pulling afterwards. Otherwise the next source
-            // pull would run the upstream ops on an element we'd discard —
+            // pull would run the upstream ops on an element we'd discard --
             // observable if one of those ops throws (`.map{Error.msg "foo"}.limit(1)`).
             if (op.state == 0) break :blk .{ .pass_then_stop = elem };
             break :blk .{ .pass = elem };
@@ -223,7 +223,7 @@ fn opt_extract_none(_: FatPtr) callconv(.c) FatPtr {
 
 // Opt's match dispatches via `OptMatch[T,R]: {mut .some(x: T): R, mut .empty: R}`
 // (see assets/base/optionals.fear:55). The body in `Opts.#` ends up calling
-// `m.some(x)` / `m.empty` with whatever modifier the receiver permits — which
+// `m.some(x)` / `m.empty` with whatever modifier the receiver permits -- which
 // in practice is `mut`, but registering all three variants is cheap insurance
 // (mirrors the small runtime helper vtable pattern).
 pub const VT_OptExtract: objs.VTable = .{
@@ -256,7 +256,7 @@ pub fn extract_some(opt: FatPtr) FatPtr {
 }
 
 // ==========================================
-// Actor sink — downstream reinjection for the .actor op callback
+// Actor sink -- downstream reinjection for the .actor op callback
 // ==========================================
 
 const ActorSinkCaptures = extern struct {

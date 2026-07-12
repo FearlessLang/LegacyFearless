@@ -87,7 +87,7 @@ pub const Worker = struct {
 			self.task_pool_len -= 1;
 			const task = self.task_pool[self.task_pool_len].?;
 			self.task_pool[self.task_pool_len] = null;
-			// Reset the cancel flag — recycled tasks must not carry the bit
+			// Reset the cancel flag -- recycled tasks must not carry the bit
 			// set by a previous CAS-fail rollback into a fresh promotion.
 			task.cancelled.store(false, .monotonic);
 			return task;
@@ -120,7 +120,7 @@ pub const Worker = struct {
 	pub fn parkCurrentFiber(self: *Worker) void {
 		const fiber = self.current_fiber.?;
 		fiber.state = .Parked;
-		// Switch back to scheduler — scheduler_fiber has no shadow stack to swap to,
+		// Switch back to scheduler -- scheduler_fiber has no shadow stack to swap to,
 		// so we just do a raw switchTo here (the scheduler doesn't use shadow stacks).
 		const switchTo = @import("fiber.zig").switchFiber;
 		switchTo(fiber, &self.scheduler_fiber);
@@ -128,7 +128,7 @@ pub const Worker = struct {
 };
 
 /// Thread-local pointer to the current worker.
-/// IMPORTANT: Always use getCurrentWorker() to read this — direct reads can be
+/// IMPORTANT: Always use getCurrentWorker() to read this -- direct reads can be
 /// cached by the compiler in callee-saved registers, producing stale values
 /// after fiber migration (switchTo can resume on a different OS thread).
 pub threadlocal var tls_current_worker: ?*Worker = null;
@@ -219,6 +219,11 @@ pub const WorkerPool = struct {
 			t.* = std.Thread.spawn(.{}, workerLoop, .{&self.workers[i]}) catch @panic("Failed to spawn worker thread");
 		}
 
+		// Every runtime thread now exists, so stop-the-world cycle collection
+		// is safe to enable (see isSafeToCollectCycles in gc.zig for why it
+		// starts disabled).
+		gc.enable_cycle_collection();
+
 		// Main thread runs worker 0
 		workerLoop(&self.workers[0]);
 
@@ -283,7 +288,7 @@ fn workerLoop(worker: *Worker) void {
 
 	// Worker loop
 	while (!global_done.load(.monotonic)) {
-		// 1. Check for stolen tasks → wrap in thief fiber
+		// 1. Check for stolen tasks -> wrap in thief fiber
 		if (worker.task_queue.dequeue()) |task| {
 			const fiber = Fiber.create(&thiefTrampoline, @ptrCast(task)) catch @panic("OOM creating thief fiber");
 			fiber.state = .Ready;
@@ -303,7 +308,7 @@ fn workerLoop(worker: *Worker) void {
 			continue;
 		}
 
-		// 2. Check for ready fibers → switch to them
+		// 2. Check for ready fibers -> switch to them
 		if (worker.ready_queue.dequeue()) |fiber| {
 			log.trace_scheduling(.fiber_dequeue, @intFromPtr(fiber), @intFromEnum(fiber.state), worker.id);
 			// Spin until the fiber's state has been fully saved (prevents
@@ -316,7 +321,7 @@ fn workerLoop(worker: *Worker) void {
 			log.trace_scheduling(.fiber_switch_to, @intFromPtr(fiber), worker.id, 0);
 			switchFiber(&worker.scheduler_fiber, fiber);
 
-			// Fiber returned to scheduler — its state is now saved.
+			// Fiber returned to scheduler -- its state is now saved.
 			log.trace_scheduling(.fiber_switch_back, @intFromPtr(fiber), @intFromEnum(fiber.state), worker.id);
 			// Open the resume gate so the next dequeue can proceed.
 			fiber.resume_gate.store(true, .release);
@@ -335,14 +340,12 @@ fn workerLoop(worker: *Worker) void {
 				log.trace_scheduling(.fiber_done, @intFromPtr(fiber), worker.id, 0);
 				fiber.destroy();
 			}
-			// If Parked, leave it — it will be re-enqueued when its obligation is fulfilled
+			// If Parked, leave it -- it will be re-enqueued when its obligation is fulfilled
 			continue;
 		}
 
-		// 3. Nothing to do — spin, with a small sleep to prevent spamming CPU usage
+		// 3. Nothing to do -- spin, with a small sleep to prevent spamming CPU usage
 		std.atomic.spinLoopHint();
-		// std.Thread.yield() catch {};
-		// gc.maybeCollectCycles();
 		std.Io.sleep(process.runtime_io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
 	}
 

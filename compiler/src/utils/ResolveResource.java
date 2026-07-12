@@ -95,15 +95,22 @@ public record ResolveResource(Path assetRoot, Path artefactRoot, Optional<Path> 
   // forks) would otherwise accumulate one zig-build tree per compiled program until exit;
   // DeleteOnExit only covers the dirs still alive when the JVM shuts down.
   private static final Queue<Path> TMP_PATHS = new ConcurrentLinkedQueue<>();
-  static public Path freshTmpPath(){
+  static public Path freshTmpPath(){ return freshTmpPath(false); }
+  /// When {@code keep} is true the dir is registered with neither the eager
+  /// {@link #cleanTmpPaths()} sweep nor the {@link DeleteOnExit} shutdown hook, so
+  /// it survives past the JVM for inspection. This is what lets a `printCodegen`
+  /// run leave its compiled zig-build tree on disk.
+  static public Path freshTmpPath(boolean keep){
     /*var res= Paths.get(
       System.getProperty("java.io.tmpdir"),
       "fearOut"+UUID.randomUUID());*/
     var res = ResolveResource.artefact("/.tmp")
       .resolve("fearOut"+UUID.randomUUID());
     IoErr.of(()->Files.createDirectories(res));
-    TMP_PATHS.add(res);
-    DeleteOnExit.of(res);
+    if (!keep) {
+      TMP_PATHS.add(res);
+      DeleteOnExit.of(res);
+    }
     return res;
   }
   /// Deletes every tmp dir handed out by freshTmpPath so far. Only safe once their

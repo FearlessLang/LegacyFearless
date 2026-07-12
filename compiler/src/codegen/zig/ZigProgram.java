@@ -137,7 +137,9 @@ class ZigProgramBuilder {
     sb.append("pub const errors = @import(\"runtime/errors/errors.zig\");\n");
     sb.append("pub const shadow_stack_mod = @import(\"runtime/shadow_stack.zig\");\n");
     sb.append("pub const worker_mod = @import(\"runtime/worker.zig\");\n");
+    sb.append("pub const reactor = @import(\"runtime/io/reactor.zig\");\n");
     sb.append("pub const JoinObligation = @import(\"runtime/sync/join_obligation.zig\").JoinObligation;\n");
+    sb.append("pub const completion = @import(\"runtime/sync/completion.zig\");\n");
     sb.append("pub const heartbeat = @import(\"runtime/heartbeat.zig\");\n");
     sb.append("pub const log = @import(\"runtime/log.zig\");\n");
     sb.append("pub const Fiber = @import(\"runtime/fiber.zig\").Fiber;\n");
@@ -213,6 +215,8 @@ class ZigProgramBuilder {
     sb.append("errors.installNdHandlers();\n");
     sb.append("const cpu_count = std.Thread.getCpuCount() catch 1;\n");
     sb.append("const pool = worker_mod.WorkerPool.init(cpu_count) catch @panic(\"OOM\");\n");
+    sb.append("completion.init(pool.ready_queue);\n");
+    sb.append("reactor.init() catch @panic(\"OOM init reactor\");\n");
     sb.append("const main_fiber = Fiber.create(struct {\n");
     sb.append("fn run(_: *Fiber) void {\n");
     sb.append("const entry = rt.obj_k_singleton(&").append(entryVtRef).append(");\n");

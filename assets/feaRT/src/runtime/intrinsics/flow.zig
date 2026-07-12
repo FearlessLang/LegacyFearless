@@ -1,9 +1,9 @@
-// Public API for the FeaRT Flow runtime.
-//
-// The real implementation lives in `flows/`; this module exposes the handful
-// of symbols the compiler-generated code and other intrinsics reach for. The
-// compiler hardcodes `@import("runtime/intrinsics/flow.zig")`, so keep this
-// file in place and narrow.
+//! Public API for the FeaRT Flow runtime.
+//!
+//! The real implementation lives in `flows/`; this module exposes the handful
+//! of symbols the compiler-generated code and other intrinsics reach for. The
+//! compiler hardcodes `@import("runtime/intrinsics/flow.zig")`, so keep this
+//! file in place and narrow.
 
 const objs = @import("../objs.zig");
 const FatPtr = objs.FatPtr;

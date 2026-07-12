@@ -8,7 +8,7 @@ const libgc = @import("libgc");
 // in `gc_priv.h`, but the symbol lives in the static libgc archive we link,
 // so a manual extern resolves at link time. We use it from inside
 // `GC_call_with_alloc_lock` so a whole drained chain pays the lock cost
-// exactly once — without it, profiling shows the destroyer spending ~40% of
+// exactly once -- without it, profiling shows the destroyer spending ~40% of
 // wall time blocked in `pthread_mutex_lock` fighting workers for the lock.
 extern fn GC_free_inner(p: ?*anyopaque) void;
 
@@ -21,7 +21,7 @@ extern fn GC_free_inner(p: ?*anyopaque) void;
 ///
 /// The link cell is overlaid on the first 8 bytes of each freed allocation,
 /// so there's no separate node allocation. Every producer must therefore
-/// hand us a pointer that is ≥ 8 bytes and 8-byte aligned — see the
+/// hand us a pointer that is ≥ 8 bytes and 8-byte aligned -- see the
 /// comptime/runtime asserts below.
 pub const Node = extern struct { next: ?*Node };
 

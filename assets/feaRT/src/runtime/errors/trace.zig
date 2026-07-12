@@ -91,7 +91,7 @@ pub fn inheritStackTrace(child: *Fiber, parent_frames: *const [shadow_stack.TRAC
   child_top.* = parent_top + 1;
 }
 
-/// Strip a trailing `/<gen>` off a vtable `type_name` (e.g. `test.Test/0` →
+/// Strip a trailing `/<gen>` off a vtable `type_name` (e.g. `test.Test/0` ->
 /// `test.Test`) for trace rendering. Leaves names without that suffix untouched.
 fn strippedTypeName(name: []const u8) []const u8 {
   var i = name.len;

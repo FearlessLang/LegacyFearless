@@ -51,7 +51,7 @@ pub inline fn mod(a: FatPtr, b: FatPtr) FatPtr {
 	return make(@mod(deref(a), divisor));
 }
 
-/// `**(n: Nat): Int` — exponentiation by squaring in wrapping 64-bit, matching
+/// `**(n: Nat): Int` -- exponentiation by squaring in wrapping 64-bit, matching
 /// the Java backend's `long` pow. The exponent is a Nat.
 pub inline fn pow(a: FatPtr, exp: FatPtr) FatPtr {
 	const nat_intrinsics = @import("nat.zig");

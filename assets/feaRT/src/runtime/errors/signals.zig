@@ -1,3 +1,19 @@
+//! Non-deterministic hardware faults (stack overflow), wrapped as nondeterministic Fearless errors
+//!
+//! A fiber's machine stack is a fixed mmap with a PROT_NONE guard page at its
+//! low end (see `fiber.zig`). Unbounded recursion grows the stack down past
+//! `stack_bottom` into the guard page, raising SIGSEGV. `@panic`-class ND faults
+//! are already handled by `ndPanicHandler`, but a hardware fault can't be caught
+//! by Zig's panic machinery, so we need a real signal handler.
+//!
+//! Most of the complexity here is that the stack is basically rubbish at this point,
+//! so we need to make a new stack toi handle the signal. We rewrite the saved registers (via `sigreturn`)
+//! so context switching can clean up the error flags and start running our recovery code (`ndRecoveryTrampoline`).
+//! At that point, we then jump into the normal `feart_unwind` logic that user-level errors use.
+//!
+//! One extra point of complexity is GC. BDW-GC uses signals too. For now I just forward anything that isn't a fiber
+//! stack overflowing to the GC's error handler.
+
 const std = @import("std");
 const builtin = @import("builtin");
 const worker_mod = @import("../worker.zig");
@@ -5,28 +21,6 @@ const gc = @import("../gc.zig");
 const heartbeat = @import("../heartbeat.zig");
 const error_rt = @import("../error.zig");
 const unwind = @import("unwind.zig");
-
-// ==========================================================================
-// Non-deterministic hardware faults (stack overflow): signal-based ND
-// ==========================================================================
-//
-// A fiber's machine stack is a fixed mmap with a PROT_NONE guard page at its
-// low end (see `fiber.zig`). Unbounded recursion grows the stack down past
-// `stack_bottom` into the guard page, raising SIGSEGV. `@panic`-class ND faults
-// are already handled by `ndPanicHandler`, but a hardware fault can't be caught
-// by Zig's panic machinery, so we install a real signal handler.
-//
-// The faulting fiber's machine stack is exhausted, so the handler runs on a
-// per-thread `sigaltstack`. It can't run `feart_unwind` directly there: the
-// unwinder switches to the scheduler and never returns, which would strand the
-// signal frame (leaving the fault signal masked + the alt stack marked in-use).
-// Instead the handler rewrites the saved register context to resume — via the
-// kernel's sigreturn, which restores the signal mask and clears the on-alt-stack
-// flag — at `ndRecoveryTrampoline` on a dedicated per-thread recovery stack.
-// The trampoline then runs `feart_unwind` on a clean stack with signals
-// unmasked. Faults that aren't a fiber stack overflow (e.g. BDW-GC's
-// incremental dirty-bit faults, or genuine wild accesses) are forwarded to the
-// handler BDW-GC installed before us.
 
 const ALT_STACK_SIZE = 64 * 1024;
 const RECOVERY_STACK_SIZE = 512 * 1024;
@@ -137,7 +131,7 @@ fn ndSignalHandler(sig: std.posix.SIG, info: *const std.posix.siginfo_t, ctx: ?*
 
 /// Forward a fault we don't own to whatever handler BDW-GC installed before us
 /// (so its incremental dirty-bit tracking keeps working). If that slot is empty
-/// or ignore, reset the disposition to default and return — the faulting
+/// or ignore, reset the disposition to default and return -- the faulting
 /// instruction re-executes and terminates the process the normal way.
 fn chainOldHandler(sig: std.posix.SIG, info: *const std.posix.siginfo_t, ctx: ?*anyopaque) void {
     const old: *const std.posix.Sigaction = switch (sig) {

@@ -62,7 +62,7 @@ pub const VT_UTF16: objs.VTable = .{
     .storage_mode = .singleton,
 };
 
-/// `UTF8.fromBytes(list): Action[Str]` — validate the bytes as UTF-8.
+/// `UTF8.fromBytes(list): Action[Str]` -- validate the bytes as UTF-8.
 fn utf8_from_bytes(self: FatPtr, list_fp: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     defer list_fp.rc_decrement();

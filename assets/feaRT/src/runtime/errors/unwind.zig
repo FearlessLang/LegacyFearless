@@ -19,7 +19,7 @@ const writeStderr = @import("./io.zig").writeStderr;
 /// Abandon the current fiber and deliver `payload` (a tag-typed error FatPtr,
 /// see `error.zig`) to the parent.
 ///
-/// Walks the current fiber's shadow stack newest→oldest, abandoning each frame:
+/// Walks the current fiber's shadow stack newest->oldest, abandoning each frame:
 /// promoted frames hand the error to their thief (which is parked waiting for
 /// our `r1`) so it can never deadlock; every frame's locals get a best-effort
 /// release (the GC backstops anything missed). At the root we fulfill the
@@ -44,8 +44,8 @@ pub fn feart_unwind(payload: FatPtr) noreturn {
         // Claim the frame the same way `popAndClaim` does. A non-null result
         // (other than CLAIMED) means the frame was promoted: its thief is
         // parked on `child_obligation` waiting for our `r1`. Deliver the error
-        // there — with its own reference — so the thief unblocks instead of
-        // hanging. We deliberately do NOT recycle the returned join obligation:
+        // there, so the thief unblocks instead of hanging.
+        // We deliberately do NOT recycle the returned join obligation:
         // the thief still owns it and will fulfill it from its own completion
         // or unwind. Nobody waits on it now, so the GC reclaims it; recycling
         // it into a pool slot a live thief could still write to would corrupt
@@ -85,6 +85,10 @@ pub fn feart_unwind(payload: FatPtr) noreturn {
         shadow_stack.trace_top = null;
         shadow_stack.trace_stack = null;
     }
+    // Hold gc.beginStackSwitch across the window where mem_base points at the
+    // OS stack while %rsp is still on the fiber's stack; switchTo never
+    // returns here, so the scheduler calls gc.endStackSwitch after landing.
+    gc.beginStackSwitch();
     gc.setStackBottom(gc.currentStackBase());
     gc.enable_cycle_collection();
     fiber_mod.switchTo(fiber, &worker.scheduler_fiber);
@@ -105,7 +109,7 @@ pub fn throwDeterministic(info: FatPtr) noreturn {
 /// div-by-zero, OOB in safe modes, …) becomes a non-deterministic error
 /// delivered to the nearest `CapTry`/top-level boundary. Outside any fiber
 /// (e.g. on the scheduler/OS stack) there is no boundary to unwind to, so we
-/// fall back to Zig's default panic — which also keeps test-runner reporting
+/// fall back to Zig's default panic -- which also keeps test-runner reporting
 /// intact if this override is ever active during a test build.
 pub fn ndPanicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
     @branchHint(.cold);

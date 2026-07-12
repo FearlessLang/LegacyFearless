@@ -25,8 +25,8 @@ const h = objs.hash_signature;
 // `Try`/`CapTry` run their lambda in a disposable child fiber so that a
 // deterministic `Error!` (which lowers to `feart_unwind`, abandoning the
 // failing Zig frames) has a fiber boundary to unwind to. The child's
-// `root_obligation` carries either the lambda's normal result or — if it
-// unwinds — the tag-typed error payload (see `error.zig`). The parent's
+// `root_obligation` carries either the lambda's normal result or -- if it
+// unwinds -- the tag-typed error payload (see `error.zig`). The parent's
 // `.run` then classifies the result: an ordinary value becomes `m.ok`, a
 // deterministic error becomes `m.info` (both `Try` and `CapTry`), and a
 // non-deterministic error becomes `m.info` only for `CapTry` while a plain

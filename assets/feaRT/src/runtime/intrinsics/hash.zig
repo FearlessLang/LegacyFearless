@@ -9,7 +9,7 @@ const str_rt = @import("strings/index.zig");
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
 
-// `base.CheapHash` — an implementation-defined, non-cryptographic hasher with
+// `base.CheapHash` -- an implementation-defined, non-cryptographic hasher with
 // per-instance mutable state, so each instantiation is a fresh heap object (the
 // Java backend likewise does `new CheapHash()`). The exact algorithm only needs
 // to be deterministic and to agree for byte-equal strings; it mirrors

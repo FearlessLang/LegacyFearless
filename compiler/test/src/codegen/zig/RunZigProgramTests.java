@@ -41,8 +41,8 @@ public class RunZigProgramTests {
   }
   private static void okBaseStrings(Res expected, List<String> content, Integer tokensThreshold) {
     Main.resetAll();
-    var verbosity = new CompilerFrontEnd.Verbosity(true, false, CompilerFrontEnd.ProgressVerbosity.None);
-    var workingDir = ResolveResource.freshTmpPath();
+    var verbosity = new CompilerFrontEnd.Verbosity(false, false, CompilerFrontEnd.ProgressVerbosity.None);
+    var workingDir = ResolveResource.freshTmpPath(verbosity.printCodegen());
     IoErr.of(() -> Files.createDirectories(workingDir));
     var io = InputOutput.programmatic(
       "test.Test",

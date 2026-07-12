@@ -19,7 +19,7 @@ const GUARD_SIZE = std.heap.page_size_min;
 const gc = @import("gc.zig");
 
 pub const Fiber = struct {
-	/// Saved stack pointer — MUST be first field (offset 0) for assembly.
+	/// Saved stack pointer -- MUST be first field (offset 0) for assembly.
 	sp: usize,
 	stack_bottom: [*]align(std.heap.page_size_min) u8,
 	stack_size: usize,
@@ -53,7 +53,7 @@ pub const Fiber = struct {
 
 	/// Per-fiber slot for the cancellation scope currently active on this
 	/// fiber's stack. switchFiber saves TLS active_scope into the outgoing
-	/// fiber's slot and loads the incoming slot into TLS — so push/pop only
+	/// fiber's slot and loads the incoming slot into TLS -- so push/pop only
 	/// touches TLS and the fiber struct mirrors it across switches. Thief
 	/// fibers seed this from the parent's scope at creation time (see
 	/// workerLoop's thief path in worker.zig).
@@ -63,7 +63,7 @@ pub const Fiber = struct {
 	/// (thief fibers; Try/CapTry child fibers). When the fiber finishes
 	/// normally the obligation is fulfilled by the relevant trampoline; when
 	/// the fiber is abandoned by `feart_unwind` the unwinder fulfills this same
-	/// obligation with the tag-typed error payload — unifying both hand-offs.
+	/// obligation with the tag-typed error payload -- unifying both hand-offs.
 	root_obligation: ?*shadow_stack.JoinObligation = null,
 
 	pub const State = enum {
@@ -84,7 +84,7 @@ pub const Fiber = struct {
 		return @ptrCast(self.stack_bottom + self.stack_size);
 	}
 
-	/// True if `addr` lands in this fiber's guard page — i.e. the access that
+	/// True if `addr` lands in this fiber's guard page -- i.e. the access that
 	/// faulted was a stack overflow (the machine stack grew down past
 	/// `stack_bottom` into the PROT_NONE guard). Used by the ND signal handler
 	/// to classify a SIGSEGV as a recoverable stack-overflow rather than a wild
@@ -202,7 +202,7 @@ pub const Fiber = struct {
 		const base: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(@intFromPtr(self.stack_bottom) - GUARD_SIZE);
 		std.posix.munmap(@alignCast(base[0 .. GUARD_SIZE + self.stack_size]));
 
-		// Free the Fiber struct itself — we only lean on the GC for cycle
+		// Free the Fiber struct itself -- we only lean on the GC for cycle
 		// collection, never as a fallback for ordinary frees.
 		gc.recycleDestroy(Fiber, self, .fiber_destroy);
 	}
@@ -255,6 +255,12 @@ pub fn switchFiber(from: *Fiber, to: *Fiber) void {
 		}
 	}
 
+	// mem_base and the stack pointer disagree from the setStackBottom below
+	// until the landing side's endStackSwitch (post-switchTo here for a
+	// resumed fiber, fiber_trampoline's entry for a fresh one); block cycle
+	// collection across that window.
+	gc.beginStackSwitch();
+
 	// Update GC stack bottom for the target fiber before switching
 	if (to.hasMappedStack()) {
 		gc.setStackBottom(to.stackTop());
@@ -264,14 +270,18 @@ pub fn switchFiber(from: *Fiber, to: *Fiber) void {
 
 	// After returning (we're back on 'from'), restore GC stack bounds
 	if (!from.hasMappedStack()) {
-		// We returned to the scheduler (OS stack) — let GC re-detect
+		// We returned to the scheduler (OS stack) -- let GC re-detect
 		gc.setStackBottom(gc.currentStackBase());
 	}
+	gc.endStackSwitch();
 }
 
 /// Trampoline called from assembly fiber_entry.
 /// Exported as C symbol so the assembly can `call` it.
 export fn fiber_trampoline(fiber: *Fiber) callconv(.c) noreturn {
+	// Landing side of the switch that started this fiber: mem_base and the
+	// stack pointer agree again.
+	gc.endStackSwitch();
 	fiber.state = .Running;
 	if (fiber.entry_fn) |entry| {
 		entry(fiber);
@@ -294,7 +304,10 @@ export fn fiber_trampoline(fiber: *Fiber) callconv(.c) noreturn {
 		shadow_stack.trace_stack = null;
 	}
 
-	// Restore GC to scheduler's OS stack before switching
+	// Hold gc.beginStackSwitch across the window where mem_base points at the
+	// OS stack while the stack pointer is still on this fiber's stack; the
+	// scheduler calls gc.endStackSwitch after its switchFiber returns.
+	gc.beginStackSwitch();
 	gc.setStackBottom(gc.currentStackBase());
 
 	switchTo(fiber, &worker.scheduler_fiber);

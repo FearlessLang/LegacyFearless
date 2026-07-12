@@ -28,7 +28,7 @@ pub const Ownership = enum(u32) { borrowed = 0, owned = 1, shared = 2 };
 /// and (for `shared`) the owning Str.
 ///
 /// `owner` is stored as the raw `data`/`vt` words of a `FatPtr` rather than a
-/// `FatPtr` field so `obj_k` does NOT auto-share/auto-drop it — the owner is
+/// `FatPtr` field so `obj_k` does NOT auto-share/auto-drop it -- the owner is
 /// refcounted by hand (`make_shared_substr` takes one reference, `str_drop`
 /// releases it). For non-`shared` strings the words hold a singleton sentinel,
 /// so reconstructing and releasing them is always a no-op.
@@ -107,15 +107,15 @@ pub fn alloc_bytes(len: usize) []u8 {
     return gc.recycleAllocSlice(u8, len);
 }
 
-/// Release a string-data buffer through the destroyer worker — a batched,
-/// off-thread `GC_free` — rather than a synchronous `GC_free` that would take
+/// Release a string-data buffer through the destroyer worker -- a batched,
+/// off-thread `GC_free` -- rather than a synchronous `GC_free` that would take
 /// the global alloc lock on the calling thread.
 pub fn free_bytes(ptr: [*]u8) void {
     gc.free(@ptrCast(ptr));
 }
 
 /// Copy `bytes` into a fresh buffer and wrap it as an owned immutable string.
-/// An empty input needs no allocation — return a borrowed empty literal.
+/// An empty input needs no allocation -- return a borrowed empty literal.
 pub fn make_str_copy(bytes: []const u8) FatPtr {
     if (bytes.len == 0) return make_str("".ptr, 0);
     const buf = alloc_bytes(bytes.len);
@@ -168,7 +168,7 @@ fn codepoint_byte_offset(data: []const u8, cp: u64) usize {
     return data.len;
 }
 
-/// `+(other: read Stringable): Str` — coerce `other` via `.str`, then build a
+/// `+(other: read Stringable): Str` -- coerce `other` via `.str`, then build a
 /// fresh owned immutable string. Always immutable, even on a mutable receiver.
 pub fn str_concat(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
@@ -213,7 +213,7 @@ pub fn str_starts_with(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
     return bool_intrinsics.to_bool(a.len >= b.len and std.mem.eql(u8, a[0..b.len], b));
 }
 
-/// `.substring(start, end)` — codepoint-indexed. Immutable receivers yield a
+/// `.substring(start, end)` -- codepoint-indexed. Immutable receivers yield a
 /// zero-copy shared slice that keeps the receiver alive; see `slice_of`.
 pub fn str_substring(self: FatPtr, start_fp: FatPtr, end_fp: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
@@ -242,7 +242,7 @@ pub fn str_char_at(self: FatPtr, index_fp: FatPtr) callconv(.c) FatPtr {
     return str_substring(self, index_fp, nat_intrinsics.make(index + 1));
 }
 
-/// `.normalise` — NFC. Reuses the input when already normalised.
+/// `.normalise` -- NFC. Reuses the input when already normalised.
 pub fn str_normalise(self: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     const native = @import("root").native;
@@ -259,12 +259,12 @@ pub fn str_normalise(self: FatPtr) callconv(.c) FatPtr {
     return make_str_copy(data);
 }
 
-/// `.utf8` — a `List[Byte]` of the raw UTF-8 bytes.
+/// `.utf8` -- a `List[Byte]` of the raw UTF-8 bytes.
 ///
 /// Building a `List` forces `list.zig`'s `VT_List`, whose default-body
 /// trampolines reference generated `pkg_base` List symbols. A minimal base that
 /// never pulls in `List` lacks those symbols, so this method is comptime-elided
-/// there (it is unreachable in such a build — nothing can produce a `List`).
+/// there (it is unreachable in such a build -- nothing can produce a `List`).
 pub fn str_utf8(self: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(pb, "List_1__Zdotiter_0_mut_Zfun")) {
         defer self.rc_decrement();
@@ -276,18 +276,18 @@ pub fn str_utf8(self: FatPtr) callconv(.c) FatPtr {
     unreachable;
 }
 
-/// `.hash(hasher)` — feed this string into the hasher, return the hasher.
+/// `.hash(hasher)` -- feed this string into the hasher, return the hasher.
 pub fn str_hash(self: FatPtr, hasher: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     return objs.call(hasher, comptime h("mut .str/1"), .{self.share()}, @src());
 }
 
-/// `.float` — parse as `f64` via the native runtime, returning a base
+/// `.float` -- parse as `f64` via the native runtime, returning a base
 /// `Action[Float]` (ok / info). Eager parse: pure, so observably identical to a
 /// lazy one.
 ///
 /// The result wraps base `Action`/`Info`/`Float` types; a minimal base lacking
-/// them (e.g. an imm program that never parses a float) comptime-elides this —
+/// them (e.g. an imm program that never parses a float) comptime-elides this --
 /// nothing there can produce the `Action[Float]` this returns.
 pub fn str_float(self: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(pb, "VT_Actions_0")) {
@@ -317,7 +317,7 @@ fn float_make(v: f64) FatPtr {
     return @import("../float.zig").make(v);
 }
 
-/// `.codepoints` / `.graphemes` — a `Flow[Str]` over the string's units. The
+/// `.codepoints` / `.graphemes` -- a `Flow[Str]` over the string's units. The
 /// receiver is the flow's source owner (keeps the shared buffer alive).
 ///
 /// These return a `Flow`, which lives in `base.flows`; building one forces the
