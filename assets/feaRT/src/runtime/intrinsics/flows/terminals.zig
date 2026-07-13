@@ -19,11 +19,24 @@ const pb = root.pkg_base;
 const types = @import("types.zig");
 const object = @import("object.zig");
 const exec = @import("exec.zig");
+const engine = @import("pipeline/engine.zig");
 
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
 
 const ArrayList = std.ArrayList(FatPtr);
+
+// Every terminal funnels through here: chains with a serial-work op (actor /
+// scan / ctx ops) run on the staged-fiber pipeline engine; everything else
+// keeps the sequential chunk walk (data parallelism enters higher up, via the
+// driver's splitMatch, which never splits stateful chains).
+fn drive(flow: *types.FeartFlow, ctx: *anyopaque, accept: exec.AcceptFn) void {
+    if (engine.shouldPipeline(flow)) {
+        engine.run(flow, ctx, accept);
+    } else {
+        exec.run_chunk(flow, ctx, accept);
+    }
+}
 
 // fold --------------------------------------------------------------
 const FoldCtx = struct { acc: FatPtr, combine: FatPtr };
@@ -36,7 +49,7 @@ fn fold_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
 }
 pub fn drive_fold(flow: *types.FeartFlow, initial: FatPtr, combine: FatPtr) FatPtr {
     var ctx = FoldCtx{ .acc = initial, .combine = combine };
-    exec.run_chunk(flow, @ptrCast(&ctx), &fold_accept);
+    drive(flow, @ptrCast(&ctx), &fold_accept);
     return ctx.acc;
 }
 
@@ -55,12 +68,12 @@ fn last_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
 }
 pub fn drive_first(flow: *types.FeartFlow) FatPtr {
     var ctx = OneCtx{ .value = null };
-    exec.run_chunk(flow, @ptrCast(&ctx), &first_accept);
+    drive(flow, @ptrCast(&ctx), &first_accept);
     return if (ctx.value) |v| object.make_some(v) else object.make_none();
 }
 pub fn drive_last(flow: *types.FeartFlow) FatPtr {
     var ctx = OneCtx{ .value = null };
-    exec.run_chunk(flow, @ptrCast(&ctx), &last_accept);
+    drive(flow, @ptrCast(&ctx), &last_accept);
     return if (ctx.value) |v| object.make_some(v) else object.make_none();
 }
 
@@ -74,7 +87,7 @@ fn count_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
 }
 pub fn drive_count(flow: *types.FeartFlow) FatPtr {
     var ctx = CountCtx{ .n = 0 };
-    exec.run_chunk(flow, @ptrCast(&ctx), &count_accept);
+    drive(flow, @ptrCast(&ctx), &count_accept);
     return nat_rt.make(ctx.n);
 }
 
@@ -88,7 +101,7 @@ fn list_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
 pub fn drive_list(flow: *types.FeartFlow) FatPtr {
     const storage = list_rt.make_storage(0);
     var ctx = ListCtx{ .al = &storage.al };
-    exec.run_chunk(flow, @ptrCast(&ctx), &list_accept);
+    drive(flow, @ptrCast(&ctx), &list_accept);
     return list_rt.wrap_list_storage(storage);
 }
 
@@ -102,7 +115,7 @@ fn for_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
 }
 pub fn drive_for(flow: *types.FeartFlow, callback: FatPtr) FatPtr {
     var ctx = ForCtx{ .callback = callback };
-    exec.run_chunk(flow, @ptrCast(&ctx), &for_accept);
+    drive(flow, @ptrCast(&ctx), &for_accept);
     return object.make_void();
 }
 
@@ -123,7 +136,7 @@ fn find_map_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
 }
 pub fn drive_find_map(flow: *types.FeartFlow, mapper: FatPtr) FatPtr {
     var ctx = FindCtx{ .predicate = mapper, .found = null };
-    exec.run_chunk(flow, @ptrCast(&ctx), &find_map_accept);
+    drive(flow, @ptrCast(&ctx), &find_map_accept);
     return if (ctx.found) |v| object.make_some(v) else object.make_none();
 }
 
@@ -145,6 +158,6 @@ fn unordered_find_map_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
 }
 pub fn drive_unordered_find_map(flow: *types.FeartFlow, mapper: FatPtr) FatPtr {
     var ctx = FindCtx{ .predicate = mapper, .found = null };
-    exec.run_chunk(flow, @ptrCast(&ctx), &unordered_find_map_accept);
+    drive(flow, @ptrCast(&ctx), &unordered_find_map_accept);
     return if (ctx.found) |v| object.make_some(v) else object.make_none();
 }

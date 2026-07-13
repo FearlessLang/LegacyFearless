@@ -49,7 +49,7 @@ pub fn run_chunk(flow: *types.FeartFlow, ctx: *anyopaque, accept: AcceptFn) void
 }
 
 // Walk `ops` applying each to the element; if we run out of ops, invoke accept.
-fn process_element(
+pub fn process_element(
     ops: []types.OpDesc,
     init_elem: FatPtr,
     ctx: *anyopaque,
