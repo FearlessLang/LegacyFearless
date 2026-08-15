@@ -1,0 +1,36 @@
+package bench
+
+/// Escape-time Mandelbrot, summing every pixel's iteration count. Pixel cost
+/// ranges from one iteration to `maxIter`, so no static granularity is right
+/// for the whole grid. The split runs over the flat index range `[0, w*h)`
+/// rather than over rows, so the leaf is one pixel.
+Mandelbrot: {
+  .w: Nat -> 2048,
+  .h: Nat -> 2048,
+  .maxIter: Nat -> 256,
+
+  /// Iterations until `|z|^2` exceeds 4, capped at `maxIter`.
+  .escape(cr: Float, ci: Float, zr: Float, zi: Float, i: Nat): Nat -> Block#
+    .if {i >= (this.maxIter)} .return {this.maxIter}
+    .let[Float] zr2 = {zr * zr}
+    .let[Float] zi2 = {zi * zi}
+    .if {(zr2 + zi2) > 4.0} .return {i}
+    .return {this.escape(cr, ci, ((zr2 - zi2) + cr), (((2.0 * zr) * zi) + ci), i + 1)},
+
+  /// Window: real `[-2.5, 1.0)`, imaginary `[-1.0, 1.0)`. Written as
+  /// subtractions because there is no unary minus.
+  .leaf(idx: Nat): Nat -> Block#
+    .let[Nat] px = {idx % (this.w)}
+    .let[Nat] py = {idx / (this.w)}
+    .let[Float] cr = {((px.float * 3.5) / (this.w.float)) - 2.5}
+    .let[Float] ci = {((py.float * 2.0) / (this.h.float)) - 1.0}
+    .return {this.escape(cr, ci, 0.0, 0.0, 0)},
+
+  /// Two MCalls over `imm` data: VPF-eligible. See `mapLight`.
+  .solve(lo: Nat, hi: Nat): Nat -> Block#
+    .if {(hi - lo) <= 1} .return {this.leaf(lo)}
+    .let[Nat] mid = {lo + ((hi - lo) / 2)}
+    .return {this.solve(lo, mid) + (this.solve(mid, hi))},
+  }
+
+Test: Main {sys -> sys.io.println(Mandelbrot.solve(0, Mandelbrot.w * (Mandelbrot.h)).str)}

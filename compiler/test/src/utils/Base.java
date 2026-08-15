@@ -66,6 +66,7 @@ public interface Base {
     alias base.caps.FEnv as FEnv,
     alias base.caps.FRandomSeed as FRandomSeed,
     alias base.caps.RandomSeed as RandomSeed,
+    alias base.caps.Clock as Clock,
     alias base.caps.CapTrys as CapTrys,
     alias base.caps.CapTry as CapTry,
     

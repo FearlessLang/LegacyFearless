@@ -4,6 +4,7 @@ System: ToIso[System]{
   mut .io: mut IO,
   mut .rng: mut RandomSeed,
   mut .try: mut CapTry,
+  mut .clock: mut Clock,
   }
 _System: Sealed,System{
   .iso -> iso _System,
@@ -11,4 +12,5 @@ _System: Sealed,System{
   .io -> Magic!this,
   .rng -> Magic!this,
   .try -> Magic!this,
+  .clock -> Magic!this,
   }

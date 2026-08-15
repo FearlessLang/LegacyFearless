@@ -1,0 +1,20 @@
+package bench
+
+/// Divide and conquer over `[0, n)`, trivial work per element. The leaf is one
+/// element, so `feart / feart-novpf` here is almost purely the cost of the
+/// parallelism machinery. The adversarial case.
+MapLight: {
+  .n: Nat -> 400000000,
+
+  .leaf(i: Nat): Nat -> (i * 2) + 1,
+
+  /// Receiver and argument are both MCalls over `imm` data: that is what makes
+  /// the combining call VPF-eligible. Binding the halves with `.let` first
+  /// would make them bindings, not MCalls, and silently disable parallelism.
+  .solve(lo: Nat, hi: Nat): Nat -> Block#
+    .if {(hi - lo) <= 1} .return {this.leaf(lo)}
+    .let[Nat] mid = {lo + ((hi - lo) / 2)}
+    .return {this.solve(lo, mid) + (this.solve(mid, hi))},
+  }
+
+Test: Main {sys -> sys.io.println(MapLight.solve(0, MapLight.n).str)}

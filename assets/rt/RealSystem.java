@@ -12,4 +12,7 @@ public final class RealSystem implements base.caps._System_0 {
   @Override public base.caps.RandomSeed_0 rng$mut() {
     return rt.Random.SeedGenerator.$self;
   }
+  @Override public rt.Clock clock$mut() {
+    return rt.Clock.$self;
+  }
 }

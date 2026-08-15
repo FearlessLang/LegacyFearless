@@ -1,0 +1,6 @@
+package base.caps
+
+/// A monotonic clock. Only differences between two readings are meaningful.
+Clock: ToIso[Clock]{
+  mut .monotonic: Nat,
+  }

@@ -1,0 +1,57 @@
+package bench
+
+/// Scan state: needle characters matched so far, whether this line has already
+/// matched, and how many lines have matched in total.
+GrepState: {
+  .matched: Nat,
+  .hit: Bool,
+  .count: Nat,
+  }
+
+Grep: {
+  .needleSize: Nat -> 6,
+
+  /// The needle one codepoint at a time. Spelled out rather than `.charAt` on
+  /// a literal, which would allocate a `Str` per character of the corpus and
+  /// turn this into a measurement of string allocation.
+  .needleAt(i: Nat): Str -> Block#
+    .if {i == 0} .return {"n"}
+    .if {i == 1} .return {"e"}
+    .if {i == 2} .return {"e"}
+    .if {i == 3} .return {"d"}
+    .if {i == 4} .return {"l"}
+    .return {"e"},
+
+  #(m: Nat, h: Bool, c: Nat): GrepState -> {
+    .matched -> m,
+    .hit -> h,
+    .count -> c,
+    },
+
+  .zero: GrepState -> Grep#(0, False, 0),
+
+  /// Every proper prefix of "needle" has an empty border, so on a mismatch the
+  /// automaton can restart at zero and only re-test the current character
+  /// against the needle's first. Exact, for this literal.
+  .advance(matched: Nat, c: Str): Nat -> Block#
+    .if {c == (Grep.needleAt(matched))} .return {matched + 1}
+    .if {c == (Grep.needleAt(0))} .return {1}
+    .return {0},
+
+  /// Named rather than inline at the fold: three-parameter lambdas in argument
+  /// position do not always infer.
+  .step: read F[GrepState, Str, GrepState] -> {s, c -> Block#
+    .if {c == "\n"} .return {Grep#(0, False, s.hit.if{.then -> s.count + 1, .else -> s.count})}
+    .let[Nat] next = {Grep.advance(s.matched, c)}
+    .if {next == (Grep.needleSize)} .return {Grep#(0, True, s.count)}
+    .return {Grep#(next, s.hit, s.count)}
+    },
+  }
+
+/// Counts corpus lines containing "needle". A literal rather than a regex, so
+/// what is measured is scanning.
+Test: Main {sys -> Block#
+  .let[Str] text = {sys.io.accessR(List#[Str]("corpus", "corpus.txt")).readStr!}
+  .let[GrepState] res = {text.codepoints.fold[GrepState]({Grep.zero}, Grep.step)}
+  .return {sys.io.println(res.count.str)}
+  }
