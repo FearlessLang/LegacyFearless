@@ -105,7 +105,7 @@ pub const VT_MutStr: objs.VTable = .{
         h("imm .float/0"),     h("read .hash/1"),     h("imm .join/1"),
         // Mutable surface + snapshot .str
         h("read .str/0"),      h("mut .append/1"),    h("mut +/1"),
-        h("mut .clear/0"),
+        h("mut .clear/0"),     h("imm .assertEq/1"), h("imm .assertEq/2"),
     },
     .methods = &.{
         @ptrCast(&str.str_concat),     @ptrCast(&str.str_eq),         @ptrCast(&str.str_neq),
@@ -114,7 +114,7 @@ pub const VT_MutStr: objs.VTable = .{
         @ptrCast(&str.str_codepoints), @ptrCast(&str.str_graphemes),  @ptrCast(&str.str_utf8),
         @ptrCast(&str.str_float),      @ptrCast(&str.str_hash),       @ptrCast(&str.str_join),
         @ptrCast(&mut_str_str),        @ptrCast(&mut_str_append),     @ptrCast(&mut_str_plus),
-        @ptrCast(&mut_str_clear),
+        @ptrCast(&mut_str_clear),      @ptrCast(&str.str_assert_eq),  @ptrCast(&str.str_assert_eq_msg),
     },
     .method_names = &.{
         "imm +/1",          "imm ==/1",         "imm !=/1",
@@ -123,7 +123,7 @@ pub const VT_MutStr: objs.VTable = .{
         "imm .codepoints/0", "imm .graphemes/0", "imm .utf8/0",
         "imm .float/0",     "read .hash/1",     "imm .join/1",
         "read .str/0",      "mut .append/1",    "mut +/1",
-        "mut .clear/0",
+        "mut .clear/0",     "imm .assertEq/1", "imm .assertEq/2",
     },
     .drop_fn = mut_str_drop,
 };

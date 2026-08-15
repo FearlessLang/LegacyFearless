@@ -156,4 +156,110 @@ public class TestZigNumbers {
     package test
     Test:Main{ sys -> sys.io.println(200 .byte > (100 .byte) ? { .then -> "yes", .else -> "no" }) }
     """, Base.mutBaseAliases);}
+
+  // === Integer square root (Newton's method, exact floor) ===
+  @Test void intSqrt() { okBase(new Res("3", "", 0), """
+    package test
+    Test:Main{ sys -> sys.io.println(+9 .sqrt .str) }
+    """, Base.mutBaseAliases);}
+
+  @Test void intSqrtNonSquare() { okBase(new Res("3", "", 0), """
+    package test
+    Test:Main{ sys -> sys.io.println(+15 .sqrt .str) }
+    """, Base.mutBaseAliases);}
+
+  @Test void natSqrt() { okBase(new Res("12", "", 0), """
+    package test
+    Test:Main{ sys -> sys.io.println(144 .sqrt .str) }
+    """, Base.mutBaseAliases);}
+
+  /// The floating-point seed is inexact this high up, so this only passes if
+  /// the Newton refinement and the final upward correction both run.
+  @Test void natSqrtLarge() { okBase(new Res("4294967295", "", 0), """
+    package test
+    Test:Main{ sys -> sys.io.println(18446744065119617025 .sqrt .str) }
+    """, Base.mutBaseAliases);}
+
+  // === Int bitwise (signed: >> keeps the sign bit) ===
+  @Test void intShiftLeft() { okBase(new Res("8", "", 0), """
+    package test
+    Test:Main{ sys -> sys.io.println((+1 .shiftLeft (+3)).str) }
+    """, Base.mutBaseAliases);}
+
+  @Test void intShiftRightArithmetic() { okBase(new Res("-4", "", 0), """
+    package test
+    Test:Main{ sys -> sys.io.println((-8 .shiftRight (+1)).str) }
+    """, Base.mutBaseAliases);}
+
+  @Test void intXor() { okBase(new Res("6", "", 0), """
+    package test
+    Test:Main{ sys -> sys.io.println((+12 .xor (+10)).str) }
+    """, Base.mutBaseAliases);}
+
+  @Test void intBitwiseAnd() { okBase(new Res("8", "", 0), """
+    package test
+    Test:Main{ sys -> sys.io.println((+12 .bitwiseAnd (+10)).str) }
+    """, Base.mutBaseAliases);}
+
+  @Test void intBitwiseOr() { okBase(new Res("14", "", 0), """
+    package test
+    Test:Main{ sys -> sys.io.println((+12 .bitwiseOr (+10)).str) }
+    """, Base.mutBaseAliases);}
+
+  // === Nat.offset ===
+  @Test void natOffsetPositive() { okBase(new Res("15", "", 0), """
+    package test
+    Test:Main{ sys -> sys.io.println((10 .offset (+5)).str) }
+    """, Base.mutBaseAliases);}
+
+  @Test void natOffsetNegative() { okBase(new Res("5", "", 0), """
+    package test
+    Test:Main{ sys -> sys.io.println((10 .offset (-5)).str) }
+    """, Base.mutBaseAliases);}
+
+  // === .assertEq, lowered to the pure-Fearless assertion helpers ===
+  @Test void intAssertEq() { okBase(new Res("ok", "", 0), """
+    package test
+    Test:Main{ sys -> Block#
+      .do{ +1 .assertEq (+1) }
+      .return{ sys.io.println("ok") }
+      }
+    """, Base.mutBaseAliases);}
+
+  @Test void natAssertEq() { okBase(new Res("ok", "", 0), """
+    package test
+    Test:Main{ sys -> Block#
+      .do{ 1 .assertEq 1 }
+      .return{ sys.io.println("ok") }
+      }
+    """, Base.mutBaseAliases);}
+
+  @Test void byteAssertEq() { okBase(new Res("ok", "", 0), """
+    package test
+    Test:Main{ sys -> Block#
+      .do{ 1 .byte .assertEq (1 .byte) }
+      .return{ sys.io.println("ok") }
+      }
+    """, Base.mutBaseAliases);}
+
+  @Test void floatAssertEq() { okBase(new Res("ok", "", 0), """
+    package test
+    Test:Main{ sys -> Block#
+      .do{ 1.5 .assertEq 1.5 }
+      .return{ sys.io.println("ok") }
+      }
+    """, Base.mutBaseAliases);}
+
+  /// A mismatch must reach the helper's formatting, not pass silently.
+  @Test void natAssertEqFails() { okBase(
+    new Res("", "Program crashed with: Expected: 1[###]Actual: 2[###]", 1), """
+    package test
+    Test:Main{ sys -> 1 .assertEq 2 }
+    """, Base.mutBaseAliases);}
+
+  @Test void natAssertEqFailsWithMessage() { okBase(
+    new Res("", "Program crashed with: nope[###]Expected: 1[###]Actual: 2[###]", 1), """
+    package test
+    Test:Main{ sys -> 1 .assertEq(2, "nope") }
+    """, Base.mutBaseAliases);}
 }

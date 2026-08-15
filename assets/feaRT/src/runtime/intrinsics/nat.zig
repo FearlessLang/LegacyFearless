@@ -6,7 +6,7 @@ const FatPtr = objs.FatPtr;
 const FearlessValue = objs.FearlessValue;
 
 pub const VT_Nat: objs.VTable = .{
-	.type_name = "Nat",
+	.type_name = "base.Nat/0",
 	.hashes = &.{},
 	.methods = &.{},
 	.method_names = &.{},
@@ -67,6 +67,33 @@ pub inline fn pow(a: FatPtr, exp: FatPtr) FatPtr {
 
 pub inline fn abs(a: FatPtr) FatPtr {
 	return a; // Nat is always non-negative
+}
+
+/// Integer square root, matching `rt.Numbers.natSqrt`: an unsigned
+/// floating-point seed refined by Newton's method, then corrected upwards once
+/// so the result is the exact floor across the whole u64 range.
+pub inline fn sqrt(a: FatPtr) FatPtr {
+	const u = deref(a);
+	if (u <= 1) return make(u);
+	var r: u64 = @intFromFloat(@sqrt(@as(f64, @floatFromInt(u))));
+	while (true) {
+		const q = u / r;
+		const nr = (r +% q) >> 1;
+		if (nr >= r) break;
+		r = nr;
+	}
+	const rp1 = r + 1;
+	if (u / rp1 >= rp1) r = rp1;
+	return make(r);
+}
+
+pub inline fn offset(a: FatPtr, delta: FatPtr) FatPtr {
+	const int_intrinsics = @import("int.zig");
+	return make(deref(a) +% @as(u64, @bitCast(int_intrinsics.deref(delta))));
+}
+
+pub fn hash(a: FatPtr, hasher: FatPtr) FatPtr {
+	return objs.call(hasher, comptime objs.hash_signature("mut .int/1"), .{to_int(a)}, @src());
 }
 
 // Comparisons (unsigned)
@@ -146,6 +173,7 @@ pub inline fn bitwise_or(a: FatPtr, b: FatPtr) FatPtr {
 // only the matching branch survives in the emitted code.
 // The runtime cost is just the vt pointer comparison (~1 cycle).
 const h = objs.hash_signature;
+const num_assert = @import("num_assert.zig");
 pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr {
 	return switch (target_method) {
 		h("imm +/1") => add(self, args[0]),
@@ -155,6 +183,7 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
 		h("imm %/1") => mod(self, args[0]),
 		h("imm **/1") => pow(self, args[0]),
 		h("imm .abs/0") => abs(self),
+		h("imm .sqrt/0") => sqrt(self),
 		h("imm >/1") => gt(self, args[0]),
 		h("imm </1") => lt(self, args[0]),
 		h("imm >=/1") => gte(self, args[0]),
@@ -171,6 +200,10 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
 		h("imm .xor/1") => bitwise_xor(self, args[0]),
 		h("imm .bitwiseAnd/1") => bitwise_and(self, args[0]),
 		h("imm .bitwiseOr/1") => bitwise_or(self, args[0]),
-		else => unreachable,
+		h("imm .offset/1") => offset(self, args[0]),
+		h("read .hash/1") => hash(self, args[0]),
+		h("imm .assertEq/1") => num_assert.assert_eq("_NatAssertionHelper_0", self, args[0]),
+		h("imm .assertEq/2") => num_assert.assert_eq_msg("_NatAssertionHelper_0", self, args[0], args[1]),
+		else => objs.primitive_dispatch_failed(VT_Nat.type_name, target_method),
 	};
 }

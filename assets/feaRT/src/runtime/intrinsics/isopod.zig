@@ -125,13 +125,29 @@ const VT_TestVoid: objs.VTable = .{
     .storage_mode = .singleton,
 };
 
+/// Invoke a code-generated method for one of the Mearless functions implementing
+/// one of the IsoPod methods.
+fn fearlessBody(comptime name: []const u8, args: anytype) FatPtr {
+    if (comptime @hasDecl(root, "pkg_base")) {
+        if (comptime @hasDecl(root.pkg_base, name)) {
+            return @call(.auto, @field(root.pkg_base, name), args);
+        }
+    }
+    @panic("This base has no Fearless body for the requested IsoPod method");
+}
+
 pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr {
     return switch (target_method) {
         h("read .isAlive/0") => is_alive(self),
         h("read .peek/1") => peek(self, args[0]),
         h("mut !/0") => consume(self),
         h("mut .next/1") => next(self, args[0]),
-        else => unreachable,
+        h("read .look/1") => fearlessBody("IsoPod_1__Zdotlook_1_read_Zfun", .{ args[0], self }),
+        h("read .isDead/0") => fearlessBody("IsoPod_1__ZdotisDead_0_read_Zfun", .{self}),
+        h("mut .consume/1") => fearlessBody("IsoPod_1__Zdotconsume_1_mut_Zfun", .{ args[0], self }),
+        h("mut :=/1") => fearlessBody("IsoPod_1__Zcolon_Zeq_1_mut_Zfun", .{ args[0], self }),
+        h("mut .mutate/1") => fearlessBody("IsoPod_1__Zdotmutate_1_mut_Zfun", .{ args[0], self }),
+        else => objs.primitive_dispatch_failed(VT_IsoPod.type_name, target_method),
     };
 }
 

@@ -183,7 +183,7 @@ fn opt_extractor_none(self: FatPtr) callconv(.c) FatPtr {
 }
 
 const VT_OptExtractor: objs.VTable = .{
-    .type_name = "_ListOptExtractor",
+    .type_name = "<runtime list opt extractor>",
     .hashes = &.{
         h("imm .some/1"),
         h("imm .none/0"),

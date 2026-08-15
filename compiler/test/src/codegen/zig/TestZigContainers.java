@@ -93,6 +93,46 @@ public class TestZigContainers {
     MutThingy:{ mut .n: mut Count[Int] }
     MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { n }  }
     """, Base.mutBaseAliases); }
+  /// `.look` wraps `.peek` in an `Action`, so it is only reachable if the
+  /// Fearless-bodied slot is registered.
+  @Test void isoPodLook() { okBase(new Res("", "", 0), """
+    package test
+    Test:Main{ _ -> Block#
+      .let[mut IsoPod[MutThingy]] a = { IsoPod#[MutThingy](MutThingy'#(Count.int(+3))) }
+      .return{ Assert!(a.look[Int]{ m -> m.rn*.int }! == +3) }
+      }
+    MutThingy:{ mut .n: mut Count[Int], read .rn: read Count[Int] }
+    MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { .n -> n, .rn -> n } }
+    """, Base.mutBaseAliases); }
+
+  /// `.isDead` is `this.isAlive.not`, and only flips once the pod is consumed.
+  @Test void isoPodIsDead() { okBase(new Res("alive/dead", "", 0), """
+    package test
+    Test:Main{ sys -> Block#
+      .let[mut IsoPod[MutThingy]] a = { IsoPod#[MutThingy](MutThingy'#(Count.int(+0))) }
+      .let[Str] before = { a.isDead ? { .then -> "dead", .else -> "alive" } }
+      .let[Int] taken = { Usage#(a!) }
+      .let[Str] after = { a.isDead ? { .then -> "dead", .else -> "alive" } }
+      .return{ sys.io.println(before + "/" + after) }
+      }
+    Usage:{ #(m: iso MutThingy): Int -> (m.n*) }
+    MutThingy:{ mut .n: mut Count[Int] }
+    MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { n }  }
+    """, Base.mutBaseAliases); }
+
+  /// `:=` is the operator spelling of `.next`.
+  @Test void isoPodAssign() { okBase(new Res("", "", 0), """
+    package test
+    Test:Main{ _ -> Block#
+      .let[mut IsoPod[MutThingy]] a = { IsoPod#[MutThingy](MutThingy'#(Count.int(+0))) }
+      .do{ a := (MutThingy'#(Count.int(+9))) }
+      .return{ Assert!(Usage#(a!) == +9) }
+      }
+    Usage:{ #(m: iso MutThingy): Int -> (m.n*) }
+    MutThingy:{ mut .n: mut Count[Int] }
+    MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { n }  }
+    """, Base.mutBaseAliases); }
+
   @Test void isoPodNoImmFromPeekOk() { okBase(new Res("", "", 0), """
     package test
     Test:Main{ _ -> Block#

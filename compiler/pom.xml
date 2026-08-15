@@ -96,6 +96,7 @@
                     <forkCount>1C</forkCount>
                     <reuseForks>true</reuseForks>
                     <testFailureIgnore>false</testFailureIgnore>
+                    <argLine>-Dsurefire.forkNumber=${surefire.forkNumber}</argLine>
                 </configuration>
             </plugin>
             <plugin>

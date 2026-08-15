@@ -8,21 +8,36 @@ const str = @import("str.zig");
 const FatPtr = objs.FatPtr;
 
 /// Convert an Int/Nat (i64/u64) to a decimal string. Allocates via GC.
+///
+/// Nat is unsigned, Int is signed: a negative Int gets a `-` and the magnitude of
+/// its value. The magnitude is taken in u64 so that `minInt(i64)`, whose absolute
+/// value does not fit back into an i64, still comes out right.
 pub fn int_to_str(n: FatPtr) FatPtr {
-    const uval: u64 = if (n.vt == &nat_intrinsics.VT_Nat) nat_intrinsics.deref(n) else @bitCast(int_intrinsics.deref(n));
-    var buf: [20]u8 = undefined; // max u64 decimal digits
-    var len: usize = 0;
+    var negative = false;
+    var uval: u64 = undefined;
+    if (n.vt == &nat_intrinsics.VT_Nat) {
+        uval = nat_intrinsics.deref(n);
+    } else {
+        const ival = int_intrinsics.deref(n);
+        negative = ival < 0;
+        const bits: u64 = @bitCast(ival);
+        uval = if (negative) ~bits +% 1 else bits;
+    }
+    var buf: [20]u8 = undefined; // "-" + the 19 digits of minInt(i64), or 20 u64 digits
+    const start: usize = if (negative) 1 else 0;
+    if (negative) buf[0] = '-';
+    var len = start;
     if (uval == 0) {
-        buf[0] = '0';
-        len = 1;
+        buf[len] = '0';
+        len += 1;
     } else {
         var tmp = uval;
         while (tmp > 0) : (len += 1) {
             buf[len] = @intCast('0' + (tmp % 10));
             tmp /= 10;
         }
-        var i: usize = 0;
-        var j: usize = len - 1;
+        var i = start;
+        var j = len - 1;
         while (i < j) {
             const t = buf[i];
             buf[i] = buf[j];

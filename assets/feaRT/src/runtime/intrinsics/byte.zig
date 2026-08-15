@@ -156,6 +156,10 @@ pub fn to_byte(a: FatPtr) FatPtr {
     return a; // Identity
 }
 
+pub fn hash(a: FatPtr, hasher: FatPtr) FatPtr {
+    return objs.call(hasher, comptime objs.hash_signature("mut .byte/1"), .{a}, @src());
+}
+
 pub fn to_str(a: FatPtr) FatPtr {
     const str_intrinsics = @import("strings/index.zig");
     const nat_intrinsics = @import("nat.zig");
@@ -164,6 +168,7 @@ pub fn to_str(a: FatPtr) FatPtr {
 
 // Compile-time-resolved intrinsic dispatch for Byte.
 const h = objs.hash_signature;
+const num_assert = @import("num_assert.zig");
 pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr {
     return switch (target_method) {
         h("imm +/1") => add(self, args[0]),
@@ -191,6 +196,9 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
         h("read .nat/0") => to_nat(self),
         h("read .float/0") => to_float(self),
         h("read .byte/0") => self,
-        else => unreachable,
+        h("read .hash/1") => hash(self, args[0]),
+        h("imm .assertEq/1") => num_assert.assert_eq("_ByteAssertionHelper_0", self, args[0]),
+        h("imm .assertEq/2") => num_assert.assert_eq_msg("_ByteAssertionHelper_0", self, args[0], args[1]),
+        else => objs.primitive_dispatch_failed(VT_Byte.type_name, target_method),
     };
 }

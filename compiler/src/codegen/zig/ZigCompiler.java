@@ -10,10 +10,14 @@ import utils.OsCache;
 import utils.ResolveResource;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, ZigBuildOpts opts) {
   static final int ZIG_CACHE_VERSION = 1;
@@ -24,34 +28,37 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
 
   private Path cacheBaseDir() { return io.cachedBase().resolve("zig-cache"); }
   public Path versionedCacheDir() { return cacheBaseDir().resolve("v" + ZIG_CACHE_VERSION); }
-  /// Zig's content-addressed build cache (the `--cache-dir`). For real builds it
-  /// lives in the app's own output dir, so it shares the app's lifecycle: the
-  /// runtime + libgc are compiled once per app and reused on rebuild, and the
-  /// whole cache is reclaimed when the app's out/ is removed, rather than
-  /// accumulating without bound in a machine-global directory.
-  ///
-  /// The test harness is the exception: it compiles each program into a throwaway
-  /// per-test output dir, so a per-output cache would recompile libgc + the
-  /// runtime for every test. Tests therefore share one warm cache under target/
-  /// (not under target/classes, which is packed into the jar; not in the per-user
-  /// cache, which is the directory this whole change exists to keep lean).
+  /// Zig's content-addressed build cache (`--cache-dir`). Note that when building
+  /// for a test, we compile into a throwaway output dir per test, so they share one warm cache under target/ instead.
   private Path zigCacheDir() {
     if (opts.fastTestBuild()) { return targetDir().resolve("fearless-zig-cache/local"); }
     return io.output().resolve("zig-cache/local");
   }
-  // The global cache (build runner + fetched dependency packages) is genuinely
-  // machine-global, tiny and stable, so it stays shared in the per-user cache.
+  /// The build runner and fetched dependency packages: machine-global
   private Path zigGlobalCacheDir() { return OsCache.root().resolve("zig-cache/global"); }
-  /// The Maven/IDE build output dir (target). In the test harness, where this is
-  /// used, resources resolve to target/classes, whose parent is target.
+  /// Only meaningful under {@link ZigBuildOpts#fastTestBuild()}, the sole caller:
+  /// tests run out of target/classes, so the resource root's parent is target.
   private static Path targetDir() { return ResolveResource.artefact("/").getParent(); }
-  // Per-compile build tree + output, under io.output() like the Java backend's
-  // generated classes: the program source and binary differ per compile, so they
-  // must not share a fixed path across concurrent test forks.
-  private Path workDir() { return io.output().resolve("zig-build"); }
+  /// The zig build tree: `build.zig`, the runtime source copy, the generated
+  /// program, and `zig-out`. Zig's build cache keys on the absolute paths of the
+  /// build root and its sources, so a work dir that moves between compiles
+  /// defeats the cache entirely. Tests get one fork-stable dir under target/, so
+  /// concurrent forks stay off each other's tree without moving the path.
+  private Path workDir() {
+    if (opts.fastTestBuild()) { return targetDir().resolve("fearless-zig-work/fork-" + forkId()); }
+    return io.output().resolve("zig-build");
+  }
+  /// Identifies the surefire fork this JVM is, from the `surefire.forkNumber`
+  /// the pom interpolates into argLine. A plain `java` or IDE run falls back to
+  /// the pid, losing only cross-run cache reuse.
+  private static String forkId() {
+    var fork = System.getProperty("surefire.forkNumber");
+    if (fork != null && !fork.isBlank() && !fork.contains("$")) { return fork; }
+    return "pid" + ProcessHandle.current().pid();
+  }
   private Path zigOutDir(Path workDir) { return workDir.resolve("zig-out"); }
 
-  /** Load cached .zig content for base packages. Returns pkgName→zigContent for cache hits. */
+  /// Load cached .zig content for base packages. Returns pkgName→zigContent for cache hits.
   public Map<String, String> loadCachedPackages(MIR.Program program) {
     var dir = versionedCacheDir();
     if (!Files.isDirectory(dir)) { return Map.of(); }
@@ -69,10 +76,10 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     }
     return cached;
   }
-  /// The FeaRT runtime source tree. Normally the copy bundled with the compiler
-  /// (assets/feaRT, i.e. /feaRT inside the jar); FEART_ROOT overrides it so the
-  /// runtime can be developed against a checkout without rebuilding the compiler.
-  private static Path feartRoot() {
+  /// The FeaRT runtime source tree: the copy bundled with the compiler, or
+  /// `FEART_ROOT` so the runtime can be developed against a checkout without
+  /// rebuilding the compiler.
+  static Path feartRoot() {
     var envPath = System.getenv("FEART_ROOT");
     if (envPath != null) { return Path.of(envPath); }
     var bundled = ResolveResource.asset("/feaRT");
@@ -94,18 +101,20 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
 
       copyRuntime(workDir);
 
+      var generated = new HashSet<String>();
       for (var entry : program.packageFiles().entrySet()) {
         var fileName = entry.getKey().replace(".", "_") + ".zig";
-        Files.writeString(genDir.resolve(fileName), entry.getValue());
+        generated.add(fileName);
+        writeIfChanged(genDir.resolve(fileName), entry.getValue());
       }
+      pruneGenerated(genDir, generated);
 
-      Files.writeString(srcDir.resolve("main.zig"), program.mainFile());
-      Files.writeString(workDir.resolve("build.zig"), buildZig());
-      Files.writeString(workDir.resolve("build.zig.zon"), buildZigZon());
+      writeIfChanged(srcDir.resolve("main.zig"), program.mainFile());
+      writeIfChanged(workDir.resolve("build.zig"), buildZig());
+      writeIfChanged(workDir.resolve("build.zig.zon"), buildZigZon());
 
       runZigBuild(workDir, zigCacheDir(), zigGlobalCacheDir(), outDir);
 
-      // Save base package files to versioned cache dir
       saveCachedPackages(program);
 
       return null;
@@ -139,10 +148,8 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     var feartSrc = feartRoot().resolve("src/runtime");
     var targetRuntime = workDir.resolve("src/runtime");
 
-    // Copy runtime directory tree
     copyTree(feartSrc, targetRuntime);
 
-    // Copy lib/ directory (contains zig-build-libgc)
     var feartLib = feartRoot().resolve("lib");
     var targetLib = workDir.resolve("lib");
     if (Files.isDirectory(feartLib)) {
@@ -152,12 +159,10 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     copyNativeStaticLib(workDir);
   }
 
-  /// Stage the Rust C-ABI staticlib (the `frt_*` surface) next to the runtime so
-  /// build.zig can link it. The artefact is named `<arch>-<os>-libnative_rt.a`
-  /// using the same arch/os spelling as the JNI `.so` loader in
-  /// assets/rt/NativeRuntime.java (arch amd64/arm64; os linux/macos/windows).
-  ///
-  /// This library implements string handling and regular expressions. It is used in both the Java and Zig backends.
+  /// Stage the Rust C-ABI staticlib (the `frt_*` string and regex surface, shared
+  /// with the Java backend) next to the runtime so build.zig can link it. Its
+  /// `<arch>-<os>-libnative_rt.a` name uses the same arch/os spelling as the JNI
+  /// `.so` loader in assets/rt/NativeRuntime.java.
   private void copyNativeStaticLib(Path workDir) throws IOException {
     var osName = System.getProperty("os.name").toLowerCase();
     String os;
@@ -182,6 +187,32 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
   }
 
+  /// Write `content` only if that is not already what the file holds, so an
+  /// unchanged file keeps its mtime and stays a cheap stat-only hit for zig.
+  private static void writeIfChanged(Path dest, String content) throws IOException {
+    var bytes = content.getBytes(StandardCharsets.UTF_8);
+    if (Files.isRegularFile(dest) && Arrays.equals(Files.readAllBytes(dest), bytes)) { return; }
+    Files.write(dest, bytes);
+  }
+
+  /// Drop generated package files left by an earlier compile into the same work
+  /// dir. Nothing imports them, but they would otherwise pile up indefinitely.
+  private static void pruneGenerated(Path genDir, Set<String> keep) throws IOException {
+    try (var files = Files.list(genDir)) {
+      for (var file : files.toList()) {
+        if (!keep.contains(file.getFileName().toString())) { Files.deleteIfExists(file); }
+      }
+    }
+  }
+
+  /// True when `dest` already holds exactly the bytes of `src`. `src` may live in
+  /// the jar's virtual file system, so this reads rather than comparing metadata.
+  private static boolean sameContent(Path src, Path dest) throws IOException {
+    if (!Files.isRegularFile(dest)) { return false; }
+    if (Files.size(dest) != Files.size(src)) { return false; }
+    return Arrays.equals(Files.readAllBytes(dest), Files.readAllBytes(src));
+  }
+
   private void copyTree(Path source, Path target) throws IOException {
     try (var walker = Files.walk(source)) {
       walker.forEach(src -> IoErr.of(() -> {
@@ -191,7 +222,11 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           Files.createDirectories(dest);
         } else {
           Files.createDirectories(dest.getParent());
-          Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING);
+          // Rewriting an identical file bumps its mtime, making zig re-hash it
+          // only to discover nothing changed.
+          if (!sameContent(src, dest)) {
+            Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING);
+          }
         }
         return null;
       }));
@@ -207,12 +242,11 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
       "--global-cache-dir", globalCache.toAbsolutePath().toString(),
       "--prefix", outDir.toAbsolutePath().toString()
     ));
-    // The self-hosted (non-LLVM) linker cannot handle .sframe sections present in the
-    // CRT objects of very new host glibc/gcc toolchains. Pinning a glibc version makes
-    // zig build and link its own bundled CRT objects instead of using the host's.
-    // Production builds keep a fully native target (LLD links .sframe fine, and a
-    // native target keeps native CPU tuning for ReleaseFast).
-    // glibc 2.34 keeps the binary runnable on older stable distros (RHEL 9, Ubuntu 22.04+, Debian 12+).
+    // The self-hosted (non-LLVM) linker cannot handle the .sframe sections in the
+    // CRT objects of very new host glibc/gcc toolchains; pinning a glibc version
+    // makes zig link its own bundled CRT objects instead. 2.34 stays runnable on
+    // older stable distros. LLVM builds keep a fully native target, both because
+    // LLD handles .sframe and for native CPU tuning under ReleaseFast.
     if (!opts.useLlvm() && System.getProperty("os.name").toLowerCase().contains("linux")) {
       cmd.add("-Dtarget=native-native-gnu.2.34");
     }
@@ -310,12 +344,9 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           exe.root_module.addImport("libgc", c_libgc_mod);
           exe.root_module.linkLibrary(context_switch_lib);
 
-          // The Rust C-ABI native runtime (the frt_* surface). Linking the
-          // archive directly lets the linker drop its unreferenced JNI objects;
-          // only the frt_* symbols reached from native.zig are retained. The
-          // archive pulls in libc (pthread etc.), so libc must be linked.
-          // Rust objects carry an eh_personality referencing the platform
-          // unwinder (_Unwind_*); libgcc_s provides it on glibc.
+          // Linking the native runtime archive directly lets the linker drop its
+          // unreferenced JNI objects. It pulls in libc (pthread etc.), and its
+          // Rust objects need the platform unwinder that libgcc_s provides.
           exe.root_module.addObjectFile(b.path("lib/native/libnative_rt.a"));
           exe.root_module.link_libc = true;
           exe.root_module.linkSystemLibrary("gcc_s", .{});

@@ -92,4 +92,35 @@ public class TestZigStrings {
     
     Test:Main{ sys -> sys.io.println((Regexs#"[").str) }
     """, Base.mutBaseAliases); }
+
+  // === .assertEq, lowered to the pure-Fearless _StrHelpers ===
+  @Test void strAssertEq() { okBase(new Res("ok", "", 0), """
+    package test
+    Test:Main{ sys -> Block#
+      .do{ "a" .assertEq "a" }
+      .return{ sys.io.println("ok") }
+      }
+    """, Base.mutBaseAliases); }
+
+  @Test void strAssertEqFails() { okBase(
+    new Res("", "Program crashed with: Expected: a[###]Actual: b[###]", 1), """
+    package test
+    Test:Main{ sys -> "a" .assertEq "b" }
+    """, Base.mutBaseAliases); }
+
+  @Test void strAssertEqFailsWithMessage() { okBase(
+    new Res("", "Program crashed with: nope[###]Expected: a[###]Actual: b[###]", 1), """
+    package test
+    Test:Main{ sys -> "a" .assertEq("b", "nope") }
+    """, Base.mutBaseAliases); }
+
+  @Test void mutStrAssertEq() { okBase(new Res("ok", "", 0), """
+    package test
+    Test:Main{ sys -> Block#
+      .let[mut Str] s = { mut "" }
+      .do{ s.append "ab" }
+      .do{ s.str .assertEq "ab" }
+      .return{ sys.io.println("ok") }
+      }
+    """, Base.mutBaseAliases); }
 }

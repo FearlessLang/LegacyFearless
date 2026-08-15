@@ -129,7 +129,7 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
             const new_val = objs.call(args[0], h("mut #/1"), .{current}, @src());
             return swap(self, new_val);
         },
-        else => unreachable,
+        else => objs.primitive_dispatch_failed(VT_Var.type_name, target_method),
     };
 }
 

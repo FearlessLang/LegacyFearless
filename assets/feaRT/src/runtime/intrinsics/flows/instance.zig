@@ -333,8 +333,22 @@ fn T_flow_let(self: FatPtr, a: FatPtr, b: FatPtr) callconv(.c) FatPtr {
 fn T_flow_join(self: FatPtr, joinable: FatPtr) callconv(.c) FatPtr {
     return objs.call(joinable, h("imm .join/1"), .{self}, @src());
 }
-fn T_flow_hash1(self: FatPtr, joinable: FatPtr) callconv(.c) FatPtr {
-    return objs.call(joinable, h("mut #/1"), .{self}, @src());
+/// `Extensible[Flow[E]]#(ext)` at every receiver mdf. The Fearless body is
+/// `ext#(this.self)`, and `.self` on a flow is the identity, so all three
+/// overloads hand the receiver straight to the extension's `mut #/1`.
+fn T_flow_hash1(self: FatPtr, ext: FatPtr) callconv(.c) FatPtr {
+    return objs.call(ext, h("mut #/1"), .{self}, @src());
+}
+
+/// `.unwrapOp` hands a flow's underlying `FlowOp` to base's own Fearless flow
+/// operators. Reaching it requires a `_UnwrapFlowToken`, which is private to
+/// `base.flows`, and the only callers are the Fearless operator paths that a
+/// Zig-resident flow replaces with its native `OpDesc` pipeline. The slot exists
+/// so the vtable stays complete and so a caller that does somehow arrive here
+/// fails identifiably rather than by a missing-method dispatch abort.
+fn T_flow_unwrap_op(self: FatPtr, unwrap: FatPtr) callconv(.c) FatPtr {
+    _ = .{ self, unwrap };
+    @panic("unwrapOp is not supported on FeaRT-native flows");
 }
 
 // ==========================================
@@ -605,6 +619,9 @@ pub const VT_Flow: objs.VTable = .{
         h("mut .let/2"),
         h("mut .join/1"),
         h("mut #/1"),
+        h("read #/1"),
+        h("imm #/1"),
+        h("mut .unwrapOp/1"),
     },
     .methods = &.{
         @as(*const anyopaque, @ptrCast(&flow_map)),
@@ -644,6 +661,9 @@ pub const VT_Flow: objs.VTable = .{
         @as(*const anyopaque, @ptrCast(&T_flow_let)),
         @as(*const anyopaque, @ptrCast(&T_flow_join)),
         @as(*const anyopaque, @ptrCast(&T_flow_hash1)),
+        @as(*const anyopaque, @ptrCast(&T_flow_hash1)),
+        @as(*const anyopaque, @ptrCast(&T_flow_hash1)),
+        @as(*const anyopaque, @ptrCast(&T_flow_unwrap_op)),
     },
     .method_names = &.{
         "mut .map/1",
@@ -683,6 +703,9 @@ pub const VT_Flow: objs.VTable = .{
         "mut .let/2",
         "mut .join/1",
         "mut #/1",
+        "read #/1",
+        "imm #/1",
+        "mut .unwrapOp/1",
     },
     .drop_fn = object.flow_drop,
 };

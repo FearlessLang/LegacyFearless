@@ -378,6 +378,24 @@ pub fn str_str_self(self: FatPtr) callconv(.c) FatPtr {
     return self.share();
 }
 
+pub fn str_assert_eq(self: FatPtr, actual: FatPtr) callconv(.c) FatPtr {
+    if (comptime @hasDecl(pb, "_StrHelpers_0__ZdotassertEq_2_imm_Zfun")) {
+        return pb._StrHelpers_0__ZdotassertEq_2_imm_Zfun(self, actual, helpers_singleton());
+    }
+    @panic("This base has no _StrHelpers for Str.assertEq");
+}
+
+pub fn str_assert_eq_msg(self: FatPtr, actual: FatPtr, message: FatPtr) callconv(.c) FatPtr {
+    if (comptime @hasDecl(pb, "_StrHelpers_0__ZdotassertEq_3_imm_Zfun")) {
+        return pb._StrHelpers_0__ZdotassertEq_3_imm_Zfun(self, actual, message, helpers_singleton());
+    }
+    @panic("This base has no _StrHelpers for Str.assertEq");
+}
+
+fn helpers_singleton() FatPtr {
+    return objs.obj_k_singleton(&pb.VT__StrHelpers_0);
+}
+
 fn str_drop(header: *anyopaque) callconv(.c) void {
     const Layout = objs.GenObjectLayoutType(StrCaptures);
     const self: *const Layout = @ptrCast(@alignCast(header));
@@ -397,7 +415,7 @@ pub const VT_Str: objs.VTable = .{
         h("imm .startsWith/1"), h("imm .substring/2"), h("imm .charAt/1"),
         h("imm .normalise/0"), h("imm .codepoints/0"), h("imm .graphemes/0"),
         h("imm .utf8/0"),     h("imm .float/0"),    h("read .hash/1"),
-        h("imm .join/1"),
+        h("imm .join/1"),   h("imm .assertEq/1"), h("imm .assertEq/2"),
     },
     .methods = &.{
         @ptrCast(&str_concat),      @ptrCast(&str_eq),        @ptrCast(&str_neq),
@@ -405,7 +423,7 @@ pub const VT_Str: objs.VTable = .{
         @ptrCast(&str_starts_with), @ptrCast(&str_substring), @ptrCast(&str_char_at),
         @ptrCast(&str_normalise),   @ptrCast(&str_codepoints), @ptrCast(&str_graphemes),
         @ptrCast(&str_utf8),        @ptrCast(&str_float),     @ptrCast(&str_hash),
-        @ptrCast(&str_join),
+        @ptrCast(&str_join), @ptrCast(&str_assert_eq), @ptrCast(&str_assert_eq_msg),
     },
     .method_names = &.{
         "imm +/1",         "imm ==/1",        "imm !=/1",
@@ -413,7 +431,7 @@ pub const VT_Str: objs.VTable = .{
         "imm .startsWith/1", "imm .substring/2", "imm .charAt/1",
         "imm .normalise/0", "imm .codepoints/0", "imm .graphemes/0",
         "imm .utf8/0",     "imm .float/0",    "read .hash/1",
-        "imm .join/1",
+        "imm .join/1",   "imm .assertEq/1", "imm .assertEq/2",
     },
     .drop_fn = str_drop,
 };

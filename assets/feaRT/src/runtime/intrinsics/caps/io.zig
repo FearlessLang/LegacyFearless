@@ -47,6 +47,13 @@ fn writeln_str(fd: i32, mutex: *FiberMutex, msg: FatPtr) void {
     _ = reactor.writevAsync(fd, vecs[0..], reactor.NO_OFFSET);
 }
 
+/// Write `msg` and a newline to stderr, serialised with `IO.printlnErr` so
+/// diagnostics from other subsystems (`Debug`, traces) stay line-atomic against
+/// a program's own error output. Consumes `msg`.
+pub fn println_stderr(msg: FatPtr) void {
+    writeln_str(std.posix.STDERR_FILENO, &stderr_mutex, msg);
+}
+
 fn io_print(self: FatPtr, msg: FatPtr) callconv(.c) FatPtr {
     _ = self;
     write_str(std.posix.STDOUT_FILENO, &stdout_mutex, msg);

@@ -152,8 +152,13 @@ pub fn to_float(a: FatPtr) FatPtr {
     return a; // Identity
 }
 
+pub fn hash(a: FatPtr, hasher: FatPtr) FatPtr {
+    return objs.call(hasher, comptime objs.hash_signature("mut .float/1"), .{a}, @src());
+}
+
 // Compile-time-resolved intrinsic dispatch for Float.
 const h = objs.hash_signature;
+const num_assert = @import("num_assert.zig");
 pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr {
     return switch (target_method) {
         h("imm +/1") => add(self, args[0]),
@@ -182,6 +187,9 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
         h("read .nat/0") => to_nat(self),
         h("read .byte/0") => to_byte(self),
         h("read .float/0") => self,
-        else => unreachable,
+        h("read .hash/1") => hash(self, args[0]),
+        h("imm .assertEq/1") => num_assert.assert_eq("_FloatAssertionHelper_0", self, args[0]),
+        h("imm .assertEq/2") => num_assert.assert_eq_msg("_FloatAssertionHelper_0", self, args[0], args[1]),
+        else => objs.primitive_dispatch_failed(VT_Float.type_name, target_method),
     };
 }

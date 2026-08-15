@@ -33,7 +33,10 @@ public record ZigMagicImpls(
       var lit = getLiteral(p, name);
       try {
         return lit
-          .map(lambdaName -> "nat_rt.make(" + Long.parseUnsignedLong(lambdaName.replace("_", ""), 10) + ")")
+          // Rendered unsigned: `nat_rt.make` takes a u64, and the top half of the
+          // Nat range comes back from parseUnsignedLong as a negative long, which
+          // zig rejects rather than wrapping the way Java's `long` would.
+          .map(lambdaName -> "nat_rt.make(" + Long.toUnsignedString(Long.parseUnsignedLong(lambdaName.replace("_", ""), 10)) + ")")
           .orElseGet(() -> e.accept(gen, true)).describeConstable();
       } catch (NumberFormatException ignored) {
         throw Fail.invalidNum(lit.orElse(name.toString()), "Nat");
@@ -114,7 +117,9 @@ public record ZigMagicImpls(
     };
   }
   @Override public MagicTrait<MIR.E, String> asciiStr(MIR.E e) { return EMPTY; }
-  @Override public MagicTrait<MIR.E, String> debug(MIR.E e) { return EMPTY; }
+  @Override public MagicTrait<MIR.E, String> debug(MIR.E e) {
+    return () -> Optional.of("rt.obj_k_singleton(&debug_rt.VT_Debug)");
+  }
   @Override public MagicTrait<MIR.E, String> refK(MIR.E e) { return EMPTY; }
   @Override public MagicTrait<MIR.E, String> isoPodK(MIR.E e) {
     return new MagicTrait<>() {

@@ -65,6 +65,7 @@ class ZigProgramBuilder {
       sb.append("const str_rt = root.str_rt;\n");
       sb.append("const regex_rt = root.regex_rt;\n");
       sb.append("const hash_rt = root.hash_rt;\n");
+      sb.append("const debug_rt = root.debug_rt;\n");
       sb.append("const map_rt = root.map_rt;\n");
       sb.append("const var_rt = root.var_rt;\n");
       sb.append("const sys_rt = root.sys_rt;\n");
@@ -126,6 +127,7 @@ class ZigProgramBuilder {
     sb.append("pub const str_rt = @import(\"runtime/intrinsics/strings/index.zig\");\n");
     sb.append("pub const regex_rt = @import(\"runtime/intrinsics/regex.zig\");\n");
     sb.append("pub const hash_rt = @import(\"runtime/intrinsics/hash.zig\");\n");
+    sb.append("pub const debug_rt = @import(\"runtime/intrinsics/debug.zig\");\n");
     sb.append("pub const map_rt = @import(\"runtime/intrinsics/map.zig\");\n");
     sb.append("pub const var_rt = @import(\"runtime/intrinsics/var.zig\");\n");
     sb.append("pub const sys_rt = @import(\"runtime/intrinsics/sys.zig\");\n");

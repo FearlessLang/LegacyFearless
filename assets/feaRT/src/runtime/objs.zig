@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 
 const gc = @import("gc.zig");
@@ -281,6 +282,19 @@ fn dispatch_failed(receiver: FatPtr, hash: u64) noreturn {
 	};
 
 	std.log.err("Failed to dispatch to {s} with method \'{s}\'", .{receiver.vt.type_name, name});
+	unreachable;
+}
+
+pub fn primitive_dispatch_failed(
+	comptime type_name: []const u8,
+	comptime target_method: u64,
+) noreturn {
+	if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
+		@panic(std.fmt.comptimePrint(
+			"Failed to dispatch to {s}: no intrinsic for method hash {d}",
+			.{ type_name, target_method },
+		));
+	}
 	unreachable;
 }
 
