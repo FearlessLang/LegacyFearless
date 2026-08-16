@@ -6,9 +6,9 @@ import utils.Base;
 import static codegen.zig.RunZigProgramTests.okBase;
 import static utils.RunOutput.Res;
 
-/** Flow transformations and terminals (map/filter/flatMap/scan/limit, find/any/
- * all/none/max/first, list/sum/fold) plus the prime/sieve integration programs.
- * Error propagation through flows lives in {@link TestZigFlowErrors}. */
+/// Flow transformations and terminals (map/filter/flatMap/scan/limit, find/any/all/none/max/first,
+/// list/sum/fold) plus the prime/sieve integration programs. Error propagation through flows lives
+/// in [TestZigFlowErrors].
 public class TestZigFlows {
   @Test void flowMap() { okBase(new Res("300", "", 0), """
     package test
@@ -40,10 +40,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // (.for is analytically correct: both recursive args evaluate before merge,
-  // so the callback fires on every leaf; merge returns Void either way.
-  // Skipped here because verifying side-effects requires capturing `sys` in a
-  // `read F[E,Void]` closure, which isn't permitted.)
+  // There is no .for test: verifying its side-effects requires capturing `sys` in a
+  // `read F[E,Void]` closure, which is not permitted.
 
   @Test void flowFirst() { okBase(new Res("1", "", 0), """
     package test
@@ -57,13 +55,11 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Predicated terminals expand through Fearless defaults onto .findMap
-  // (ordered) or .unorderedFindMap (cancel-safe). Each test exercises a
-  // 4-elem splittable list so the parallel split fires in driveU/findMap.
+  // Predicated terminals expand through Fearless defaults onto .findMap (ordered) or
+  // .unorderedFindMap (cancel-safe). Each uses a 4-elem splittable list so the split fires.
 
-  // .any: target in left half. Default body uses .unorderedFindMap; left fork
-  // matches on +2, calls scope.request(); right fork (+3,+4) gets cancelled
-  // before or during its run_chunk. Either way, isSome -> True.
+  // Target in the left half, so the left fork's match calls scope.request() and the right fork is
+  // cancelled before or during its run_chunk. isSome holds either way.
   @Test void flowAnyEarlyExit() { okBase(new Res("True", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -73,9 +69,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // .all: predicate true for every elem. Goes through .unorderedFindMap; no
-  // match is found so cancel never fires; both halves run to completion;
-  // findMapReducer combines two empty Opts -> empty -> .isEmpty -> True.
+  // Predicate true for every element, so no match is found, cancel never fires, and both halves run
+  // to completion.
   @Test void flowAll() { okBase(new Res("True", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -85,7 +80,7 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // .none: no match. Same shape as .all (no cancel fires), Opt empty, isEmpty -> True.
+  // Same shape as .all: no match, so no cancel fires.
   @Test void flowNone() { okBase(new Res("True", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -95,9 +90,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // .find: ordered semantics, leftmost match wins. Target +4 in right half,
-  // expands to ordered .findMap (no cancel), left half returns empty, right
-  // half returns Some(+4), merge picks left-or-right via firstSomeReducer.
+  // Ordered semantics, leftmost match wins. The target is in the right half, so the empty left
+  // result must not win at the merge.
   @Test void flowFindRightHalf() { okBase(new Res("4", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -110,9 +104,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // .max: exercises driveMax's maxReducer on all 3 merge positions (the +4
-  // peak is in the second-quarter, so left-half merge sees Some(+4) vs
-  // Some(+1), then root merge sees Some(+4) vs Some(+3)).
+  // The peak sits in the second quarter, so driveMax's reducer is exercised at all three merge
+  // positions rather than only at the root.
   @Test void flowMax() { okBase(new Res("4", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -128,10 +121,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Variable-fan-out flatMap. Outer is a 4-elem list (splittable); each n
-  // maps to Flow.range(+0, n) producing 1, 2, 3, 4 inner elements
-  // respectively. Total = 10. Confirms process_through walks varying-length
-  // inner flows correctly when the outer source is split for parallel driveReduce.
+  // Variable-fan-out flatMap: each element maps to a differently sized inner flow, so
+  // process_through must walk varying lengths while the outer source is split.
   @Test void flowFlatMapVariableFanout() { okBase(new Res("10", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -143,10 +134,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Mid-pipeline .limit short-circuits before exhausting source. .limit is
-  // stateful so split_flow refuses; sequential run_chunk fires Applied.done
-  // after the 5th element clears the upstream map. Confirms the short-circuit
-  // signal propagates through a non-trivial op chain.
+  // Mid-pipeline .limit is stateful, so split_flow refuses and run_chunk must fire Applied.done
+  // once the limit is reached, propagating the short-circuit back through the upstream ops.
   @Test void flowLimitMidPipeline() { okBase(new Res("5", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -159,10 +148,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // .scan accumulator state across elements. Desugars to .actor (stateful)
-  // so split_flow refuses; sequential ActorState/OpDesc.state cell survives
-  // across run_chunk iterations. Three +1 inputs against +0 seed produce
-  // running sums [+1, +2, +3]; folding those gives +6.
+  // .scan desugars to .actor, which is stateful, so split_flow refuses and the ActorState cell must
+  // survive across run_chunk iterations.
   @Test void flowScan() { okBase(new Res("6", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -245,10 +232,8 @@ public class TestZigFlows {
       }
     """, Base.mutBaseAliases); }
 
-  // Parallel driveReduce on a multi-op pipeline. List source is splittable,
-  // all ops (filter, map) are stateless, so driveReduce splits. Evens of
-  // [+0..+3] are [+0, +2]; *10 gives [+0, +20]; sum = +20. Confirms multi-op
-  // pipelines compose cleanly under VPF promotion.
+  // A splittable source with only stateless ops, so the whole multi-op pipeline runs under a split
+  // driveReduce.
   @Test void flowMapFilterSum() { okBase(new Res("20", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -257,6 +242,78 @@ public class TestZigFlows {
         .map[Int]{n -> n * +10}
         .fold[Int]({+0}, {a, b -> a + b})
         .str
+      )}
+    """, Base.mutBaseAliases); }
+
+  // `{a, _ -> a + 1}` is a counting fold: not a monoid over E, so a driver that combines two
+  // accumulators with the element combiner undercounts rather than failing outright.
+  @Test void flowFoldNonMonoidCountsEveryElement() { okBase(new Res("6", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      "abcdef".codepoints
+        .fold[Nat]({0}, {a, _ -> a + 1})
+        .str
+      )}
+    """, Base.mutBaseAliases); }
+
+  // Same shape on a list source, so a failure localises to the driver rather than to split_flow's
+  // `.str` arm.
+  @Test void flowFoldNonMonoidOnListSource() { okBase(new Res("4", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      Flow#[Int](+10, +20, +30, +40)
+        .fold[Nat]({0}, {a, _ -> a + 1})
+        .str
+      )}
+    """, Base.mutBaseAliases); }
+
+  // Accumulator type != element type (A = Wc, E = Str), the `wc` benchmark's shape minimised. A
+  // driver that passes an accumulator where the combiner expects an element cannot fail silently
+  // here: `c == "\\n"` dispatches `imm ==/1` on Wc and dies.
+  @Test void flowFoldMixedAccumulatorType() { okBase(new Res("2", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      "a\\nb\\nc".codepoints
+        .fold[Wc]({Wcs#0}, {acc, c -> c == "\\n" ? {
+          .then -> Wcs#(acc.lines + 1),
+          .else -> acc,
+          }})
+        .lines
+        .str
+      )}
+    Wc: {.lines: Nat}
+    Wcs: {#(n: Nat): Wc -> {.lines -> n}}
+    """, Base.mutBaseAliases); }
+
+  // Forced promotion is what actually exercises `.mergeFold`'s parallel arms: the left fold and the
+  // right chunk's collection run on separate frames.
+  @Test void flowFoldNonMonoidUnderForcedPromotion() { okBase(16, new Res("64", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      Flow.range(+0, +64)
+        .fold[Nat]({0}, {a, _ -> a + 1})
+        .str
+      )}
+    """, Base.mutBaseAliases); }
+
+  // Order-sensitive as well as non-associative: appending each element to a string reconstructs the
+  // source only if every chunk lands in the right place, so a misplaced merge scrambles the output
+  // rather than merely miscounting.
+  @Test void flowFoldPreservesOrderUnderForcedPromotion() { okBase(16, new Res("abcdefgh", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      "abcdefgh".codepoints
+        .fold[Str]({""}, {acc, c -> acc + c})
+      )}
+    """, Base.mutBaseAliases); }
+
+  // .sum/.uSum/.fSum are ordinary folds, so they go through the same non-reassociating path as any
+  // other fold. Forced promotion keeps the split machinery live around them.
+  @Test void flowSumsStayCorrect() { okBase(16, new Res("4950|10", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      (Flow.range(+0, +100)#(Flow.sum).str)
+        + "|" + (Flow#[Nat](1, 2, 3, 4)#(Flow.uSum).str)
       )}
     """, Base.mutBaseAliases); }
 

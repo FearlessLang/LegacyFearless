@@ -15,7 +15,7 @@ VOCAB_SIZE = 2000
 WORDS_PER_LINE = (8, 14)
 NEEDLE = "needle"
 NEEDLE_RATE = 0.001
-DEFAULT_SIZE_MB = 0.5
+DEFAULT_SIZE_MB = 1
 
 CONSONANTS = "bcdfghjklmnpqrstvwxyz"
 VOWELS = "aeiou"

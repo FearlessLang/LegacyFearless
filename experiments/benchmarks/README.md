@@ -69,8 +69,8 @@ anything under a second is dominated by process startup.
 | `mandelbrot` | `2048 x 2048`, 256 iters | `252714035` | Escape-time over the flat pixel range. Irregular per-pixel cost: no static granularity choice is right. |
 | `nqueens` | `n = 14` | `365596` | Deep, irregular search tree. Stresses promotion policy on the critical path. |
 | `primes` | `n = 500_000` | `41538` | Trial division as a flow, so parallelism comes from the flow driver rather than user-level VPF. Cost per element grows with the element. |
-| `wc` | corpus | `<bytes> <lines> <words>` | Word-count monoid over `Str.codepoints`. **Blocked on FeaRT, see below.** |
-| `grep` | corpus | line count | Literal `"needle"` matcher over `Str.codepoints`. **Blocked on FeaRT, see below.** |
+| `wc` | corpus, 1 MiB | `1048629 15009 164764` | Word-count monoid over `Str.codepoints`. |
+| `grep` | corpus, 1 MiB | line count | Literal `"needle"` matcher over `Str.codepoints`. |
 
 Per the paper, the benchmarks are *fully parallel*: no manual granularity
 control, no constant thresholds, recursion down to a leaf of one element. The
@@ -85,36 +85,20 @@ machine and the checksums are comparable across machines as well as backends.
 the match count is stable and non-trivial.
 
 ```sh
-python3 gencorpus.py               # default 0.5 MiB
+python3 gencorpus.py               # default 1 MiB
 python3 gencorpus.py --size-mb 64
 ```
 
-The default is small because `Str.codepoints` currently costs on the order of
-14 microseconds per character on the Java backend -- 1 MiB takes about 14
-seconds. Raise it once that improves.
+## Corpus size
 
-## Known blocker: `Str.codepoints` folds are wrong on FeaRT
-
-`wc` and `grep` are excluded from `run.sh`'s default `BENCHES` because they
-cannot pass the checksum gate. Minimal reproduction:
-
-```
-Test: Main {sys -> sys.io.println("abcdef".codepoints.fold[Nat]({0}, {a, _ -> a + 1}).str)}
-```
-
-* Java backend: `6` (correct)
-* FeaRT: `3`
-
-`"abcdef".codepoints.count` gives `6` on both, so it is the fold rather than the
-source. `.codepoints` is given `DataParallelFlow | PipelineParallelFlow` in
-`MIRInjectionVisitor.getVariants`, and the parallel fold path appears to return
-one split's result rather than the whole. With a user-defined `imm` state object
-as the accumulator, the same path instead dies at runtime with
-`Failed to dispatch to bench.Fear90$/0 with method 14216550741596947392`, which
-is `h("imm ==/1")` -- something in that path calls `==` on the accumulator.
-
-Both programs are correct on the Java backend and are kept here as written; run
-them with `BENCHES="wc grep" ./run.sh` once the runtime is fixed.
+The corpus is 1 MiB rather than the tens of MiB the other benchmarks' sizes
+would suggest, because `.fold` over `Str.codepoints` is slow on the Java
+backend: `.codepoints` costs on the order of 14 microseconds per character
+there, so 1 MiB already takes about 14 seconds. The FeaRT side of these two has
+not been timed since `.fold` was fixed, so neither the corpus size nor the
+sizes in the table above have been re-tuned to the 2--10 second band the other
+benchmarks use. Time `wc` under all three configs, then raise
+`DEFAULT_SIZE_MB` in `gencorpus.py` and update the table.
 
 ## Measurement hygiene
 

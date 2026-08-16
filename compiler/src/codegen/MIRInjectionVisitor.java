@@ -57,7 +57,6 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
   public MIRInjectionVisitor(Collection<String>cached, Program p, ConcurrentHashMap<Long, TsT> resolvedCalls) {
     this.p = p;
     this.resolvedCalls = resolvedCalls;
-    //on partial programs
   }
 
   public MIR.Program visitProgram() {
@@ -285,7 +284,6 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
         if (flowElem.mdf().is(Mdf.read, Mdf.imm)) {
           return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
         }
-//        if (flowElem.mdf().is(Mdf.read, Mdf.imm)) { return EnumSet.of(MIR.MCall.CallVariant.SafeMutSourceFlow); }
         return EnumSet.of(MIR.MCall.CallVariant.Standard);
       }
       if (recvIT.name().equals(Magic.FList)) {
@@ -315,8 +313,8 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
       return EnumSet.of(MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
     }
 
-    // The internal implementation of FeartDriver's .merge method is always parallelisable
-    if (recvIT.name().equals(Magic.FeartDriver) && e.name().equals(new Id.MethName(".merge", 3))) {
+    // The internal implementations of FeartDriver's .merge and .mergeFold methods are always parallelisable
+    if (recvIT.name().equals(Magic.FeartDriver) && (e.name().equals(new Id.MethName(".merge", 3)) || e.name().equals(new Id.MethName(".mergeFold", 3)))) {
       return EnumSet.of(MIR.MCall.CallVariant.VPFParallelisable);
     }
 

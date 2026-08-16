@@ -12,10 +12,7 @@ JAR="${JAR:-$HERE/../../compiler/target/fearless.jar}"
 ENTRY=bench.Test
 RESULTS="$HERE/results"
 
-# wc and grep are excluded by default: `Str.codepoints` folds give the wrong
-# answer on FeaRT (see README), so they cannot pass the checksum gate. Run them
-# with `BENCHES="wc grep" ./run.sh` once that is fixed.
-read -r -a BENCHES <<< "${BENCHES:-mapLight mapHeavy mandelbrot nqueens primes}"
+read -r -a BENCHES <<< "${BENCHES:-mapLight mapHeavy mandelbrot nqueens primes wc grep}"
 CONFIGS=(feart feart-novpf java)
 REFERENCE=feart
 
