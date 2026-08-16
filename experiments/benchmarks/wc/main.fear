@@ -1,13 +1,5 @@
 package bench
 
-/// Running word-count state. All `imm`, so the fold carries nothing mutable.
-WcState: {
-  .bytes: Nat,
-  .lines: Nat,
-  .words: Nat,
-  .inWord: Bool,
-  }
-
 WcStates: {
   #(b: Nat, l: Nat, w: Nat, iw: Bool): WcState -> {
     .bytes -> b,
@@ -18,26 +10,36 @@ WcStates: {
 
   .zero: WcState -> WcStates#(0, 0, 0, False),
 
-  /// One codepoint of the word-count monoid. A word is counted where it
-  /// starts, the only transition needing the previous codepoint. The corpus is
-  /// ASCII, so a codepoint is a byte and the separators are space and newline.
-  /// Named rather than inline at the fold: three-parameter lambdas in argument
+  /// Named rather than inline at the fold: two-parameter lambdas in argument
   /// position do not always infer.
-  .step: read F[WcState, Str, WcState] -> {s, c -> Block#
-    .if {c == "\n"} .return {WcStates#(s.bytes + 1, s.lines + 1, s.words, False)}
-    .if {c == " "} .return {WcStates#(s.bytes + 1, s.lines, s.words, False)}
-    .if {s.inWord} .return {WcStates#(s.bytes + 1, s.lines, s.words, True)}
-    .return {WcStates#(s.bytes + 1, s.lines, s.words + 1, True)}
+  .stepper: read F[WcState, Str, WcState] -> {s, c -> s.step(c)},
+  }
+
+/// The word-count monoid, one codepoint at a time. A word is counted where it
+/// starts, the only transition needing the previous codepoint. The corpus is
+/// ASCII, so a codepoint is a byte and the separators are space and newline.
+WcState: {
+  .bytes: Nat,
+  .lines: Nat,
+  .words: Nat,
+  .inWord: Bool,
+
+  .step(c: Str): WcState -> (c == "\n").if[WcState]{
+    .then -> WcStates#(this.bytes + 1, this.lines + 1, this.words, False),
+    .else -> (c == " ").if[WcState]{
+      .then -> WcStates#(this.bytes + 1, this.lines, this.words, False),
+      .else -> this.inWord.if[WcState]{
+        .then -> WcStates#(this.bytes + 1, this.lines, this.words, True),
+        .else -> WcStates#(this.bytes + 1, this.lines, this.words + 1, True),
+        },
+      },
     },
+
+  .str: Str -> this.bytes.str + " " + (this.lines.str) + " " + (this.words.str),
   }
 
 /// Reading the file is inside the timed process on purpose: wall clock is the
 /// headline number and I/O is part of what the program costs.
-Test: Main {sys -> Block#
-  .let[Str] text = {sys.io.accessR(List#[Str]("corpus", "corpus.txt")).readStr!}
-  .let[WcState] res = {text.codepoints.fold[WcState]({WcStates.zero}, WcStates.step)}
-  .let[Str] bytes = {res.bytes.str}
-  .let[Str] lines = {res.lines.str}
-  .let[Str] words = {res.words.str}
-  .return {sys.io.println(bytes + " " + lines + " " + words)}
-  }
+Test: Main {sys -> sys.io.println(
+  sys.io.accessR(List#[Str]("corpus", "corpus.txt")).readStr!
+    .codepoints.fold[WcState]({WcStates.zero}, WcStates.stepper).str)}

@@ -1,29 +1,36 @@
 package bench
 
+/// xorshift64, as the composition of its three named rounds.
+Xorshift: {
+  .l13(x: Nat): Nat -> x.xor(x.shiftLeft(13)),
+  .r7(x: Nat): Nat -> x.xor(x.shiftRight(7)),
+  .l17(x: Nat): Nat -> x.xor(x.shiftLeft(17)),
+  .step(x: Nat): Nat -> this.l17(this.r7(this.l13(x))),
+  }
+
 /// `mapLight`'s skeleton with an expensive per-element function, so per-leaf
 /// work dwarfs a promotion. Combined with `.xor` rather than `+`: the mixed
 /// values span the whole 64-bit range, and xor is associative and commutative
 /// so the checksum does not depend on completion order.
 MapHeavy: {
-  .n: Nat -> 500000,
+  .n: Nat -> 1500000,
   .rounds: Nat -> 1000,
 
-  /// xorshift64, `rounds` times.
-  .mix(x: Nat, rounds: Nat): Nat -> Block#
-    .if {rounds == 0} .return {x}
-    .let[Nat] a = {x.xor(x.shiftLeft(13))}
-    .let[Nat] b = {a.xor(a.shiftRight(7))}
-    .let[Nat] c = {b.xor(b.shiftLeft(17))}
-    .return {this.mix(c, rounds - 1)},
+  .mix(x: Nat, rounds: Nat): Nat -> (rounds == 0).if[Nat]{
+    .then -> x,
+    .else -> this.mix(Xorshift.step(x), rounds - 1),
+    },
 
   /// Offset by one so element 0 misses the xorshift fixed point at zero.
   .leaf(i: Nat): Nat -> this.mix(i + 1, this.rounds),
 
+  .mid(lo: Nat, hi: Nat): Nat -> lo + ((hi - lo) / 2),
+
   /// Two MCalls over `imm` data: VPF-eligible. See `mapLight`.
-  .solve(lo: Nat, hi: Nat): Nat -> Block#
-    .if {(hi - lo) <= 1} .return {this.leaf(lo)}
-    .let[Nat] mid = {lo + ((hi - lo) / 2)}
-    .return {this.solve(lo, mid).xor(this.solve(mid, hi))},
+  .solve(lo: Nat, hi: Nat): Nat -> ((hi - lo) <= 1).if[Nat]{
+    .then -> this.leaf(lo),
+    .else -> this.solve(lo, this.mid(lo, hi)).xor(this.solve(this.mid(lo, hi), hi)),
+    },
   }
 
 Test: Main {sys -> sys.io.println(MapHeavy.solve(0, MapHeavy.n).str)}

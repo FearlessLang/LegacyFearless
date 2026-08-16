@@ -1,35 +1,55 @@
 package bench
 
-/// Counts n-queens solutions. The board is three `Nat` bitmasks (columns and
-/// the two diagonal families), so the search state is `imm` throughout.
-///
-/// The natural recursion is n-ary, which does not fit the two-MCall rule, so
-/// `.tryCols` splits the candidate columns binarily instead. Branches prune at
-/// wildly different depths: a test of promotion policy, not of throughput.
-NQueens: {
-  .n: Nat -> 14,
+Boards: { #(cols: Nat, d1: Nat, d2: Nat): Board -> {.cols -> cols, .d1 -> d1, .d2 -> d2} }
 
-  .solve(cols: Nat, d1: Nat, d2: Nat, row: Nat): Nat -> Block#
-    .if {row >= (this.n)} .return {1}
-    .return {this.tryCols(cols, d1, d2, row, 0, this.n)},
-
-  /// Binary split over the candidate columns `[lo, hi)`.
-  .tryCols(cols: Nat, d1: Nat, d2: Nat, row: Nat, lo: Nat, hi: Nat): Nat -> Block#
-    .if {lo >= hi} .return {0}
-    .if {(hi - lo) <= 1} .return {this.place(cols, d1, d2, row, lo)}
-    .let[Nat] mid = {lo + ((hi - lo) / 2)}
-    .return {this.tryCols(cols, d1, d2, row, lo, mid) + (this.tryCols(cols, d1, d2, row, mid, hi))},
-
-  /// Solutions reachable by putting a queen on `row`, column `c`. Diagonals
-  /// are indexed by `row + c` and `row + n - c`, both below 2n.
-  .place(cols: Nat, d1: Nat, d2: Nat, row: Nat, c: Nat): Nat -> Block#
-    .let[Nat] col = {1.shiftLeft(c)}
-    .if {cols.bitwiseAnd(col) != 0} .return {0}
-    .let[Nat] up = {1.shiftLeft(row + c)}
-    .if {d1.bitwiseAnd(up) != 0} .return {0}
-    .let[Nat] down = {1.shiftLeft((row + (this.n)) - c)}
-    .if {d2.bitwiseAnd(down) != 0} .return {0}
-    .return {this.solve(cols.bitwiseOr(col), d1.bitwiseOr(up), d2.bitwiseOr(down), row + 1)},
+/// The search state as three `Nat` bitmasks: occupied columns and the two
+/// diagonal families. All `imm`, so the whole search carries nothing mutable.
+Board: {
+  .cols: Nat,
+  .d1: Nat,
+  .d2: Nat,
+  /// The board with a queen on `row`, column `c`, or empty if that square is
+  /// attacked. Diagonals are indexed by `row + c` and `row + n - c`, both
+  /// below 2n.
+  .place(row: Nat, c: Nat, n: Nat): mut Opt[Board] -> this.attacked(row, c, n).if[mut Opt[Board]]{
+    .then -> {},
+    .else -> Opts#(Boards#(
+      this.cols.bitwiseOr(1.shiftLeft(c)),
+      this.d1.bitwiseOr(1.shiftLeft(row + c)),
+      this.d2.bitwiseOr(1.shiftLeft((row + n) - c)))),
+    },
+  .attacked(row: Nat, c: Nat, n: Nat): Bool ->
+    (this.cols.bitwiseAnd(1.shiftLeft(c)) != 0)
+      .or(this.d1.bitwiseAnd(1.shiftLeft(row + c)) != 0)
+      .or(this.d2.bitwiseAnd(1.shiftLeft((row + n) - c)) != 0),
   }
 
-Test: Main {sys -> sys.io.println(NQueens.solve(0, 0, 0, 0).str)}
+/// Counts n-queens solutions. Branches prune at wildly different depths: a
+/// test of promotion policy, not of throughput.
+NQueens: {
+  .n: Nat -> 14,
+  .solve(b: Board, row: Nat): Nat -> (row >= (this.n)).if[Nat]{
+    .then -> 1,
+    .else -> this.tryCols(b, row, 0, this.n),
+    },
+  .mid(lo: Nat, hi: Nat): Nat -> lo + ((hi - lo) / 2),
+  .leaf(b: Board, row: Nat, c: Nat): Nat -> b.place(row, c, this.n).match[Nat]{
+    .some(next) -> this.solve(next, row + 1),
+    .empty -> 0,
+    },
+  /// Binary split over the candidate columns `[lo, hi)`: the natural recursion
+  /// is n-ary, which does not fit the two-MCall rule.
+  ///
+  /// The combining `+` is kept exactly one lambda arm deep. Nesting it inside a
+  /// second `.if` stops the heartbeat promoting this frame, costing all of the
+  /// parallelism, so there is no `lo >= hi` guard here: `.tryCols` is only ever
+  /// entered with `hi > lo`, and a binary split of a range wider than one keeps
+  /// both halves non-empty.
+  .tryCols(b: Board, row: Nat, lo: Nat, hi: Nat): Nat -> ((hi - lo) <= 1).if[Nat]{
+    .then -> this.leaf(b, row, lo),
+    .else -> this.tryCols(b, row, lo, this.mid(lo, hi))
+      + (this.tryCols(b, row, this.mid(lo, hi), hi)),
+    },
+  }
+
+Test: Main {sys -> sys.io.println(NQueens.solve(Boards#(0, 0, 0), 0).str)}

@@ -4,31 +4,35 @@ package bench
 /// parallelism comes from the flow driver rather than user-level promotion.
 /// Per-element cost grows with the element: the range is badly unbalanced.
 Primes: {
-  .n: Int -> +500000,
+  .n: Int -> +1000000,
 
-  .isPrime(n: Int): Bool -> Block#[Bool]
-    .if {n < (+4)} .return {True}
-    .if {(n % (+2)) == +0} .return {False}
-    .return {this.noDivisorIn(n, +3, this.limit(n))},
+  .isPrime(n: Int): Bool -> (n < (+4)).if[Bool]{
+    .then -> True,
+    .else -> ((n % (+2)) == +0).if[Bool]{
+      .then -> False,
+      .else -> this.noDivisorIn(n, +3, this.limit(n)),
+      },
+    },
 
   /// One past the largest divisor worth testing. Two rather than one absorbs
   /// a rounding error of a whole unit at a perfect square, and stays below `n`
   /// for every odd `n` that reaches here.
   .limit(n: Int): Int -> n.float.sqrt.floor.int + (+2),
 
+  .mid(lo: Int, hi: Int): Int -> lo + ((hi - lo) / (+2)),
+
   /// Binary split over the candidate divisors `[lo, hi)`. A linear scan --
   /// `.loop` or plain recursion -- overflows the stack at this range. `&&`
   /// takes a thunk, so the early exit on composites survives the split.
-  .noDivisorIn(n: Int, lo: Int, hi: Int): Bool -> Block#[Bool]
-    .if {lo >= hi} .return {True}
-    .if {(hi - lo) <= (+1)} .return {(n % lo) != +0}
-    .let[Int] mid = {lo + ((hi - lo) / (+2))}
-    .return {this.noDivisorIn(n, lo, mid) && {this.noDivisorIn(n, mid, hi)}},
+  .noDivisorIn(n: Int, lo: Int, hi: Int): Bool -> (lo >= hi).if[Bool]{
+    .then -> True,
+    .else -> ((hi - lo) <= (+1)).if[Bool]{
+      .then -> (n % lo) != +0,
+      .else -> this.noDivisorIn(n, lo, this.mid(lo, hi))
+        && {this.noDivisorIn(n, this.mid(lo, hi), hi)},
+      },
+    },
   }
 
 Test: Main {sys -> sys.io.println(
-  Flow.range(+2, Primes.n)
-    .filter{n -> Primes.isPrime(n)}
-    .count
-    .str
-  )}
+  Flow.range(+2, Primes.n).filter{n -> Primes.isPrime(n)}.count.str)}

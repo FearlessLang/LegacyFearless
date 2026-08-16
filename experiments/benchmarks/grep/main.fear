@@ -1,57 +1,55 @@
 package bench
 
-/// Scan state: needle characters matched so far, whether this line has already
-/// matched, and how many lines have matched in total.
+Needles: {
+  #(cs: List[Str]): Needle -> {.size -> cs.size, .at(i) -> cs.get(i)},
+  .needle: Needle -> Needles#(List#[Str]("n", "e", "e", "d", "l", "e")),
+  }
+
+/// The literal being searched for, built once and captured by the fold rather
+/// than re-derived per character.
+Needle: {
+  .size: Nat,
+  .at(i: Nat): Str,
+
+  /// Every proper prefix of "needle" has an empty border, so on a mismatch the
+  /// automaton restarts at zero and only re-tests the current character
+  /// against the needle's first. Exact for this literal, not for needles in
+  /// general.
+  .advance(matched: Nat, c: Str): Nat -> (c == (this.at(matched))).if[Nat]{
+    .then -> matched + 1,
+    .else -> (c == (this.at(0))).if[Nat]{.then -> 1, .else -> 0},
+    },
+  }
+
+GrepStates: {
+  #(m: Nat, h: Bool, c: Nat): GrepState -> {.matched -> m, .hit -> h, .count -> c},
+  .zero: GrepState -> GrepStates#(0, False, 0),
+  }
+
+/// Needle characters matched so far, whether this line has already matched,
+/// and how many lines have matched in total.
 GrepState: {
   .matched: Nat,
   .hit: Bool,
   .count: Nat,
-  }
 
-Grep: {
-  .needleSize: Nat -> 6,
-
-  /// The needle one codepoint at a time. Spelled out rather than `.charAt` on
-  /// a literal, which would allocate a `Str` per character of the corpus and
-  /// turn this into a measurement of string allocation.
-  .needleAt(i: Nat): Str -> Block#
-    .if {i == 0} .return {"n"}
-    .if {i == 1} .return {"e"}
-    .if {i == 2} .return {"e"}
-    .if {i == 3} .return {"d"}
-    .if {i == 4} .return {"l"}
-    .return {"e"},
-
-  #(m: Nat, h: Bool, c: Nat): GrepState -> {
-    .matched -> m,
-    .hit -> h,
-    .count -> c,
+  .step(n: Needle, c: Str): GrepState -> (c == "\n").if[GrepState]{
+    .then -> GrepStates#(0, False, this.hit.if[Nat]{.then -> this.count + 1, .else -> this.count}),
+    .else -> this.afterAdvance(n.advance(this.matched, c), n),
     },
 
-  .zero: GrepState -> Grep#(0, False, 0),
-
-  /// Every proper prefix of "needle" has an empty border, so on a mismatch the
-  /// automaton can restart at zero and only re-test the current character
-  /// against the needle's first. Exact, for this literal.
-  .advance(matched: Nat, c: Str): Nat -> Block#
-    .if {c == (Grep.needleAt(matched))} .return {matched + 1}
-    .if {c == (Grep.needleAt(0))} .return {1}
-    .return {0},
-
-  /// Named rather than inline at the fold: three-parameter lambdas in argument
-  /// position do not always infer.
-  .step: read F[GrepState, Str, GrepState] -> {s, c -> Block#
-    .if {c == "\n"} .return {Grep#(0, False, s.hit.if{.then -> s.count + 1, .else -> s.count})}
-    .let[Nat] next = {Grep.advance(s.matched, c)}
-    .if {next == (Grep.needleSize)} .return {Grep#(0, True, s.count)}
-    .return {Grep#(next, s.hit, s.count)}
+  .afterAdvance(next: Nat, n: Needle): GrepState -> (next == (n.size)).if[GrepState]{
+    .then -> GrepStates#(0, True, this.count),
+    .else -> GrepStates#(next, this.hit, this.count),
     },
   }
 
-/// Counts corpus lines containing "needle". A literal rather than a regex, so
-/// what is measured is scanning.
+/// Counts corpus lines containing "needle". A literal rather than a regex: what
+/// is measured is scanning.
 Test: Main {sys -> Block#
-  .let[Str] text = {sys.io.accessR(List#[Str]("corpus", "corpus.txt")).readStr!}
-  .let[GrepState] res = {text.codepoints.fold[GrepState]({Grep.zero}, Grep.step)}
-  .return {sys.io.println(res.count.str)}
+  .let[Needle] needle = {Needles.needle}
+  .return {sys.io.println(
+    sys.io.accessR(List#[Str]("corpus", "corpus.txt")).readStr!
+      .codepoints.fold[GrepState]({GrepStates.zero}, {s, c -> s.step(needle, c)})
+      .count.str)}
   }
