@@ -1,9 +1,9 @@
-//! VT_Flow: the vtable that backs every Zig-resident flow instance.
+//! VT_Flow: the vtable of each Zig-resident flow instance.
 //!
-//! Intermediate ops (`map`, `filter`, …) append one `OpDesc` and return a new
-//! flow. Terminal ops (`fold`, `find`, …) dispatch into `terminals.zig`.
-//! A handful of methods (`only`, `get`, `opt`, `let`, `join`, `#/1`) have
-//! default Fearless bodies; those stay as thin delegation thunks.
+//! An intermediate op (`map`, `filter`, ...) appends one `OpDesc` and returns a new flow.
+//! A terminal op (`fold`, `find`, ...) dispatches into `terminals.zig`.
+//! `only`, `get`, `opt`, `let`, `join` and `#/1` keep their default Fearless bodies. They
+//! stay here as delegation thunks.
 
 const std = @import("std");
 const objs = @import("../../objs.zig");
@@ -23,18 +23,19 @@ const worker_mod = @import("../../worker.zig");
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
 
-// Each terminal pushes a fresh cancellation scope on entry, chaining to any outer scope on the same
-// fiber, so everything below it sees a valid scope in TLS. The Scope lives on the GC heap because a
-// thief task may capture it into TLS or StolenTask.scope and outlive the parent terminal's return.
+// Each terminal pushes a new cancellation scope at entry, chained to the outer scope on the same
+// fiber. Thus all code below it finds a valid scope in TLS. The Scope stays on the GC heap,
+// because a thief task can capture it into TLS or StolenTask.scope and outlive the terminal.
 fn pushScope() struct { current: *scope_mod.Scope, prev: ?*scope_mod.Scope } {
     const prev = scope_mod.active_scope;
     const s = gc.allocator.create(scope_mod.Scope) catch @panic("OOM");
     s.* = scope_mod.Scope.init(prev);
     scope_mod.active_scope = s;
-    // Mirror into Fiber.saved_scope for a GC root via the traced Fiber struct: BDW-GC does not scan
-    // TLS `active_scope`, and ReleaseSafe DCE can drop the caller's `sc.current` stack-local since
-    // only `sc.prev` is read. Without the mirror a live Scope can be reclaimed, which shows up as a
-    // small-address SEGV in `Scope.cancelled()`'s parent walk.
+    // Mirror into Fiber.saved_scope, to get a GC root through the traced Fiber struct. BDW-GC
+    // does not scan the TLS `active_scope`, and ReleaseSafe DCE can drop the `sc.current`
+    // stack-local of the caller, because only `sc.prev` is read. Without the mirror, the GC can
+    // reclaim a live Scope. This shows as a small-address SEGV in the parent walk of
+    // `Scope.cancelled()`.
     if (worker_mod.getCurrentWorker()) |w| {
         if (w.current_fiber) |f| f.saved_scope = s;
     }
@@ -45,10 +46,8 @@ fn popScope(prev: ?*scope_mod.Scope) void {
     if (worker_mod.getCurrentWorker()) |w| {
         if (w.current_fiber) |f| f.saved_scope = prev;
     }
-    // No free -- GC reclaims when nothing references the Scope.
+    // Do not free the Scope. The GC reclaims it when no reference remains.
 }
-
-// Stateful-op state allocators
 
 fn make_scan_cell(initial: FatPtr) u64 {
     const cell = gc.recycleAlloc(types.ScanCell);
@@ -67,8 +66,6 @@ fn make_ctx_cell(ctx: FatPtr) u64 {
     cell.* = .{ .ctx = ctx };
     return @intFromPtr(cell);
 }
-
-// Intermediate ops: append one OpDesc, return a new flow
 
 fn flow_map(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
@@ -170,13 +167,12 @@ fn flow_assume_finite(self: FatPtr) callconv(.c) FatPtr {
     return object.make_flow_fp(&VT_Flow, object.clone_with_finiteness(object.deref_flow(self), true));
 }
 
-// Terminal ops
-//
-// Most of these (fold, first, list, for, findMap, unorderedFindMap, max)
-// route through the Fearless `_FeartDriver` wrappers so APM/VPF see a Fearless
-// body at the top of the call chain. VPF re-tags the `.merge` inside those
-// bodies as VPFParallelisable, and the `.mergeFold` inside `.driveReduceFn`.
-// The remainder (last, count) stay on direct `terminals.drive_*` calls.
+// The terminals below go through the Fearless `_FeartDriver` wrappers, so that APM and VPF find
+// a Fearless body at the top of the call chain. VPF tags the `.merge` in those bodies, and the
+// `.mergeFold` in `.driveReduceFn`, as VPFParallelisable. The split of the driver is the only
+// source of flow data parallelism. Thus a terminal that skips it also makes all upstream ops
+// sequential. Only `forEffect` calls `terminals.drive_*` directly, by design: it runs user side
+// effects through a captured mutable reference, so it can never be parallel.
 
 fn flow_fold(self: FatPtr, initial: FatPtr, combine: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
@@ -190,20 +186,16 @@ fn flow_first(self: FatPtr) callconv(.c) FatPtr {
     return pbf._FeartDriver_0__ZdotdriveFirst_1_mut_Zfun(self, driver_singleton());
 }
 fn flow_last(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
-    const flow = object.deref_flow(self);
-    if (!flow.is_finite) @panic("Terminal on infinite flow");
+    if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
     const sc = pushScope();
     defer popScope(sc.prev);
-    return terminals.drive_last(flow);
+    return pbf._FeartDriver_0__ZdotdriveLast_1_mut_Zfun(self, driver_singleton());
 }
 fn flow_count(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
-    const flow = object.deref_flow(self);
-    if (!flow.is_finite) @panic("Terminal on infinite flow");
+    if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
     const sc = pushScope();
     defer popScope(sc.prev);
-    return terminals.drive_count(flow);
+    return pbf._FeartDriver_0__ZdotdriveCount_1_mut_Zfun(self, driver_singleton());
 }
 fn flow_list(self: FatPtr) callconv(.c) FatPtr {
     if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
@@ -221,11 +213,11 @@ fn flow_for_effect(self: FatPtr, callback: FatPtr) callconv(.c) FatPtr {
     const driver_obj = driver_singleton();
     return objs.call(driver_obj, h("mut .runChunkFor/2"), .{ self, callback }, @src());
 }
-// Predicated terminals delegate to the Fearless `_TerminalOps[E]` defaults, which dispatch
-// `.findMap`/`.unorderedFindMap` back through this same VT_Flow, so the parallel and cancel work
-// happens inside the resolved findMap impl. The scope push/pop stays here so the whole terminal
-// sits under one cancel scope; otherwise a stolen thief inside the findMap call would have its
-// scope.request() bubble up to the caller's scope rather than this terminal's.
+// The predicated terminals delegate to the `_TerminalOps[E]` defaults. Those dispatch
+// `.findMap` and `.unorderedFindMap` back through this same VT_Flow, so the parallel and cancel
+// work occurs in the resolved findMap impl. The scope push and pop stay here, to keep the full
+// terminal under one cancel scope. If not, the `scope.request()` of a stolen thief in the
+// findMap call goes to the scope of the caller, not to the scope of this terminal.
 fn flow_any(self: FatPtr, pred: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
@@ -270,8 +262,6 @@ fn flow_max(self: FatPtr, comparator: FatPtr) callconv(.c) FatPtr {
     return pbf._FeartDriver_0__ZdotdriveMax_2_mut_Zfun(self, comparator, driver_singleton());
 }
 
-// Identity / size / Fearless-default delegations
-
 fn flow_self(self: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     return self.share();
@@ -283,7 +273,7 @@ fn flow_size(self: FatPtr) callconv(.c) FatPtr {
     if (!flow.is_finite) return object.make_none();
     if (flow.ops.len != 0) return object.make_none();
 
-    // Only the O(1) cases are computed here; `.count/0` gives the size at any cost.
+    // Only the O(1) sources give a size here. `.count/0` gives the size at any cost.
     return switch (flow.source) {
         .list => |s| object.make_some(nat_rt.make(s.items.len - s.index)),
         .range_finite => |s| blk: {
@@ -314,25 +304,23 @@ fn T_flow_let(self: FatPtr, a: FatPtr, b: FatPtr) callconv(.c) FatPtr {
 fn T_flow_join(self: FatPtr, joinable: FatPtr) callconv(.c) FatPtr {
     return objs.call(joinable, h("imm .join/1"), .{self}, @src());
 }
-/// `Extensible[Flow[E]]#(ext)` at every receiver mdf. The Fearless body is `ext#(this.self)` and
-/// `.self` on a flow is the identity, so all three hand the receiver straight to `mut #/1`.
+/// `Extensible[Flow[E]]#(ext)` at each receiver mdf. The Fearless body is `ext#(this.self)`, and
+/// `.self` on a flow is the identity. Thus all three mdfs pass the receiver to `mut #/1`.
 fn T_flow_hash1(self: FatPtr, ext: FatPtr) callconv(.c) FatPtr {
     return objs.call(ext, h("mut #/1"), .{self}, @src());
 }
 
-/// `.unwrapOp` hands a flow's underlying `FlowOp` to base's Fearless flow operators, the very paths
-/// a Zig-resident flow replaces with its native `OpDesc` pipeline, and reaching it needs a
-/// `_UnwrapFlowToken` private to `base.flows`. The slot exists to keep the vtable complete and to
-/// fail identifiably rather than as a missing-method dispatch abort.
+/// `.unwrapOp` gives the `FlowOp` of a flow to the Fearless flow operators in base. A
+/// Zig-resident flow replaces those paths with its native `OpDesc` pipeline, and a caller also
+/// needs a `_UnwrapFlowToken`, which is private to `base.flows`. This slot keeps the vtable
+/// complete and fails with a clear message, not with a missing-method dispatch abort.
 fn T_flow_unwrap_op(self: FatPtr, unwrap: FatPtr) callconv(.c) FatPtr {
     _ = .{ self, unwrap };
     @panic("unwrapOp is not supported on FeaRT-native flows");
 }
 
-// VT_FeartDriver
-
-/// FatPtr for the `_FeartDriver` singleton. Kept in this module so the flow
-/// instance and driver vtables can refer to each other at comptime.
+/// FatPtr of the `_FeartDriver` singleton. It stays in this module, so that the flow instance
+/// vtable and the driver vtable can refer to each other at comptime.
 pub fn driver_singleton() FatPtr {
     return objs.obj_k_singleton(&VT_FeartDriver);
 }
@@ -370,6 +358,18 @@ fn driver_run_chunk_first(self: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
     return terminals.drive_first(object.deref_flow(flow));
 }
 
+fn driver_run_chunk_count(self: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
+    defer self.rc_decrement();
+    defer flow.rc_decrement();
+    return terminals.drive_count(object.deref_flow(flow));
+}
+
+fn driver_run_chunk_last(self: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
+    defer self.rc_decrement();
+    defer flow.rc_decrement();
+    return terminals.drive_last(object.deref_flow(flow));
+}
+
 fn driver_run_chunk_unordered_find_map(self: FatPtr, flow: FatPtr, mapper: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     defer flow.rc_decrement();
@@ -395,6 +395,12 @@ fn driver_drive_for(this: FatPtr, flow: FatPtr, f: FatPtr) callconv(.c) FatPtr {
 fn driver_drive_first(this: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
     return pbf._FeartDriver_0__ZdotdriveFirst_1_mut_Zfun(flow, this);
 }
+fn driver_drive_count(this: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
+    return pbf._FeartDriver_0__ZdotdriveCount_1_mut_Zfun(flow, this);
+}
+fn driver_drive_last(this: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
+    return pbf._FeartDriver_0__ZdotdriveLast_1_mut_Zfun(flow, this);
+}
 fn driver_drive_unordered_find_map(this: FatPtr, flow: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     return pbf._FeartDriver_0__ZdotdriveUnorderedFindMap_2_mut_Zfun(flow, f, this);
 }
@@ -411,9 +417,9 @@ fn driver_merge3(_: FatPtr, left: FatPtr, right: FatPtr, combine: FatPtr) callco
     return objs.call(combine, h("read #/2"), .{ left, right }, @src());
 }
 
-/// `_FeartDriver.mergeFold/3`: fold one already-collected chunk into `acc`, in index order. The
-/// chunk's elements stay owned by the list, so each is shared into the call; `acc` is handed over
-/// and replaced by the result, keeping exactly one accumulator reference live throughout.
+/// `_FeartDriver.mergeFold/3`: folds one collected chunk into `acc`, in index order. The list
+/// keeps ownership of the chunk elements, so each element is shared into the call. `acc` moves
+/// into the call, and the result replaces it. Thus only one accumulator reference stays live.
 fn driver_merge_fold(_: FatPtr, acc: FatPtr, chunk: FatPtr, combine: FatPtr) callconv(.c) FatPtr {
     defer chunk.rc_decrement();
     defer combine.rc_decrement();
@@ -499,6 +505,8 @@ pub const VT_FeartDriver: objs.VTable = .{
         h("mut .runChunkFindMap/2"),
         h("mut .runChunkFor/2"),
         h("mut .runChunkFirst/1"),
+        h("mut .runChunkCount/1"),
+        h("mut .runChunkLast/1"),
         h("mut .runChunkUnorderedFindMap/2"),
         h("mut .runChunkMax/2"),
         h("mut .driveReduce/3"),
@@ -507,6 +515,8 @@ pub const VT_FeartDriver: objs.VTable = .{
         h("mut .driveFindMap/2"),
         h("mut .driveFor/2"),
         h("mut .driveFirst/1"),
+        h("mut .driveCount/1"),
+        h("mut .driveLast/1"),
         h("mut .driveUnorderedFindMap/2"),
         h("mut .driveMax/2"),
         h("imm .merge/2"),
@@ -523,6 +533,8 @@ pub const VT_FeartDriver: objs.VTable = .{
         @as(*const anyopaque, @ptrCast(&driver_run_chunk_find_map)),
         @as(*const anyopaque, @ptrCast(&driver_run_chunk_for)),
         @as(*const anyopaque, @ptrCast(&driver_run_chunk_first)),
+        @as(*const anyopaque, @ptrCast(&driver_run_chunk_count)),
+        @as(*const anyopaque, @ptrCast(&driver_run_chunk_last)),
         @as(*const anyopaque, @ptrCast(&driver_run_chunk_unordered_find_map)),
         @as(*const anyopaque, @ptrCast(&driver_run_chunk_max)),
         @as(*const anyopaque, @ptrCast(&driver_drive_reduce)),
@@ -531,6 +543,8 @@ pub const VT_FeartDriver: objs.VTable = .{
         @as(*const anyopaque, @ptrCast(&driver_drive_find_map)),
         @as(*const anyopaque, @ptrCast(&driver_drive_for)),
         @as(*const anyopaque, @ptrCast(&driver_drive_first)),
+        @as(*const anyopaque, @ptrCast(&driver_drive_count)),
+        @as(*const anyopaque, @ptrCast(&driver_drive_last)),
         @as(*const anyopaque, @ptrCast(&driver_drive_unordered_find_map)),
         @as(*const anyopaque, @ptrCast(&driver_drive_max)),
         @as(*const anyopaque, @ptrCast(&driver_merge)),
@@ -547,6 +561,8 @@ pub const VT_FeartDriver: objs.VTable = .{
         "mut .runChunkFindMap/2",
         "mut .runChunkFor/2",
         "mut .runChunkFirst/1",
+        "mut .runChunkCount/1",
+        "mut .runChunkLast/1",
         "mut .runChunkUnorderedFindMap/2",
         "mut .runChunkMax/2",
         "mut .driveReduce/3",
@@ -555,6 +571,8 @@ pub const VT_FeartDriver: objs.VTable = .{
         "mut .driveFindMap/2",
         "mut .driveFor/2",
         "mut .driveFirst/1",
+        "mut .driveCount/1",
+        "mut .driveLast/1",
         "mut .driveUnorderedFindMap/2",
         "mut .driveMax/2",
         "imm .merge/2",
@@ -567,8 +585,6 @@ pub const VT_FeartDriver: objs.VTable = .{
     },
     .storage_mode = .singleton,
 };
-
-// VT_Flow
 
 pub const VT_Flow: objs.VTable = .{
     .type_name = "base.flows.Flow/1",

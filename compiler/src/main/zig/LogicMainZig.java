@@ -22,16 +22,22 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public interface LogicMainZig extends FullLogicMain<ZigProgram> {
-  @Override default String backendName() { return "zig"; }
+  /// This name keys the cached package type info, which decides if codegen skips a package. A
+  /// walk of the full cached-base tree finds that info, so a subdirectory cannot keep two
+  /// configurations apart, unlike in {@link ZigCompiler#versionedCacheDir}. The base library
+  /// holds VPF-parallelisable calls and thus generates different Zig with and without VPF. Each
+  /// configuration needs its own name here. If not, a `--no-vpf` build finds the type info of a
+  /// VPF build, skips base, and then has no Zig for it.
+  @Override default String backendName() { return buildOpts().vpfEnabled() ? "zig" : "zig-novpf"; }
   Path executablePath();
   void setExecutablePath(Path path);
 
-  /** FeaRT build configuration (optimisation mode, VPF, stack traces, ...);
-   * not exposed on any cross-backend interface. */
+  /// The FeaRT build configuration: optimisation mode, VPF, stack traces and more. No
+  /// cross-backend interface shows it.
   default ZigBuildOpts buildOpts() { return ZigBuildOpts.DEFAULT; }
 
   @Override default void cachePackageTypes(Program program) {
-    var versionedDir = new ZigCompiler(verbosity(), io()).versionedCacheDir();
+    var versionedDir = new ZigCompiler(verbosity(), io(), buildOpts()).versionedCacheDir();
     var baseDecs = program.ds().values().stream()
       .filter(d -> {
         var pkg = d.name().pkg();
@@ -40,7 +46,7 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
       .collect(Collectors.groupingBy(d -> d.name().pkg()));
     baseDecs.forEach((pkg, decs) ->
       new HDCache(versionedDir, program, backendName()).cacheTypeInfo(pkg, decs));
-    ZigCompiler.cleanOldVersions(versionedDir.getParent(), versionedDir);
+    ZigCompiler.cleanOldVersions(versionedDir.getParent());
   }
 
   @Override default MIR.Program lower(Program program, ConcurrentHashMap<Long, TsT> resolvedCalls) {
@@ -53,10 +59,10 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   }
 
   @Override default ZigProgram codeGeneration(MIR.Program mir) {
-    var compiler = new ZigCompiler(verbosity(), io());
+    var compiler = new ZigCompiler(verbosity(), io(), buildOpts());
     var cachedContent = compiler.loadCachedPackages(mir);
     cachedPkg().addAll(cachedContent.keySet());
-    return ZigProgram.of(io().entry(), mir, cachedPkg(), cachedContent);
+    return ZigProgram.of(io().entry(), mir, cachedPkg(), cachedContent, buildOpts().vpfEnabled());
   }
 
   @Override default void compileBackEnd(ZigProgram src) {

@@ -64,7 +64,6 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
       .collect(Collectors.groupingBy(t->t.name().pkg()))
       .entrySet().stream()
       .sorted(Map.Entry.comparingByKey())
-      //.filter(kv->!cached.contains(kv.getKey()))//uncomment when cached TODO is sorted
       .map(kv->visitPackage(kv.getKey(), kv.getValue()))
       .toList();
 
@@ -153,9 +152,8 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     var sig = visitSig(cm);
     var captures = captures(cm.m(), ctx);
 
-    // Gamma is keyed by source-level names (bodies reference params by their pre-renaming name);
-    // "_" params are unreferenceable so they stay out of Gamma. The captures are already in
-    // ctx.xXs() under their source-level names.
+    // Gamma uses source-level names, because bodies refer to params by their name before the
+    // renaming. A "_" param has no name, so it stays out of Gamma.
     var mCtx = new Ctx(Mapper.of(xXs->{
       xXs.putAll(ctx.xXs());
       Streams.zip(cm.xs(), sig.xs()).forEach((srcX,x)->{
@@ -164,7 +162,7 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     }));
 
     var x = ctx.xXs().get(selfNameOf(cm.c().name()));
-    // We always produce a self-arg even if it is not captured to keep the function signatures consistent
+    // The self-arg is always present, also when it is not captured, to keep the signatures equal
     Stream<MIR.X> selfArg =Stream.of(x);
     var args = Streams.of(sig.xs().stream(), selfArg, captures.stream().filter(xi->!xi.name().equals(x.name()))).toList();
 
@@ -174,7 +172,7 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     return new TopLevelRes(bodyRes.defs(), Push.of(bodyRes.funs(), fun));
   }
   public MIR.Meth visitMeth(CM.CoreCM cm, MIR.Sig sig) {
-    // uncallable meths can be abstract
+    // An uncallable method can be abstract
     if (cm.isAbs()) {
       return new MIR.Meth(cm.c().name(), sig, false, Collections.emptySortedSet(), Optional.empty());
     }
@@ -257,7 +255,6 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
   }
 
   private EnumSet<MIR.MCall.CallVariant> getVariants(MIR.E recv, E.MCall e) {
-    // Standard library .flow methods:
     var recvT = (MIR.MT.Usual) recv.t();
     var recvIT = recvT.it();
     Optional<String> literal = Magic.getLiteral(p, recvIT.name());
@@ -313,8 +310,11 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
       return EnumSet.of(MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
     }
 
-    // The internal implementations of FeartDriver's .merge and .mergeFold methods are always parallelisable
-    if (recvIT.name().equals(Magic.FeartDriver) && (e.name().equals(new Id.MethName(".merge", 3)) || e.name().equals(new Id.MethName(".mergeFold", 3)))) {
+    // `.merge` and `.mergeFold` are always parallelisable. `ComputeVPFMode` refuses them on its
+    // own, because their args are `mut` methods on `this`. See `base.flows._FeartDriver`.
+    if (recvIT.name().equals(Magic.FeartDriver) && (e.name().equals(new Id.MethName(".merge", 2))
+      || e.name().equals(new Id.MethName(".merge", 3))
+      || e.name().equals(new Id.MethName(".mergeFold", 3)))) {
       return EnumSet.of(MIR.MCall.CallVariant.VPFParallelisable);
     }
 

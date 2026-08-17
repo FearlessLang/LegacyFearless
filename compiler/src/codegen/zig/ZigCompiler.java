@@ -27,30 +27,38 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   }
 
   private Path cacheBaseDir() { return io.cachedBase().resolve("zig-cache"); }
-  public Path versionedCacheDir() { return cacheBaseDir().resolve("v" + ZIG_CACHE_VERSION); }
-  /// Zig's content-addressed build cache (`--cache-dir`). Note that when building
-  /// for a test, we compile into a throwaway output dir per test, so they share one warm cache under target/ instead.
+  /// The base library holds VPF-parallelisable calls, so its generated Zig differs between a VPF
+  /// build and a `--no-vpf` build. Each configuration gets its own cache directory. With a shared
+  /// directory, a `--no-vpf` build takes VPF-shaped base code and loses the sequential baseline
+  /// that it must measure. The split is at directory level, not at filename level, because
+  /// {@link main.java.HDCache} also caches the package type info here. That type info decides if
+  /// a package is cached at all, so the two must agree.
+  public Path versionedCacheDir() {
+    return cacheBaseDir().resolve(currentVersion() + (opts.vpfEnabled() ? "vpf" : "novpf"));
+  }
+  private static String currentVersion() { return "v" + ZIG_CACHE_VERSION + "-"; }
+  /// The content-addressed build cache of zig (`--cache-dir`). Each test compiles into its own
+  /// throwaway output dir, so the tests share one warm cache under target/.
   private Path zigCacheDir() {
     if (opts.fastTestBuild()) { return targetDir().resolve("fearless-zig-cache/local"); }
     return io.output().resolve("zig-cache/local");
   }
-  /// The build runner and fetched dependency packages: machine-global
+  /// The build runner and the fetched dependency packages, shared by the full machine
   private Path zigGlobalCacheDir() { return OsCache.root().resolve("zig-cache/global"); }
-  /// Only meaningful under {@link ZigBuildOpts#fastTestBuild()}, the sole caller:
-  /// tests run out of target/classes, so the resource root's parent is target.
+  /// Only {@link ZigBuildOpts#fastTestBuild()} calls this. A test runs out of target/classes,
+  /// so the parent of the resource root is target.
   private static Path targetDir() { return ResolveResource.artefact("/").getParent(); }
-  /// The zig build tree: `build.zig`, the runtime source copy, the generated
-  /// program, and `zig-out`. Zig's build cache keys on the absolute paths of the
-  /// build root and its sources, so a work dir that moves between compiles
-  /// defeats the cache entirely. Tests get one fork-stable dir under target/, so
-  /// concurrent forks stay off each other's tree without moving the path.
-  private Path workDir() {
+  /// The zig build tree: `build.zig`, the runtime source copy, the generated program and
+  /// `zig-out`. The zig build cache keys on the absolute paths of the build root and its
+  /// sources, so a work dir that moves between compiles defeats the cache. Each test fork gets
+  /// one stable dir under target/, thus concurrent forks keep apart and the path stays equal.
+  Path workDir() {
     if (opts.fastTestBuild()) { return targetDir().resolve("fearless-zig-work/fork-" + forkId()); }
     return io.output().resolve("zig-build");
   }
-  /// Identifies the surefire fork this JVM is, from the `surefire.forkNumber`
-  /// the pom interpolates into argLine. A plain `java` or IDE run falls back to
-  /// the pid, losing only cross-run cache reuse.
+  /// Identifies the surefire fork of this JVM, from the `surefire.forkNumber` that the pom puts
+  /// into argLine. A plain `java` run or an IDE run uses the pid, and loses only the cache reuse
+  /// between runs.
   private static String forkId() {
     var fork = System.getProperty("surefire.forkNumber");
     if (fork != null && !fork.isBlank() && !fork.contains("$")) { return fork; }
@@ -58,7 +66,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   }
   private Path zigOutDir(Path workDir) { return workDir.resolve("zig-out"); }
 
-  /// Load cached .zig content for base packages. Returns pkgName→zigContent for cache hits.
+  /// Returns the cached .zig content of the base packages, keyed by package name.
   public Map<String, String> loadCachedPackages(MIR.Program program) {
     var dir = versionedCacheDir();
     if (!Files.isDirectory(dir)) { return Map.of(); }
@@ -76,9 +84,8 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     }
     return cached;
   }
-  /// The FeaRT runtime source tree: the copy bundled with the compiler, or
-  /// `FEART_ROOT` so the runtime can be developed against a checkout without
-  /// rebuilding the compiler.
+  /// The FeaRT runtime source tree: the copy in the compiler, or `FEART_ROOT`. With
+  /// `FEART_ROOT` you can develop the runtime in a checkout and not build the compiler again.
   static Path feartRoot() {
     var envPath = System.getenv("FEART_ROOT");
     if (envPath != null) { return Path.of(envPath); }
@@ -122,13 +129,16 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     return outDir.resolve("bin/fearless-app");
   }
 
-  public static void cleanOldVersions(Path cacheBase, Path keep) {
+  /// Deletes the cache directories of an old {@link #ZIG_CACHE_VERSION}. The siblings of the
+  /// current version hold the other VPF configuration, so they stay. Thus a change between
+  /// `--feart` and `--feart --no-vpf` does not discard the cache of the other build.
+  public static void cleanOldVersions(Path cacheBase) {
     if (!Files.isDirectory(cacheBase)) { return; }
     IoErr.of(() -> {
       try (var dirs = Files.list(cacheBase)) {
         dirs.filter(Files::isDirectory)
-          .filter(d -> d.getFileName().toString().matches("v\\d+"))
-          .filter(d -> !d.equals(keep))
+          .filter(d -> d.getFileName().toString().matches("v\\d+(-\\w+)?"))
+          .filter(d -> !d.getFileName().toString().startsWith(currentVersion()))
           .forEach(DeleteDir::of);
       }
     });
@@ -159,10 +169,10 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     copyNativeStaticLib(workDir);
   }
 
-  /// Stage the Rust C-ABI staticlib (the `frt_*` string and regex surface, shared
-  /// with the Java backend) next to the runtime so build.zig can link it. Its
-  /// `<arch>-<os>-libnative_rt.a` name uses the same arch/os spelling as the JNI
-  /// `.so` loader in assets/rt/NativeRuntime.java.
+  /// Copies the Rust C-ABI staticlib next to the runtime, so that build.zig can link it. The
+  /// lib holds the `frt_*` string and regex surface, which the Java backend also uses. Its
+  /// `<arch>-<os>-libnative_rt.a` name uses the arch and os spelling of the JNI `.so` loader in
+  /// assets/rt/NativeRuntime.java.
   private void copyNativeStaticLib(Path workDir) throws IOException {
     var osName = System.getProperty("os.name").toLowerCase();
     String os;
@@ -187,16 +197,16 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
   }
 
-  /// Write `content` only if that is not already what the file holds, so an
-  /// unchanged file keeps its mtime and stays a cheap stat-only hit for zig.
+  /// Writes `content` only when the file holds different bytes. Thus an unchanged file keeps its
+  /// mtime, and zig needs only a stat.
   private static void writeIfChanged(Path dest, String content) throws IOException {
     var bytes = content.getBytes(StandardCharsets.UTF_8);
     if (Files.isRegularFile(dest) && Arrays.equals(Files.readAllBytes(dest), bytes)) { return; }
     Files.write(dest, bytes);
   }
 
-  /// Drop generated package files left by an earlier compile into the same work
-  /// dir. Nothing imports them, but they would otherwise pile up indefinitely.
+  /// Deletes the package files of an earlier compile into the same work dir. No file imports
+  /// them, but they collect without a limit.
   private static void pruneGenerated(Path genDir, Set<String> keep) throws IOException {
     try (var files = Files.list(genDir)) {
       for (var file : files.toList()) {
@@ -205,8 +215,8 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     }
   }
 
-  /// True when `dest` already holds exactly the bytes of `src`. `src` may live in
-  /// the jar's virtual file system, so this reads rather than comparing metadata.
+  /// True when `dest` holds the bytes of `src`. `src` can be in the virtual file system of the
+  /// jar, so this compares the content and not the metadata.
   private static boolean sameContent(Path src, Path dest) throws IOException {
     if (!Files.isRegularFile(dest)) { return false; }
     if (Files.size(dest) != Files.size(src)) { return false; }
@@ -216,14 +226,13 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   private void copyTree(Path source, Path target) throws IOException {
     try (var walker = Files.walk(source)) {
       walker.forEach(src -> IoErr.of(() -> {
-        // resolve via String: source may live in the jar's virtual file system
+        // Resolve through a String: the source can be in the virtual file system of the jar
         var dest = target.resolve(source.relativize(src).toString());
         if (Files.isDirectory(src)) {
           Files.createDirectories(dest);
         } else {
           Files.createDirectories(dest.getParent());
-          // Rewriting an identical file bumps its mtime, making zig re-hash it
-          // only to discover nothing changed.
+          // A rewrite of an equal file changes its mtime, and then zig hashes it again
           if (!sameContent(src, dest)) {
             Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING);
           }
@@ -242,11 +251,10 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
       "--global-cache-dir", globalCache.toAbsolutePath().toString(),
       "--prefix", outDir.toAbsolutePath().toString()
     ));
-    // The self-hosted (non-LLVM) linker cannot handle the .sframe sections in the
-    // CRT objects of very new host glibc/gcc toolchains; pinning a glibc version
-    // makes zig link its own bundled CRT objects instead. 2.34 stays runnable on
-    // older stable distros. LLVM builds keep a fully native target, both because
-    // LLD handles .sframe and for native CPU tuning under ReleaseFast.
+    // The self-hosted (non-LLVM) linker cannot read the .sframe sections in the CRT objects of a
+    // very new host glibc or gcc. A pinned glibc version makes zig link its own CRT objects.
+    // Version 2.34 also runs on older stable distros. An LLVM build keeps a fully native target,
+    // because LLD reads .sframe and because ReleaseFast tunes for the native CPU.
     if (!opts.useLlvm() && System.getProperty("os.name").toLowerCase().contains("linux")) {
       cmd.add("-Dtarget=native-native-gnu.2.34");
     }
@@ -344,9 +352,9 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           exe.root_module.addImport("libgc", c_libgc_mod);
           exe.root_module.linkLibrary(context_switch_lib);
 
-          // Linking the native runtime archive directly lets the linker drop its
-          // unreferenced JNI objects. It pulls in libc (pthread etc.), and its
-          // Rust objects need the platform unwinder that libgcc_s provides.
+          // A direct link of the native runtime archive lets the linker drop its unused JNI
+          // objects. The archive needs libc (pthread and more), and its Rust objects need the
+          // platform unwinder in libgcc_s.
           exe.root_module.addObjectFile(b.path("lib/native/libnative_rt.a"));
           exe.root_module.link_libc = true;
           exe.root_module.linkSystemLibrary("gcc_s", .{});

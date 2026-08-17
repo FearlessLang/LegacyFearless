@@ -6,9 +6,9 @@ import utils.Base;
 import static codegen.zig.RunZigProgramTests.okBase;
 import static utils.RunOutput.Res;
 
-/// Flow transformations and terminals (map/filter/flatMap/scan/limit, find/any/all/none/max/first,
-/// list/sum/fold) plus the prime/sieve integration programs. Error propagation through flows lives
-/// in [TestZigFlowErrors].
+/// Flow transformations and terminals (map, filter, flatMap, scan, limit, find, any, all, none,
+/// max, first, list, sum, fold), and the prime and sieve programs. [TestZigFlowErrors] holds the
+/// error propagation tests.
 public class TestZigFlows {
   @Test void flowMap() { okBase(new Res("300", "", 0), """
     package test
@@ -40,8 +40,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // There is no .for test: verifying its side-effects requires capturing `sys` in a
-  // `read F[E,Void]` closure, which is not permitted.
+  // There is no .for test. A test of its side effects must capture `sys` in a `read F[E,Void]`
+  // closure, which the type system does not permit.
 
   @Test void flowFirst() { okBase(new Res("1", "", 0), """
     package test
@@ -55,11 +55,105 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Predicated terminals expand through Fearless defaults onto .findMap (ordered) or
-  // .unorderedFindMap (cancel-safe). Each uses a 4-elem splittable list so the split fires.
+  // A filter can empty the left half of a split. The merge must then fall through to the right
+  // half, and not give the `.empty` of the left half as the answer.
+  @Test void flowFirstAfterEmptyLeftHalf() { okBase(new Res("51", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      Flow.range(+0, +100)
+        .filter{n -> n > +50}
+        .first
+        .match{
+          .some(n) -> n.str,
+          .empty -> "none",
+          }
+      )}
+    """, Base.mutBaseAliases); }
 
-  // Target in the left half, so the left fork's match calls scope.request() and the right fork is
-  // cancelled before or during its run_chunk. isSome holds either way.
+  @Test void flowFirstAfterEmptyLeftHalfUnderForcedPromotion() { okBase(16, new Res("51", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      Flow.range(+0, +100)
+        .filter{n -> n > +50}
+        .first
+        .match{
+          .some(n) -> n.str,
+          .empty -> "none",
+          }
+      )}
+    """, Base.mutBaseAliases); }
+
+  @Test void flowCount() { okBase(new Res("49", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      Flow.range(+0, +100)
+        .filter{n -> n > +50}
+        .count
+        .str
+      )}
+    """, Base.mutBaseAliases); }
+
+  @Test void flowCountUnderForcedPromotion() { okBase(16, new Res("49", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      Flow.range(+0, +100)
+        .filter{n -> n > +50}
+        .count
+        .str
+      )}
+    """, Base.mutBaseAliases); }
+
+  // The filter removes the tail of the range. The right half of the top split gives nothing, so
+  // the merge must keep the answer of the left half.
+  @Test void flowLastWithEmptyRightHalf() { okBase(new Res("50", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      Flow.range(+0, +100)
+        .filter{n -> n <= +50}
+        .last
+        .match{
+          .some(n) -> n.str,
+          .empty -> "none",
+          }
+      )}
+    """, Base.mutBaseAliases); }
+
+  @Test void flowLastWithEmptyRightHalfUnderForcedPromotion() { okBase(16, new Res("50", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      Flow.range(+0, +100)
+        .filter{n -> n <= +50}
+        .last
+        .match{
+          .some(n) -> n.str,
+          .empty -> "none",
+          }
+      )}
+    """, Base.mutBaseAliases); }
+
+  // Leaf paths. No flow here splits, so each drive goes directly to .runChunkCount or
+  // .runChunkLast.
+  @Test void flowCountAndLastOnEmptyFlow() { okBase(new Res("0|none", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      (Flow#[Int]().count.str)
+        + "|" + (Flow#[Int]().last.match{.some(n) -> n.str, .empty -> "none"})
+      )}
+    """, Base.mutBaseAliases); }
+
+  @Test void flowCountAndLastOnSingletonFlow() { okBase(new Res("1|7", "", 0), """
+    package test
+    Test:Main {sys -> sys.io.println(
+      (Flow#[Int](+7).count.str)
+        + "|" + (Flow#[Int](+7).last.match{.some(n) -> n.str, .empty -> "none"})
+      )}
+    """, Base.mutBaseAliases); }
+
+  // The predicated terminals go through the Fearless defaults to .findMap, which keeps the order,
+  // or to .unorderedFindMap, which is cancel-safe. Each test uses a 4-element list, which splits.
+
+  // The target is in the left half. The match in the left fork calls scope.request(), and the
+  // right fork cancels before or during its run_chunk. isSome is true in both cases.
   @Test void flowAnyEarlyExit() { okBase(new Res("True", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -69,8 +163,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Predicate true for every element, so no match is found, cancel never fires, and both halves run
-  // to completion.
+  // The predicate is true for each element. Thus there is no match, no cancel occurs, and both
+  // halves run to the end.
   @Test void flowAll() { okBase(new Res("True", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -80,7 +174,7 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Same shape as .all: no match, so no cancel fires.
+  // The shape of .all: no match, and thus no cancel.
   @Test void flowNone() { okBase(new Res("True", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -90,8 +184,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Ordered semantics, leftmost match wins. The target is in the right half, so the empty left
-  // result must not win at the merge.
+  // The order is important, and the leftmost match wins. The target is in the right half, so the
+  // empty left result must not win at the merge.
   @Test void flowFindRightHalf() { okBase(new Res("4", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -104,8 +198,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // The peak sits in the second quarter, so driveMax's reducer is exercised at all three merge
-  // positions rather than only at the root.
+  // The peak is in the second quarter, so the reducer of driveMax runs at all three merge
+  // positions, and not only at the root.
   @Test void flowMax() { okBase(new Res("4", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -121,8 +215,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Variable-fan-out flatMap: each element maps to a differently sized inner flow, so
-  // process_through must walk varying lengths while the outer source is split.
+  // Each element maps to an inner flow of a different size, so process_through must walk
+  // different lengths while the outer source splits.
   @Test void flowFlatMapVariableFanout() { okBase(new Res("10", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -134,8 +228,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Mid-pipeline .limit is stateful, so split_flow refuses and run_chunk must fire Applied.done
-  // once the limit is reached, propagating the short-circuit back through the upstream ops.
+  // A .limit in the middle of a pipeline keeps state, so split_flow refuses it. At the limit,
+  // run_chunk must send Applied.done back through the upstream ops.
   @Test void flowLimitMidPipeline() { okBase(new Res("5", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -148,8 +242,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // .scan desugars to .actor, which is stateful, so split_flow refuses and the ActorState cell must
-  // survive across run_chunk iterations.
+  // .scan becomes .actor, which keeps state. Thus split_flow refuses it, and the ActorState cell
+  // must stay alive between run_chunk iterations.
   @Test void flowScan() { okBase(new Res("6", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -196,7 +290,7 @@ public class TestZigFlows {
       }
     """, Base.mutBaseAliases); }
 
-  // Splittable list source, but downgraded from DP due to the contextful map (.map/2)
+  // The list source splits, but the contextful map (.map/2) removes the DP mode
   @Test void flowMapCtxDP() { okBase(new Res("01 12 23 34", "", 0), """
     package test
     Test: Main{sys -> Block#
@@ -232,8 +326,7 @@ public class TestZigFlows {
       }
     """, Base.mutBaseAliases); }
 
-  // A splittable source with only stateless ops, so the whole multi-op pipeline runs under a split
-  // driveReduce.
+  // The source splits and no op keeps state, so the full pipeline runs under a split driveReduce.
   @Test void flowMapFilterSum() { okBase(new Res("20", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -245,8 +338,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // `{a, _ -> a + 1}` is a counting fold: not a monoid over E, so a driver that combines two
-  // accumulators with the element combiner undercounts rather than failing outright.
+  // `{a, _ -> a + 1}` counts, and it is not a monoid over E. A driver that combines two
+  // accumulators with the element combiner gives a low count, and does not fail.
   @Test void flowFoldNonMonoidCountsEveryElement() { okBase(new Res("6", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -256,8 +349,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Same shape on a list source, so a failure localises to the driver rather than to split_flow's
-  // `.str` arm.
+  // The same shape on a list source. Thus a failure comes from the driver, and not from the
+  // `.str` arm of split_flow.
   @Test void flowFoldNonMonoidOnListSource() { okBase(new Res("4", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -267,9 +360,9 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Accumulator type != element type (A = Wc, E = Str), the `wc` benchmark's shape minimised. A
-  // driver that passes an accumulator where the combiner expects an element cannot fail silently
-  // here: `c == "\\n"` dispatches `imm ==/1` on Wc and dies.
+  // The accumulator type differs from the element type (A = Wc, E = Str). This is the small form
+  // of the `wc` benchmark. A driver that gives an accumulator where the combiner needs an element
+  // cannot fail quietly: `c == "\\n"` dispatches `imm ==/1` on Wc and dies.
   @Test void flowFoldMixedAccumulatorType() { okBase(new Res("2", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -285,8 +378,8 @@ public class TestZigFlows {
     Wcs: {#(n: Nat): Wc -> {.lines -> n}}
     """, Base.mutBaseAliases); }
 
-  // Forced promotion is what actually exercises `.mergeFold`'s parallel arms: the left fold and the
-  // right chunk's collection run on separate frames.
+  // Only forced promotion runs the parallel arms of `.mergeFold`: the left fold and the collection
+  // of the right chunk then run on separate frames.
   @Test void flowFoldNonMonoidUnderForcedPromotion() { okBase(16, new Res("64", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -296,9 +389,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Order-sensitive as well as non-associative: appending each element to a string reconstructs the
-  // source only if every chunk lands in the right place, so a misplaced merge scrambles the output
-  // rather than merely miscounting.
+  // This fold is non-associative and also order-sensitive. The appended string is equal to the
+  // source only when each chunk is in its correct position, so a wrong merge changes the output.
   @Test void flowFoldPreservesOrderUnderForcedPromotion() { okBase(16, new Res("abcdefgh", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -307,8 +399,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // .sum/.uSum/.fSum are ordinary folds, so they go through the same non-reassociating path as any
-  // other fold. Forced promotion keeps the split machinery live around them.
+  // .sum, .uSum and .fSum are usual folds, so they use the same path, which does not
+  // re-associate. Forced promotion keeps the split code active around them.
   @Test void flowSumsStayCorrect() { okBase(16, new Res("4950|10", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(

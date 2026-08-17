@@ -1,28 +1,29 @@
 package base.flows
 
-/// This private & sealed type is for interoperability with the FeaRT runtime for Fearless.
-/// With FeaRT, flows are implemented magically in the Fearless runtime for performance reasons and
-/// to enable automatic parallelisation, which we drive through VPF rather than the custom strategies
-/// the Java backend uses. The `.drive*` methods parallelise by having their recursive halves be the
-/// args of a `.merge/3` or `.mergeFold/3` call, which `MIRInjectionVisitor` hardcodes as
-/// VPFParallelisable: the calls can introduce user observable effects, and their args are `mut`
-/// methods reached through `this`, which `ComputeVPFMode`'s mut-weakening rules reject on their own.
+/// Private, sealed bridge to the FeaRT runtime. FeaRT implements flows in the runtime, for
+/// speed and for automatic parallelisation. The parallelism comes from VPF, not from the
+/// custom strategies of the Java backend.
 ///
-/// The FeaRT code that implements this type is in `runtime/flows/driver.zig` and delegates to the generated
-/// Fearless code written here except for the magic methods.
-/// Magic methods that depend on runtime state are still marked as `mut` to abide by the Fearless type system's rules.
+/// Each `.drive*` method puts its two recursive halves in the args of `.merge/3` or
+/// `.mergeFold/3`. `MIRInjectionVisitor` hardcodes those two calls as VPFParallelisable,
+/// because `ComputeVPFMode` refuses them on its own: they can cause user-visible effects,
+/// and their args are `mut` methods on `this`.
+///
+/// The runtime side is `intrinsics/flows/instance.zig`. It delegates to the Fearless code
+/// here, except for the magic methods. A magic method that reads runtime state stays `mut`,
+/// to obey the type system.
 _FeartDriver: Sealed{
-  /// The public `.fold` terminal. `F[A,E,A]` is an arbitrary left-fold step: not associative,
-  /// `initial` is not an identity, and `A` need not be `E`. So two accumulators can never be
-  /// combined and `combine` must see every element on one thread, in order.
+  /// The public `.fold` terminal. `F[A,E,A]` is an arbitrary left-fold step. It is not
+  /// associative, `initial` is not an identity, and `A` can differ from `E`. Thus you cannot
+  /// combine two accumulators. `combine` must see all elements on one thread, in order.
   mut .driveReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read F[A,E,A]): A ->
     this.driveReduceFn[E,A](flow, initial, read _FeartReduceFn[A,E]{a, e -> combine#(a, e)}),
 
-  /// Parallelism above, ordering at the terminal. At each split the left half is folded
-  /// recursively while the right half is collected into its own list; `.mergeFold` then folds that
-  /// chunk starting from the left's accumulator, so every element reaches `combine` once, in order,
-  /// on one thread. Each chunk dies at its merge point, so nothing larger than a chunk is live at a
-  /// time and the `.empty` leaf materialises no list at all.
+  /// Parallel above, ordered at the terminal. At each split, the left half folds recursively
+  /// and the right half collects into its own list. `.mergeFold` then folds that chunk from
+  /// the left accumulator. Thus all elements reach `combine` once, in order, on one thread.
+  /// Each chunk dies at its merge point, so only one chunk is live at a time. The `.empty`
+  /// leaf makes no list at all.
   mut .driveReduceFn[E:*,A:*](flow: mut Flow[E], initial: A, combine: read _FeartReduceFn[A,E]): A -> _FeartDriver.splitMatch[E,A](flow, {
     .some(left, right) -> this.shouldStop ? {
       .then -> initial,
@@ -35,8 +36,8 @@ _FeartDriver: Sealed{
     .empty -> this.runChunkReduce[E,A](flow, initial, combine),
     }),
 
-  /// Unlike `.driveReduce`, the reducer here is list concatenation rather than an arbitrary
-  /// user-defined function, so it is associative and the two halves can merge via `.merge/3`.
+  /// The reducer is list concatenation, not a user function. It is associative, so the two
+  /// halves merge with `.merge/3`.
   mut .driveCollect[E:*](flow: mut Flow[E]): mut List[E] -> _FeartDriver.splitMatch[E, mut List[E]](flow, {
     .some(left, right) -> this.shouldStop ? {
       .then -> List#[E],
@@ -47,6 +48,37 @@ _FeartDriver: Sealed{
         ),
       },
     .empty -> this.runChunkCollect[E](flow),
+    }),
+
+  /// A count is a `Nat` sum. It is associative, so the halves merge with `.merge/3`. The leaf
+  /// counts natively in `terminals.drive_count`, thus only the merges pay for a Fearless `+`.
+  mut .driveCount[E:*](flow: mut Flow[E]): Nat -> _FeartDriver.splitMatch[E, Nat](flow, {
+    .some(left, right) -> this.shouldStop ? {
+      .then -> 0,
+      .else -> _FeartDriver.merge[Nat, Nat](
+        this.driveCount[E](left),
+        this.driveCount[E](right),
+        _FeartReduceFn[Nat, Nat]{l, r -> l + r}
+        ),
+      },
+    .empty -> this.runChunkCount[E](flow),
+    }),
+
+  /// The split keeps the order. Thus, if the right half gives an element, that element is the
+  /// last one. The merge is right-biased, the opposite of `.driveFirst`.
+  mut .driveLast[E:*](flow: mut Flow[E]): mut Opt[E] -> _FeartDriver.splitMatch[E, mut Opt[E]](flow, {
+    .some(left, right) -> this.shouldStop ? {
+      .then -> {},
+      .else -> _FeartDriver.merge[mut Opt[E], mut Opt[E]](
+        this.driveLast[E](left),
+        this.driveLast[E](right),
+        read _FeartReduceFn[mut Opt[E], mut Opt[E]]{l, r -> r.match{
+          .empty -> l,
+          .some(_) -> r,
+          }}
+        ),
+      },
+    .empty -> this.runChunkLast[E](flow),
     }),
 
   mut .driveFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> _FeartDriver.splitMatch[E, mut Opt[R]](flow, {
@@ -72,19 +104,24 @@ _FeartDriver: Sealed{
     .empty -> this.runChunkFor[E](flow, f),
     }),
 
+  /// The split keeps the order. Thus, if the left half gives an element, that element is the
+  /// first one. A `.filter` op can empty the left half, so the merge must fall through to the
+  /// right half. `.findMapReducer` does this: it is a left-biased first-some.
   mut .driveFirst[E:*](flow: mut Flow[E]): mut Opt[E] -> _FeartDriver.splitMatch[E, mut Opt[E]](flow, {
     .some(left, right) -> this.shouldStop ? {
       .then -> {},
-      .else -> _FeartDriver.merge[mut Opt[E]](
+      .else -> _FeartDriver.merge[mut Opt[E], mut Opt[E]](
         this.driveFirst[E](left),
-        this.driveFirst[E](right)
+        this.driveFirst[E](right),
+        _FeartReduceFn[mut Opt[E], mut Opt[E]]{l, r -> _FeartDriver.findMapReducer[E]#(l, r)}
         ),
       },
     .empty -> this.runChunkFirst[E](flow),
     }),
 
-  /// Order-insensitive findMap. Same shape as `.driveFindMap`, but the leaf
-  /// (`.runChunkUnorderedFindMap`) calls `scope.request()` on first match, cancelling sibling forks.
+  /// Order-insensitive findMap. It has the shape of `.driveFindMap`, but the leaf
+  /// (`.runChunkUnorderedFindMap`) calls `scope.request()` at the first match. This cancels
+  /// the sibling forks.
   mut .driveUnorderedFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> _FeartDriver.splitMatch[E, mut Opt[R]](flow, {
     .some(left, right) -> this.shouldStop ? {
       .then -> {},
@@ -124,11 +161,13 @@ _FeartDriver: Sealed{
   mut .runChunkFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> Magic!,
   mut .runChunkFor[E:*](flow: mut Flow[E], f: read F[E, Void]): Void -> Magic!,
   mut .runChunkFirst[E:*](flow: mut Flow[E]): mut Opt[E] -> Magic!,
-  /// The Zig accept-fn calls `scope.request()` on first match, so a sibling subtree running on a
-  /// thief observes the cancel at its next chunk poll and returns early.
+  mut .runChunkCount[E:*](flow: mut Flow[E]): Nat -> Magic!,
+  mut .runChunkLast[E:*](flow: mut Flow[E]): mut Opt[E] -> Magic!,
+  /// The Zig accept-fn calls `scope.request()` at the first match. A sibling subtree on a
+  /// thief sees the cancel at its next chunk poll, then returns.
   mut .runChunkUnorderedFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> Magic!,
-  /// `.runChunkReduce` takes `initial: A` directly (the iso-MF unwrapping happens in `flow_fold`'s
-  /// Zig dispatch), so the seed is `{}` and not `{{}}`.
+  /// `.runChunkReduce` takes `initial: A` directly, so the seed is `{}` and not `{{}}`. The
+  /// iso-MF unwrapping occurs in the Zig dispatch of `flow_fold`.
   mut .runChunkMax[E:*](flow: mut Flow[E], compare: read F[E, E, Ordering]): mut Opt[E] ->
     this.runChunkReduce[E, mut Opt[E]](flow, {}, read _FeartReduceFn[mut Opt[E], E]{max, b -> max.match{
       .empty -> Opts#b,
@@ -139,36 +178,37 @@ _FeartDriver: Sealed{
         },
       }}),
 
-  /// Cancellation poll: the Zig body loads TLS `active_scope` and walks its parent chain for the
-  /// cancel bit (see `scope.zig::currentCancelled`). Every `.drive*` polls it in the `.some` branch
-  /// so a cancellation short-circuits the subtree without doing the split's work.
+  /// Cancellation poll. The Zig body reads the TLS `active_scope`, then walks its parent chain
+  /// for the cancel bit (see `scope.zig::currentCancelled`). All `.drive*` methods poll it in
+  /// the `.some` branch, so a cancel stops the subtree before it does the work of the split.
   mut .shouldStop: Bool -> Magic!,
 
-  /// Identity-on-left stub for the drives that need no real merge: `.driveFor`, whose effects fire
-  /// on both halves regardless and whose Void result is meaningless, and `.driveFirst`, where the
-  /// split preserves order and the left half is always non-empty, so left-first is semantic-first.
+  /// Identity-on-left stub for `.driveFor`. Both halves cause their effects anyway, and the
+  /// Void result has no meaning.
   .merge[A:*](left: A, right: A): A -> left,
 
-  /// Singleton reducer for `.driveCollect`. Runtime body is `driver.zig::VT_ListConcatReducer`'s
-  /// `read #/2` handler: appends the right list's items into the left list and returns left.
+  /// Singleton reducer for `.driveCollect`. The runtime body is the `read #/2` handler of
+  /// `instance.zig::VT_ListConcatReducer`. It appends the right items to the left list, then
+  /// returns the left list.
   .collectReducer[E:*]: read F[mut List[E], mut List[E], mut List[E]] -> Magic!,
 
-  /// Singleton reducer for `.driveFindMap`. Runtime body is `driver.zig::VT_FirstSomeReducer`'s
-  /// `read #/2` handler: returns left if left.isSome, else right (left-biased first-some-wins).
+  /// Singleton reducer for `.driveFindMap`. The runtime body is the `read #/2` handler of
+  /// `instance.zig::VT_FirstSomeReducer`. It returns the left value if it is some, else the
+  /// right value.
   .findMapReducer[R:*]: read F[mut Opt[R], mut Opt[R], mut Opt[R]] -> Magic!,
 
-  /// VPF combiner for the drives whose reducer is associative. VPFCodegen wraps the two recursive
-  /// drive args in thief/shadow-frame infrastructure and re-emits this call as the combiner. Body is
-  /// `Magic!` because Fearless's `F[A,E,A]` apply method only accepts (A,E) args but we pass (A,A);
-  /// the Zig vtable's FatPtr-level dispatch requires A=E at runtime, which holds because every
-  /// caller passes a dedicated `_FeartReduceFn[R,R]`. Mixed-type accumulators are why `.fold` uses
-  /// `.mergeFold` instead.
+  /// VPF combiner for the drives that have an associative reducer. VPFCodegen wraps the two
+  /// recursive drive args in thief and shadow-frame code, then emits this call as the combiner.
+  /// The body is `Magic!` because the apply method of `F[A,E,A]` accepts (A,E) args, but this
+  /// call passes (A,A). Dispatch in the Zig vtable is at FatPtr level and needs A=E, which is
+  /// true because each caller passes a dedicated `_FeartReduceFn[R,R]`. `.fold` uses
+  /// `.mergeFold` instead, because its accumulator type can differ from its element type.
   .merge[E:*,A:*](left: A, right: A, combine: read _FeartReduceFn[A,E]): A -> Magic!,
 
-  /// VPF combiner for `.driveReduceFn`. Its two parallelisable args are an accumulator and a chunk
-  /// of elements rather than two accumulators, which is what lets a non-associative `F[A,E,A]` be
-  /// driven in parallel at all; the differing types are also why `.merge/3` cannot express it. The
-  /// Zig vtable applies `combine` to each of the chunk's elements in index order, from `acc`.
+  /// VPF combiner for `.driveReduceFn`. Its two parallel args are an accumulator and a chunk of
+  /// elements, not two accumulators. This is what makes a non-associative `F[A,E,A]` parallel,
+  /// and it is also why `.merge/3` cannot express it. The Zig vtable applies `combine` to each
+  /// chunk element in index order, from `acc`.
   .mergeFold[E:*,A:*](acc: A, chunk: mut List[E], combine: read _FeartReduceFn[A,E]): A -> Magic!,
   }
 

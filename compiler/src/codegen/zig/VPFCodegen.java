@@ -7,10 +7,8 @@ import visitors.MIRVisitor;
 import java.util.*;
 import java.util.stream.Collectors;
 
-/**
- * VPF (Very Parallel Fearless) codegen: detects VPF-eligible calls in function bodies
- * and emits parallel thief functions with shadow frame instrumentation.
- */
+/// VPF (Very Parallel Fearless) codegen. It finds the VPF-eligible calls in a function body,
+/// then emits parallel thief functions with shadow-frame instrumentation.
 class VPFCodegen {
   private final ZigSingleCodegen parent;
   private int vpfCounter = 0;
@@ -22,19 +20,17 @@ class VPFCodegen {
     this.parent = parent;
   }
 
-  /** Info about a VPF call found in a function body. */
   record VPFCallInfo(
     MIR.MCall vpfCall,
-    MIR.BoolExpr boolExpr, // non-null if wrapped in BoolExpr (base case + recursive case)
-    List<SubExprInfo> subExprs, // all sub-expressions (recv + args), classified
-    List<SubExprInfo> plainExprs, // non-frame-adding sub-expressions
-    String hashName // hash constant name for the VPF call's method
+    MIR.BoolExpr boolExpr, // null unless a BoolExpr wraps the call
+    List<SubExprInfo> subExprs, // receiver at index 0, then the args
+    List<SubExprInfo> plainExprs, // the sub-exprs that add no stack frame
+    String hashName
   ) {}
 
-  /** Classification of a sub-expression within a VPF call. */
   record SubExprInfo(MIR.E expr, boolean isFrameAdding, int index) {}
 
-  /** Find a VPFParallelisable MCall in the function body, return null if none. */
+  /// Returns null when the body has no VPFParallelisable call.
   VPFCallInfo findVPFCall(MIR.E body) {
     return switch (body) {
       case MIR.Box box -> findVPFCall(box.inner());
@@ -45,7 +41,7 @@ class VPFCodegen {
         yield null;
       }
       case MIR.BoolExpr boolExpr -> {
-        // The VPF call is typically in the else-branch (recursive case)
+        // The recursive case, and thus the VPF call, is usually the else-branch
         var elseFun = parent.funMap.get(boolExpr.else_());
         if (elseFun != null) {
           var inner = findVPFCallInner(elseFun.body());
@@ -59,20 +55,49 @@ class VPFCodegen {
     };
   }
 
-  /** Emit a VPF-instrumented function: locals struct + thief function + instrumented body. */
+  /// True when the body of this function holds a VPFParallelisable call, also through a BoolExpr
+  /// branch. The caller uses this to know if inlining a branch would discard the instrumentation
+  /// of the branch function.
+  boolean containsVPFCall(MIR.FName fName) {
+    return containsVPFCall(fName, new HashSet<>());
+  }
+
+  private boolean containsVPFCall(MIR.FName fName, Set<MIR.FName> visited) {
+    var cached = parent.vpfBranchCache.get(fName);
+    if (cached != null) { return cached; }
+    if (!visited.add(fName)) { return false; }
+    var fun = parent.funMap.get(fName);
+    var res = fun != null && containsVPFCall(fun.body(), visited);
+    parent.vpfBranchCache.put(fName, res);
+    return res;
+  }
+
+  /// A VPF call in the receiver or the args of another call is not reported, by design. The
+  /// de-inlining of a BoolExpr branch cannot help it, so a search there de-inlines more branches
+  /// than necessary.
+  private boolean containsVPFCall(MIR.E body, Set<MIR.FName> visited) {
+    return switch (body) {
+      case MIR.Box box -> containsVPFCall(box.inner(), visited);
+      case MIR.Block block -> containsVPFCall(block.original(), visited);
+      case MIR.MCall call -> call.variant().contains(MIR.MCall.CallVariant.VPFParallelisable);
+      case MIR.BoolExpr boolExpr ->
+        containsVPFCall(boolExpr.then(), visited) || containsVPFCall(boolExpr.else_(), visited);
+      default -> false;
+    };
+  }
+
+  /// Emits a locals struct, a thief function and an instrumented body.
   void emitVPFFun(MIR.Fun fun, String name, List<String> paramNames, String params, VPFCallInfo vpf) {
     int vpfId = vpfCounter++;
     var localsName = name + "_" + vpfId + "_Locals";
     var thiefName = name + "_" + vpfId + "_thief";
 
     var frameAddingExprs = vpf.subExprs.stream().filter(s -> s.isFrameAdding).toList();
-    // Build set of function parameter names for the thief's locals prefix
     var funParamNames = new HashSet<String>();
     for (var arg : fun.args()) {
       funParamNames.add(arg.name());
     }
 
-    // 1. Emit Locals struct: all function params + r1 slot
     var localsFields = new StringBuilder();
     for (var arg : fun.args()) {
       localsFields.append(parent.id.varName(arg.name())).append(": rt.FatPtr,\n");
@@ -84,7 +109,6 @@ class VPFCodegen {
     );
     emitLocalsHooks(localsName, fun.args().stream().map(a -> parent.id.varName(a.name())).toList());
 
-    // 2. Emit thief function
     var remaining = frameAddingExprs.subList(1, frameAddingExprs.size());
     if (remaining.size() >= 2 && canDeepenVPF(fun, 1)) {
       emitVPFThiefFunction(thiefName, localsName, fun, vpf, frameAddingExprs,
@@ -94,7 +118,6 @@ class VPFCodegen {
         funParamNames, List.of());
     }
 
-    // 3. Emit the instrumented function body
     var sb = new StringBuilder();
     sb.append("pub fn ").append(name).append("(").append(params).append(") rt.FatPtr {\n");
     if (!paramNames.isEmpty()) {
@@ -103,63 +126,59 @@ class VPFCodegen {
       sb.append(" };\n");
     }
 
-    // heartbeat.tryPromote() — before base case check, so promotion always runs
+    // Promotion runs before the base-case check, so that it always runs
     sb.append("heartbeat.tryPromote();\n");
     for (var paramName : paramNames) {
       sb.append("defer ").append(paramName).append(".rc_decrement();\n");
     }
 
-    // If there's a BoolExpr, emit the base case as an early return
+    // The base case becomes an early return
     if (vpf.boolExpr != null) {
       var cond = vpf.boolExpr.condition().accept(parent, true);
-      var thenFun = parent.funMap.get(vpf.boolExpr.then());
-      String thenBody = parent.returnExpr(thenFun.body(), true);
+      var thenBranch = vpf.boolExpr.then();
+      String thenBody = parent.deInlinedBranch(thenBranch, parent, true)
+        .orElseGet(() -> parent.returnExpr(parent.funMap.get(thenBranch).body(), true));
       sb.append("if (").append(cond).append(".vt == &").append(parent.vtableRef(new DecId("base.True", 0))).append(") return ").append(thenBody).append(";\n");
     }
 
-    // Initialise locals struct
     sb.append("var locals = ").append(localsName).append("{ ");
     for (var arg : fun.args()) {
       sb.append(".").append(parent.id.varName(arg.name())).append(" = ").append(parent.id.varName(arg.name())).append(", ");
     }
     sb.append(".r1 = undefined };\n");
 
-    // Compiler fence to flush locals to memory before pushing frame
+    // Compiler fence. It writes the locals to memory before the frame push
     sb.append("asm volatile (\"\" ::: .{ .memory = true });\n");
 
-    // Push shadow frame
     emitPushFrame(sb, vpf.hashName, "locals", localsName, thiefName);
 
-    // Main thread computes first frame-adding sub-expression → locals.r1
     if (!frameAddingExprs.isEmpty()) {
       var firstFrameAdding = frameAddingExprs.getFirst();
       var firstExprCode = firstFrameAdding.expr.accept(parent, true);
       sb.append("locals.r1 = ").append(firstExprCode).append(";\n");
     }
 
-    // Pop and claim the frame (if we managed to push one)
     sb.append("if (frame_idx_opt) |frame_idx| {\n");
     sb.append("    if (shadow_stack_mod.popAndClaim(frame_idx)) |obligation| {\n");
-    // Promoted path: deliver r1 to thief, wait for thief result
+    // Promoted path: give r1 to the thief, then wait for its result
     sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, locals.r1);\n");
     sb.append("        const wait_result = obligation.wait(worker_mod.getCurrentWorker().?);\n");
     sb.append("        shadow_stack_mod.freeObligation(obligation);\n");
-    // The thief delivers its combined result here, but if it unwound (a
-    // deterministic Error! or ND fault) it fulfilled this obligation with a
-    // tag-typed error payload instead. Re-unwind on our own fiber so the error
-    // cascades one level up rather than being fed into the combiner as a value.
+    // The thief usually delivers its combined result here. But if it unwound, from a
+    // deterministic Error! or an ND fault, it fulfilled the obligation with a tag-typed error
+    // payload. Unwind again on this fiber, so that the error goes up one level and does not
+    // enter the combiner as a value.
     sb.append("        if (error_rt.tagOf(wait_result) != .none) errors.feart_unwind(wait_result);\n");
     sb.append("        return wait_result;\n");
     sb.append("    }\n");
     sb.append("}\n");
 
-    // Not-promoted path: compute remaining frame-adding sub-exprs ourselves, call combiner
+    // Not-promoted path: compute the remaining frame-adding sub-exprs here
     for (int i = 1; i < frameAddingExprs.size(); i++) {
       var expr = frameAddingExprs.get(i);
       sb.append("const r").append(i + 1).append(" = ").append(expr.expr.accept(parent, true)).append(";\n");
     }
 
-    // Build result map and call combiner
     var resultMap = new HashMap<Integer, String>();
     for (int i = 0; i < frameAddingExprs.size(); i++) {
       resultMap.put(frameAddingExprs.get(i).index, i == 0 ? "locals.r1" : "r" + (i + 1));
@@ -173,7 +192,7 @@ class VPFCodegen {
     parent.currentState().functions.add(sb.toString());
   }
 
-  /** Like findVPFCall but doesn't look through BoolExpr (inner level). */
+  /// As findVPFCall, but it does not look through a BoolExpr.
   private VPFCallInfo findVPFCallInner(MIR.E body) {
     if (body instanceof MIR.Box box) {
       return findVPFCallInner(box.inner());
@@ -187,9 +206,7 @@ class VPFCodegen {
 
   private VPFCallInfo buildVPFInfo(MIR.MCall call) {
     var subExprs = new ArrayList<SubExprInfo>();
-    // Receiver is sub-expr 0
     subExprs.add(new SubExprInfo(call.recv(), isFrameAddingExpr(call.recv()), 0));
-    // Args are sub-exprs 1..N
     for (int i = 0; i < call.args().size(); i++) {
       var arg = call.args().get(i);
       subExprs.add(new SubExprInfo(arg, isFrameAddingExpr(arg), i + 1));
@@ -204,7 +221,7 @@ class VPFCodegen {
     return new VPFCallInfo(call, null, subExprs, plainExprs, hashExpr);
   }
 
-  /** MCalls and BoolExprs are the only MIR expressions that add stack frames; Box is transparent here. */
+  /// Only an MCall and a BoolExpr add a stack frame. A Box is transparent here.
   private boolean isFrameAddingExpr(MIR.E expr) {
     if (expr instanceof MIR.Box box) {
       return isFrameAddingExpr(box.inner());
@@ -212,10 +229,9 @@ class VPFCodegen {
     return expr instanceof MIR.MCall || expr instanceof MIR.BoolExpr;
   }
 
-  /**
-   * VPF-instrumented thief: computes one sub-expr, pushes shadow frame for inner thief,
-   * either waits for inner thief result (stolen path) or computes remaining sequentially (not-stolen path).
-   */
+  /// An instrumented thief. It computes one sub-expr, then pushes a shadow frame for the inner
+  /// thief. On the stolen path it waits for the result of the inner thief. On the not-stolen
+  /// path it computes the remaining sub-exprs in sequence.
   private void emitVPFThiefFunction(String thiefName, String localsName, MIR.Fun fun,
                                      VPFCallInfo vpf, List<SubExprInfo> allFrameAddingExprs,
                                      List<SubExprInfo> remainingFrameAdding,
@@ -230,7 +246,6 @@ class VPFCodegen {
     var myExpr = remainingFrameAdding.getFirst();
     int myGlobalIdx = allFrameAddingExprs.indexOf(myExpr);
 
-    // Build inner locals struct: params + forwarded obls + new fwd for this child_obl + r_thief slot
     var innerFields = new StringBuilder();
     for (var arg : fun.args()) {
       innerFields.append(parent.id.varName(arg.name())).append(": rt.FatPtr,\n");
@@ -250,7 +265,6 @@ class VPFCodegen {
     );
     emitLocalsHooks(innerLocalsName, fun.args().stream().map(a -> parent.id.varName(a.name())).toList());
 
-    // Recursively emit the inner thief
     var innerRemaining = remainingFrameAdding.subList(1, remainingFrameAdding.size());
     if (innerRemaining.size() >= 2 && canDeepenVPF(fun, newForwardedFields.size())) {
       emitVPFThiefFunction(innerThiefName, innerLocalsName, fun, vpf,
@@ -262,12 +276,10 @@ class VPFCodegen {
 
     int fwdCount = forwardedChildOblFields.size();
 
-    // Emit this thief function
     var sb = new StringBuilder();
     sb.append("fn ").append(thiefName).append("(locals_ptr: *anyopaque, child_obl_opt: ?*JoinObligation) rt.FatPtr {\n");
     sb.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
 
-    // Initialize inner thief locals
     sb.append("var thief_locals = ").append(innerLocalsName).append("{ ");
     for (var arg : fun.args()) {
       var vn = parent.id.varName(arg.name());
@@ -281,13 +293,11 @@ class VPFCodegen {
 
     sb.append("asm volatile (\"\" ::: .{ .memory = true });\n");
 
-    // Push shadow frame for inner thief
     emitPushFrame(sb, vpf.hashName, "thief_locals", innerLocalsName, innerThiefName);
 
-    // Compute this thief's sub-expr
     sb.append("thief_locals.r_thief = ").append(myExpr.expr.accept(thiefGen, true)).append(";\n");
 
-    // Stolen path: deliver result to inner thief, wait for inner thief's combined result
+    // Stolen path: give the result to the inner thief, then wait for its combined result
     sb.append("if (frame_idx_opt) |frame_idx| {\n");
     sb.append("    if (shadow_stack_mod.popAndClaim(frame_idx)) |inner_obl| {\n");
     sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, thief_locals.r_thief);\n");
@@ -336,11 +346,8 @@ class VPFCodegen {
     parent.currentState().functions.add(drop.toString());
   }
 
-  /**
-   * Simple thief (innermost level): computes its assigned sub-exprs sequentially,
-   * waits for child_obl (from immediate parent), waits for forwarded obligations,
-   * calls full combiner.
-   */
+  /// The innermost thief. It computes its sub-exprs in sequence, waits for the obligation of its
+  /// parent, waits for the forwarded obligations, then calls the full combiner.
   private void emitSimpleThiefFunction(String thiefName, String localsName, MIR.Fun fun,
                                         VPFCallInfo vpf, List<SubExprInfo> frameAddingExprs,
                                         Set<String> funParamNames,
@@ -348,7 +355,7 @@ class VPFCodegen {
     var thiefGen = new ThiefCodegen(parent, funParamNames);
     int fwdCount = forwardedChildOblFields.size();
 
-    // Generate the body first, then conditionally emit locals decl
+    // The body comes first, because it shows if a locals decl is necessary
     var body = new StringBuilder();
     emitThiefTail(body, thiefGen, frameAddingExprs.subList(fwdCount + 1, frameAddingExprs.size()),
       frameAddingExprs, vpf, fwdCount, -1, forwardedChildOblFields);
@@ -366,7 +373,8 @@ class VPFCodegen {
     parent.currentState().functions.add(sb.toString());
   }
 
-  /** Shared tail for thief functions: compute remaining exprs, wait obligations, combine + return. */
+  /// The shared tail of a thief function. It computes the remaining exprs, waits for the
+  /// obligations, then combines and returns.
   private void emitThiefTail(StringBuilder sb, ThiefCodegen thiefGen,
                               List<SubExprInfo> exprsToCompute,
                               List<SubExprInfo> allFrameAdding,
@@ -380,9 +388,8 @@ class VPFCodegen {
     }
     sb.append("const r1 = child_obl_opt.?.wait(worker_mod.getCurrentWorker().?);\n");
     sb.append("shadow_stack_mod.freeObligation(child_obl_opt.?);\n");
-    // child_obl_opt carries our immediate parent's sub-expr value — unless the
-    // parent unwound, in which case feart_unwind delivered a tag-typed error
-    // here. Re-unwind on our own fiber to cascade it up.
+    // child_obl_opt holds the sub-expr value of the parent. But if the parent unwound,
+    // feart_unwind put a tag-typed error here. Unwind again on this fiber, to send it up.
     sb.append("if (error_rt.tagOf(r1) != .none) errors.feart_unwind(r1);\n");
     emitWaitForwardedObligations(sb, forwardedChildOblFields);
     var resultMap = buildThiefCombinerMap(allFrameAdding, fwdCount, myGlobalIdx);
@@ -414,27 +421,23 @@ class VPFCodegen {
     }
   }
 
-  /**
-   * Build the sub-expr-index → variable-name mapping for a thief's combiner.
-   */
   private Map<Integer, String> buildThiefCombinerMap(List<SubExprInfo> frameAddingExprs,
                                                       int fwdCount, int myGlobalIdx) {
     var resultMap = new HashMap<Integer, String>();
 
-    // Forwarded obligations: fwd_child_obl_0 holds e0, fwd_child_obl_1 holds e1, etc.
+    // A forwarded obligation holds the sub-expr with the same index: fwd_child_obl_0 holds e0
     for (int i = 0; i < fwdCount; i++) {
       resultMap.put(frameAddingExprs.get(i).index, "fwd_r" + i);
     }
 
-    // child_obl_opt delivers the immediate parent's sub-expr
+    // child_obl_opt delivers the sub-expr of the parent
     resultMap.put(frameAddingExprs.get(fwdCount).index, "r1");
 
-    // This VPF thief's own computed sub-expr (not applicable for simple thief)
+    // A simple thief computes no sub-expr of its own, and thus has no index here
     if (myGlobalIdx >= 0) {
       resultMap.put(frameAddingExprs.get(myGlobalIdx).index, "thief_locals.r_thief");
     }
 
-    // Remaining sub-exprs computed sequentially
     int startIdx = (myGlobalIdx >= 0) ? myGlobalIdx + 1 : fwdCount + 1;
     for (int i = startIdx; i < frameAddingExprs.size(); i++) {
       if (!resultMap.containsKey(frameAddingExprs.get(i).index)) {
@@ -445,7 +448,6 @@ class VPFCodegen {
     return resultMap;
   }
 
-  /** Emit a combiner call using a pre-built sub-expr-index → variable-name map. */
   private String emitCombinerFromMap(VPFCallInfo vpf, Map<Integer, String> resultMap, MIRVisitor<String> codegen) {
     var allArgs = new String[vpf.subExprs.size()];
     for (var sub : vpf.subExprs) {
@@ -467,7 +469,7 @@ class VPFCodegen {
     return "rt.call(" + recvStr + ", " + vpf.hashName + ", " + argsTuple + ", @src())";
   }
 
-  /** Check if creating another VPF thief level would keep locals within the runtime buffer. */
+  /// True when one more thief level keeps the locals in the runtime buffer.
   private boolean canDeepenVPF(MIR.Fun fun, int nextFwdCount) {
     int structSize = fun.args().size() * 16  // FatPtr params
                    + nextFwdCount * 8         // forwarded obligation usize fields
@@ -475,10 +477,8 @@ class VPFCodegen {
     return structSize <= LOCALS_COPY_LIMIT;
   }
 
-  /**
-   * ThiefCodegen: a wrapper that overrides visitX to prefix param names with "locals."
-   * for use inside thief functions where params are accessed via the locals struct pointer.
-   */
+  /// A wrapper that gives each param name the "locals." prefix. A thief function reads its
+  /// params through the locals struct pointer.
   static class ThiefCodegen implements MIRVisitor<String> {
     private final ZigSingleCodegen delegate;
     private final Set<String> paramNames;
@@ -498,15 +498,14 @@ class VPFCodegen {
       return delegate.emitMCall(call, this, checkMagic);
     }
     @Override public String visitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
-      // Let parent handle side effects (type/vtable emission) and magic
+      // The parent does the type and vtable emission, and the magic
       String parentResult = delegate.visitCreateObj(createObj, checkMagic);
 
-      // If no captures, parent result is correct (singleton or magic)
+      // A singleton or magic result has no captures to prefix
       if (createObj.captures().isEmpty()) { return parentResult; }
-      // If parent returned a singleton or magic result, keep it
       if (parentResult.contains("obj_k_singleton") || !parentResult.contains("obj_k(")) { return parentResult; }
 
-      // Re-generate with our visitX so captures get the locals. prefix
+      // Generate again with this visitX, to give the captures the locals. prefix
       var objId = createObj.concreteT().id();
       var captures = createObj.captures().stream()
         .map(x -> "." + delegate.id.varName(x.name()) + " = " + this.visitX(x, checkMagic))

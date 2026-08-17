@@ -20,32 +20,35 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   private int transientCounter = 0;
   private int blockCounter = 0;
 
-  // Per-package accumulated output
   static class PackageState {
     final String packageName;
     final List<String> functions = new ArrayList<>();
     final LinkedHashMap<DecId, String> captureStructs = new LinkedHashMap<>();
     final LinkedHashMap<String, String> vtableDefs = new LinkedHashMap<>();
 
-    // Capture list recorded verbatim at CreateObj emission time. The box hook needs the
-    // exact, ordered capture set; re-deriving it from the AST is fragile, so we keep it here.
+    // The capture list, as recorded at CreateObj emission. The box hook needs the exact set, in
+    // order, and a second derivation from the AST is not reliable.
     final LinkedHashMap<DecId, SortedSet<MIR.X>> captureLists = new LinkedHashMap<>();
 
     PackageState(String packageName) { this.packageName = packageName; }
   }
 
   public final Map<String, PackageState> packageStates = new LinkedHashMap<>();
-  // freshRecords equivalent: tracks which CreateObj types we've already emitted
   public final LinkedHashMap<DecId, Boolean> emittedTypes = new LinkedHashMap<>();
 
-  // Map from type DecId -> owning package name
   final Map<DecId, String> typeToPackage = new HashMap<>();
 
-  // The package currently being emitted into
   private String emitTargetPkg;
   private String pkg;
 
-  public ZigSingleCodegen(MIR.Program p) {
+  private final boolean vpfEnabled;
+  /// Only for {@link VPFCodegen#containsVPFCall}, which keeps no scope. The instrumentation state
+  /// of a function lives on the throwaway instance that {@link #visitFun} makes.
+  private final VPFCodegen vpf;
+  final Map<MIR.FName, Boolean> vpfBranchCache = new HashMap<>();
+
+  public ZigSingleCodegen(MIR.Program p, boolean vpfEnabled) {
+    this.vpfEnabled = vpfEnabled;
     magic = new ZigMagicImpls(this, t -> "rt.FatPtr", p.p());
     sigBuilder = new ZigSigStringBuilder(p.p());
     this.p = p;
@@ -53,12 +56,13 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       .flatMap(pkg -> pkg.funs().stream())
       .collect(Collectors.toMap(MIR.Fun::name, f -> f));
 
-    // Build typeToPackage map
     for (var mpkg : p.pkgs()) {
       for (var defId : mpkg.defs().keySet()) {
         typeToPackage.put(defId, mpkg.name());
       }
     }
+
+    this.vpf = new VPFCodegen(this);
   }
 
   PackageState getOrCreatePackageState(String pkgName) {
@@ -69,7 +73,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return getOrCreatePackageState(emitTargetPkg);
   }
 
-  /** Get a VTable reference, qualified with root.pkg_ prefix if cross-package. */
+  /// A VTable reference. It gets the root.pkg_ prefix when it points to a different package.
   public String vtableRef(DecId objId) {
     return vtableRef(objId, false);
   }
@@ -84,7 +88,8 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return vtName;
   }
 
-  /** Get a Captures struct reference, qualified with root.pkg_ prefix if cross-package. */
+  /// A Captures struct reference. It gets the root.pkg_ prefix when it points to a different
+  /// package.
   public String capturesRef(DecId objId) {
     var typeName = id.getSimpleName(objId);
     var owningPkg = typeToPackage.get(objId);
@@ -94,7 +99,8 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return typeName + "_Captures";
   }
 
-  /** Get a static function reference, qualified with root.pkg_ prefix if cross-package. */
+  /// A static function reference. It gets the root.pkg_ prefix when it points to a different
+  /// package.
   public String funRef(MIR.FName fName) {
     var zigName = id.getFName(fName);
     var owningPkg = typeToPackage.get(fName.d());
@@ -221,17 +227,44 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       "rt.obj_k(" + capturesRef(objId) + ", &" + vtableRef(objId) + ", .{ " + String.join(", ", boxedFields) + " })");
   }
 
+  /// A `.then` or `.else` arm whose subtree holds a VPF call becomes a call to the function of
+  /// the arm, and not an inlined body. `visitFun` gives that function its own VPF
+  /// instrumentation, which an inlined body generates but never calls. This works at each
+  /// nesting depth, and no code counts the depth: `visitFun` emits each de-inlined arm in turn,
+  /// and de-inlines again, until it reaches the level where `VPFCodegen#findVPFCall` finds and
+  /// instruments the call.
+  ///
+  /// Returns empty when VPF is off. Thus a `--no-vpf` build keeps full inlining and stays the
+  /// fastest sequential build.
+  Optional<String> deInlinedBranch(MIR.FName fName, MIRVisitor<String> gen, boolean checkMagic) {
+    if (!vpfEnabled || !vpf.containsVPFCall(fName)) { return Optional.empty(); }
+    var fun = funMap.get(fName);
+    if (fun == null || fun.args().isEmpty()) { return Optional.empty(); }
+    // The args of an arm are [self, captures...]. `BoolIfOptimisation` makes a `BoolExpr` only
+    // when no arm captures self, so no code reads the self param and any singleton is sufficient.
+    // The captures are the same `MIR.X`s as in the enclosing scope, which is also what makes the
+    // inlining correct, so they emit correctly here.
+    var args = new ArrayList<String>();
+    args.add("rt.obj_k_singleton(&" + vtableRef(new DecId("base.True", 0)) + ")");
+    fun.args().stream().skip(1).forEach(x -> args.add(ownedExpr(x, gen, checkMagic)));
+    return Optional.of(funRef(fName) + "(" + String.join(", ", args) + ")");
+  }
+
   private String boxBoolExpr(MIR.BoolExpr expr, MIRVisitor<String> gen, boolean checkMagic) {
     String recv = expr.condition().accept(gen, checkMagic);
 
-    String thenBody = switch (this.funMap.get(expr.then()).body()) {
-      case MIR.Block b -> boxExpr(b.original(), gen, checkMagic);
-      case MIR.E e -> boxExpr(e, gen, checkMagic);
-    };
-    String elseBody = switch (this.funMap.get(expr.else_()).body()) {
-      case MIR.Block b -> boxExpr(b.original(), gen, checkMagic);
-      case MIR.E e -> boxExpr(e, gen, checkMagic);
-    };
+    String thenBody = deInlinedBranch(expr.then(), gen, checkMagic)
+      .map(this::boxOwnedCode)
+      .orElseGet(() -> switch (this.funMap.get(expr.then()).body()) {
+        case MIR.Block b -> boxExpr(b.original(), gen, checkMagic);
+        case MIR.E e -> boxExpr(e, gen, checkMagic);
+      });
+    String elseBody = deInlinedBranch(expr.else_(), gen, checkMagic)
+      .map(this::boxOwnedCode)
+      .orElseGet(() -> switch (this.funMap.get(expr.else_()).body()) {
+        case MIR.Block b -> boxExpr(b.original(), gen, checkMagic);
+        case MIR.E e -> boxExpr(e, gen, checkMagic);
+      });
 
     return "(if (" + recv + ".vt == &" + vtableRef(new DecId("base.True", 0)) + ") " + thenBody + " else " + elseBody + ")";
   }
@@ -239,14 +272,16 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   String boolExpr(MIR.BoolExpr expr, MIRVisitor<String> gen, boolean checkMagic, boolean ownedBranches) {
     String recv = expr.condition().accept(gen, checkMagic);
 
-    String thenBody = switch (this.funMap.get(expr.then()).body()) {
-      case MIR.Block b -> inlineBlock(b, gen, ownedBranches);
-      case MIR.E e -> ownedBranches ? ownedExpr(e, gen, checkMagic) : e.accept(gen, checkMagic);
-    };
-    String elseBody = switch (this.funMap.get(expr.else_()).body()) {
-      case MIR.Block b -> inlineBlock(b, gen, ownedBranches);
-      case MIR.E e -> ownedBranches ? ownedExpr(e, gen, checkMagic) : e.accept(gen, checkMagic);
-    };
+    String thenBody = deInlinedBranch(expr.then(), gen, checkMagic)
+      .orElseGet(() -> switch (this.funMap.get(expr.then()).body()) {
+        case MIR.Block b -> inlineBlock(b, gen, ownedBranches);
+        case MIR.E e -> ownedBranches ? ownedExpr(e, gen, checkMagic) : e.accept(gen, checkMagic);
+      });
+    String elseBody = deInlinedBranch(expr.else_(), gen, checkMagic)
+      .orElseGet(() -> switch (this.funMap.get(expr.else_()).body()) {
+        case MIR.Block b -> inlineBlock(b, gen, ownedBranches);
+        case MIR.E e -> ownedBranches ? ownedExpr(e, gen, checkMagic) : e.accept(gen, checkMagic);
+      });
 
     return "(if (" + recv + ".vt == &" + vtableRef(new DecId("base.True", 0)) + ") " + thenBody + " else " + elseBody + ")";
   }
@@ -258,20 +293,17 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var isLiteral = isLiteral(def.name());
     if (isMagic || isLiteral) { return ""; }
 
-    // Emit VTable for singleton types
     var leastSpecific = ParentWalker.leastSpecificSigs(p, def);
 
-    // If this type has a singleton instance, emit it
     def.singletonInstance().ifPresent(objK -> {
       emitCreateObj(objK, true);
     });
 
-    // Emit static functions
     for (var fun : funs) {
       visitFun(fun);
     }
 
-    return ""; // All output accumulated in state
+    return ""; // The output collects in the package state
   }
 
   public void emitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
@@ -287,13 +319,12 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     if (emittedTypes.containsKey(objId)) { return; }
     emittedTypes.put(objId, true);
 
-    // Route emission to the owning package
     var savedEmitTarget = this.emitTargetPkg;
     var owningPkg = typeToPackage.get(objId);
     if (owningPkg != null) {
       this.emitTargetPkg = owningPkg;
     } else {
-      // Type not in any package's defs (anonymous/literal) — record where we emit it
+      // An anonymous or literal type is in no package defs, so record the package used here
       typeToPackage.put(objId, this.emitTargetPkg);
     }
 
@@ -306,7 +337,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       ? ParentWalker.leastSpecificSigs(p, typeDef)
       : java.util.Map.<Id.MethName, MIR.Sig>of();
 
-    // Emit captures struct
     if (!createObj.captures().isEmpty()) {
       var fields = createObj.captures().stream()
         .map(x -> id.varName(x.name()) + ": rt.FatPtr,")
@@ -314,11 +344,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       currentState().captureStructs.put(objId,
         "const " + id.getSimpleName(objId) + "_Captures = extern struct {\n"
         + fields + "\n};");
-      // Record the authoritative capture list for the box hook.
       currentState().captureLists.put(objId, createObj.captures());
     }
 
-    // Emit MF_ and T_ functions for each method
     for (var meth : createObj.meths()) {
       emitMeth(meth, objId, false, leastSpecific);
     }
@@ -326,7 +354,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       emitMeth(meth, objId, true, leastSpecific);
     }
 
-    // Supplement with inherited methods from TypeDef that aren't in the CreateObj
+    // Add the inherited methods of the TypeDef that the CreateObj does not hold
     var allMeths = new ArrayList<>(createObj.meths());
     allMeths.addAll(createObj.unreachableMs());
     var coveredNames = allMeths.stream()
@@ -347,20 +375,16 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       }
     }
 
-    // Emit VTable
     emitVTable(allMeths, objId);
 
-    // Restore emit target
     this.emitTargetPkg = savedEmitTarget;
   }
 
   private MIR.FName findFunForSig(DecId objId, MIR.Sig sig, MIR.TypeDef typeDef) {
-    // Try current type with both capturesSelf values
     for (boolean capturesSelf : new boolean[]{false, true}) {
       var fName = new MIR.FName(objId, sig.name(), capturesSelf, sig.mdf());
       if (funMap.containsKey(fName)) { return fName; }
     }
-    // Walk parent types
     for (var parent : ParentWalker.of(p, typeDef).skip(1).toList()) {
       for (boolean capturesSelf : new boolean[]{false, true}) {
         var fName = new MIR.FName(parent.name(), sig.name(), capturesSelf, sig.mdf());
@@ -379,7 +403,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var mfName = "MF_" + typeName + "_" + methName;
     var tName = "T_" + typeName + "_" + methName;
 
-    // Build parameter list
     var params = new ArrayList<String>();
     params.add("self_m: rt.FatPtr");
     for (var x : sig.xs()) {
@@ -389,13 +412,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
     var paramDiscard = "_ = .{ " + params.stream().map(p -> p.split(":")[0].trim()).collect(Collectors.joining(", ")) + " };\n";
     if (isUnreachable || meth.fName().isEmpty()) {
-      // Unreachable method
       currentState().functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
         + paramDiscard
         + "unreachable;\n"
         + "}");
     } else {
-      // Real method: delegate to the static Fun
       var fRef = funRef(meth.fName().get());
       var fun = funMap.get(meth.fName().get());
       if (fun != null) {
@@ -405,9 +426,8 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
         }
         simpleArgs.add("self_m");
         for (var capture : meth.captures()) {
-          // Captures need to be extracted from self if it's an object with captures
           if (!createObjHasCaptures(objId)) {
-            simpleArgs.add("self_m.share()"); // no captures, pass self as placeholder
+            simpleArgs.add("self_m.share()"); // No captures, so self is a placeholder
           } else {
             simpleArgs.add(
               "rt.deref(" + capturesRef(objId) + ", self_m)." + id.varName(capture) + ".share()");
@@ -423,7 +443,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
           + "return " + fRef + "(" + String.join(", ", simpleArgs) + ");\n"
           + "}");
       } else {
-        // Fun not found, make unreachable
         currentState().functions.add("fn " + mfName + "(" + paramStr + ") rt.FatPtr {\n"
           + "_ = .{ " + params.stream().map(p -> p.split(":")[0].trim()).collect(Collectors.joining(", ")) + " };\n"
           + "unreachable;\n"
@@ -431,7 +450,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       }
     }
 
-    // C-ABI thunk
     var thunkParams = new ArrayList<String>();
     thunkParams.add("self_m: rt.FatPtr");
     for (var x : sig.xs()) {
@@ -528,7 +546,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var sb = new StringBuilder();
     sb.append("fn ").append(hookName).append("(self_m: rt.FatPtr) callconv(.c) rt.FatPtr {\n");
     sb.append("const captures = rt.deref(").append(capturesName).append(", self_m);\n");
-    // Capture list recorded by emitCreateObj when the captures struct was built.
     var captureNames = currentState().captureLists.getOrDefault(objId, MIR.createCapturesSet());
     var boxedFields = new ArrayList<String>();
     for (var x : captureNames) {
@@ -553,10 +570,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       .map(x -> id.varName(x.name()) + ": rt.FatPtr")
       .collect(Collectors.joining(", "));
 
-    // Check if this function body contains a VPF-parallelisable call
     var vpfCodegen = new VPFCodegen(this);
     var vpfInfo = vpfCodegen.findVPFCall(fun.body());
-    // Top-level locals struct: N params (FatPtr=16) + r1 (FatPtr=16)
+    // The top-level locals struct holds N params and r1, each one a 16-byte FatPtr
     int topLevelLocalsSize = (fun.args().size() + 1) * 16;
     if (vpfInfo != null && topLevelLocalsSize <= VPFCodegen.LOCALS_COPY_LIMIT) {
       vpfCodegen.emitVPFFun(fun, name, paramNames, params, vpfInfo);
@@ -566,7 +582,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var body = returnExpr(fun.body(), true);
     var sb = new StringBuilder();
     sb.append("pub fn ").append(name).append("(").append(params).append(") rt.FatPtr {\n");
-    // Discard all params to avoid unused-parameter errors
+    // Discard each param, to prevent an unused-parameter error
     if (!paramNames.isEmpty()) {
       sb.append("_ = .{ ");
       sb.append(String.join(", ", paramNames));
@@ -647,13 +663,13 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       .findFirst()
       .orElse(null);
     if (typeDef == null) {
-      // Type not found in MIR — treat as singleton with empty vtable
+      // The MIR has no such type, so it becomes a singleton with an empty vtable
       emitCreateObj(createObj, checkMagic);
       return "rt.obj_k_singleton(&" + vtableRef(objId) + ")";
     }
     var singleton = typeDef.singletonInstance().isPresent();
 
-    // Make sure this type's struct/vtable/methods have been emitted
+    // Emit the struct, the vtable and the methods of this type, if that did not occur before
     emitCreateObj(createObj, checkMagic);
 
     if (singleton) {
@@ -688,64 +704,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return ownedBranches ? ownedExpr(block.original(), gen, true) : block.original().accept(gen, true);
   }
 
-  // TODO: the block optimisation impl here is not correct, will clean up later.
-  /*
-  @Override
-  public String visitBlockExpr(MIR.Block expr, boolean checkMagic) {
-    var stmts = new ArrayDeque<>(expr.stmts());
-    var sb = new StringBuilder();
-    sb.append("blk: {\n");
-    var doIdx = 0;
-    while (!stmts.isEmpty()) {
-      var stmt = stmts.poll();
-      switch (stmt) {
-        case MIR.Block.BlockStmt.Return ret ->
-          sb.append("break :blk ").append(ret.e().accept(this, true)).append(";\n");
-        case MIR.Block.BlockStmt.Do do_ -> {
-          sb.append("_ = ").append(do_.e().accept(this, true)).append(";\n");
-          doIdx++;
-        }
-        case MIR.Block.BlockStmt.Throw throw_ ->
-          sb.append("@panic(\"Fearless error\");\n");
-        case MIR.Block.BlockStmt.Loop loop ->
-          sb.append("while (true) { _ = ").append(loop.e().accept(this, true)).append("; }\n");
-        case MIR.Block.BlockStmt.If if_ -> {
-          var nextStmt = stmts.poll();
-          var body = nextStmt != null ? visitBlockStmt(nextStmt) : "unreachable";
-          sb.append("if (").append(if_.pred().accept(this, true))
-            .append(".vt == &VT_True_0) { ").append(body).append(" }\n");
-        }
-        case MIR.Block.BlockStmt.Let let -> {
-          var vn = id.varName(let.name());
-          sb.append("const ").append(vn).append(" = ")
-            .append(let.value().accept(this, true)).append(";\n");
-          sb.append("_ = .{ ").append(vn).append(" };\n");
-        }
-        case MIR.Block.BlockStmt.Var var_ -> {
-          var vn = id.varName(var_.name());
-          sb.append("const ").append(vn).append(" = ")
-            .append(var_.value().accept(this, true)).append(";\n");
-          sb.append("_ = .{ ").append(vn).append(" };\n");
-        }
-      }
-    }
-    sb.append("}");
-    return sb.toString();
-  }
-
-  private String visitBlockStmt(MIR.Block.BlockStmt stmt) {
-    return switch (stmt) {
-      case MIR.Block.BlockStmt.Return ret -> "break :blk " + ret.e().accept(this, true) + ";";
-      case MIR.Block.BlockStmt.Do do_ -> "_ = " + do_.e().accept(this, true) + ";";
-      case MIR.Block.BlockStmt.Throw throw_ -> "@panic(\"Fearless error\");";
-      case MIR.Block.BlockStmt.Loop loop -> "while (true) { _ = " + loop.e().accept(this, true) + "; }";
-      case MIR.Block.BlockStmt.If if_ -> "if (" + if_.pred().accept(this, true) + ".vt == &VT_True_0)";
-      case MIR.Block.BlockStmt.Let let -> "const " + id.varName(let.name()) + " = " + let.value().accept(this, true) + ";";
-      case MIR.Block.BlockStmt.Var var_ -> "const " + id.varName(var_.name()) + " = " + var_.value().accept(this, true) + ";";
-    };
-  }
-   */
-
   @Override
   public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
     var fRef = funRef(call.fun());
@@ -764,7 +722,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   }
 
 
-  // Not used directly - output is accumulated in state
+  // No caller: the output collects in the package state
   public String visitProgram(DecId entry) { throw Bug.unreachable(); }
   public String visitPackage(MIR.Package pkg) { throw Bug.unreachable(); }
 }

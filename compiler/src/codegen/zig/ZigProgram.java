@@ -11,8 +11,8 @@ public record ZigProgram(Map<String, String> packageFiles, String mainFile, Stri
     this(builder.packageFiles, builder.mainFile, builder.entryPoint);
   }
 
-  public static ZigProgram of(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent) {
-    return new ZigProgram(new ZigProgramBuilder(entryPoint, program, cachedPkg, cachedContent));
+  public static ZigProgram of(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent, boolean vpfEnabled) {
+    return new ZigProgram(new ZigProgramBuilder(entryPoint, program, cachedPkg, cachedContent, vpfEnabled));
   }
 }
 
@@ -23,12 +23,12 @@ class ZigProgramBuilder {
   private final MIR.Program program;
   private final java.util.Set<String> cachedPkg;
 
-  ZigProgramBuilder(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent) {
+  ZigProgramBuilder(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent, boolean vpfEnabled) {
     this.entryPoint = entryPoint;
     this.program = program;
     this.cachedPkg = cachedPkg;
 
-    var gen = new ZigSingleCodegen(program);
+    var gen = new ZigSingleCodegen(program, vpfEnabled);
 
     for (MIR.Package pkg : program.pkgs()) {
       if (cachedPkg.contains(pkg.name())) { continue; }
@@ -53,7 +53,6 @@ class ZigProgramBuilder {
       var state = entry.getValue();
       var sb = new StringBuilder();
 
-      // Root import + runtime aliases
       sb.append("const root = @import(\"root\");\n");
       sb.append("const std = root.std;\n");
       sb.append("const rt = root.rt;\n");
@@ -83,7 +82,6 @@ class ZigProgramBuilder {
       sb.append("const Fiber = root.Fiber;\n");
       sb.append('\n');
 
-      // Capture structs
       if (!state.captureStructs.isEmpty()) {
         for (var cs : state.captureStructs.values()) {
           sb.append(cs).append('\n');
@@ -91,7 +89,6 @@ class ZigProgramBuilder {
         sb.append('\n');
       }
 
-      // Functions
       if (!state.functions.isEmpty()) {
         for (var f : state.functions) {
           sb.append(f).append('\n');
@@ -99,7 +96,6 @@ class ZigProgramBuilder {
         sb.append('\n');
       }
 
-      // VTables (pub for cross-package access)
       if (!state.vtableDefs.isEmpty()) {
         for (var vt : state.vtableDefs.values()) {
           sb.append(vt).append('\n');
@@ -115,7 +111,7 @@ class ZigProgramBuilder {
   private String buildMainFile(ZigSingleCodegen gen) {
     var sb = new StringBuilder();
 
-    // Imports — all pub so package files can access via @import("root")
+    // Each import is `pub`, so that a package file can read it through `@import("root")`
     sb.append("pub const std = @import(\"std\");\n");
     sb.append("pub const rt = @import(\"runtime/objs.zig\");\n");
     sb.append("pub const nat_rt = @import(\"runtime/intrinsics/nat.zig\");\n");
@@ -147,13 +143,11 @@ class ZigProgramBuilder {
     sb.append("pub const Fiber = @import(\"runtime/fiber.zig\").Fiber;\n");
     sb.append("comptime { _ = Fiber; }\n");
     sb.append("pub const native = @import(\"runtime/native.zig\");\n");
-    // A `@panic`-class fault inside a fiber becomes a non-deterministic error
-    // that unwinds to the nearest `CapTry`/top-level boundary. See
-    // `runtime/errors/unwind.zig`.
+    // A `@panic`-class fault in a fiber becomes a non-deterministic error. It unwinds to the
+    // nearest `CapTry` boundary or to the top level. See `runtime/errors/unwind.zig`.
     sb.append("pub const panic = std.debug.FullPanic(errors.ndPanicHandler);\n");
     sb.append('\n');
 
-    // Generated package imports — all pub for cross-package @import("root") access
     for (var pkgName : packageFiles.keySet()) {
       var fieldName = "pkg_" + pkgName.replace(".", "_");
       var fileName = pkgName.replace(".", "_") + ".zig";
@@ -161,13 +155,12 @@ class ZigProgramBuilder {
     }
     sb.append('\n');
 
-    // Re-export core VTables for runtime compatibility
+    // The runtime refers to these VTables by name, so main.zig re-exports them
     appendReExportIfPresent(sb, gen, "VT_Void_0", new Id.DecId("base.Void", 0));
     appendReExportIfPresent(sb, gen, "VT_True_0", new Id.DecId("base.True", 0));
     appendReExportIfPresent(sb, gen, "VT_False_0", new Id.DecId("base.False", 0));
     sb.append('\n');
 
-    // Entry point
     sb.append(generateMain(gen));
 
     return sb.toString();
@@ -192,7 +185,6 @@ class ZigProgramBuilder {
     var entryDecId = new Id.DecId(pkg + "." + typeName, 0);
     var entryVtName = gen.id.getSimpleName(entryDecId);
 
-    // Resolve entry VTable reference via package
     var entryPkg = gen.typeToPackage.get(entryDecId);
     String entryVtRef;
     if (entryPkg != null) {
@@ -201,7 +193,6 @@ class ZigProgramBuilder {
       entryVtRef = "VT_" + entryVtName;
     }
 
-    // Inline hash for "imm #/1"
     var sigStr = "imm #/1";
     var hashExpr = "comptime rt.hash_signature(\"" + sigStr + "\")";
 
