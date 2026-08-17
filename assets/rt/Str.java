@@ -126,16 +126,8 @@ public interface Str extends base.Str_0 {
 		return new SubStr(this, (int) start_m$, (int) end_m$);
 	}
 
-	default Str substringUnchecked(long start_m$, long end_m$) {
-		return new SubStr(this, (int) start_m$, (int) end_m$);
-	}
-
 	@Override default Str charAt$imm(long index_m$) {
 		return substring$imm(index_m$, index_m$ + 1);
-	}
-
-	default Str charAtUnchecked(long index_m$) {
-		return substringUnchecked(index_m$, index_m$ + 1);
 	}
 
 	@Override default Str normalise$imm() {
@@ -143,14 +135,49 @@ public interface Str extends base.Str_0 {
 		return fromTrustedUtf8(wrap(res));
 	}
 
+	/** A flow of the codepoints of this string, each one a single codepoint {@code Str}.
+	 *  The flow captures the UTF-8 buffer once, at the moment of the call, and reads
+	 *  only that buffer afterwards. The size is a hint: the framework does not ask a
+	 *  split half for its size. */
 	@Override default Flow_1 codepoints$imm() {
 		var size = size$imm();
-		return Flow_0.$self.fromOp$imm(this._codepoints$imm(0, size), size);
+		var utf8 = this.utf8().slice();
+		return Flow_0.$self.fromOp$imm(this._codepoints$imm(utf8, 0, utf8.remaining()), size);
 	}
-	default FlowOp_1 _codepoints$imm(long start, long end_) {
+	/** A codepoint flow over the byte window {@code [start, end_)} of {@code utf8}.
+	 *  {@code utf8} must have position 0, so that all offsets are absolute, and the
+	 *  window bounds must be codepoint boundaries. A split makes a narrower window
+	 *  over the same buffer, so every operation is O(1) for each element. */
+	default FlowOp_1 _codepoints$imm(ByteBuffer utf8, int start, int end_) {
 		return new FlowOp_1() {
-			long cur = start;
-			long end = end_;
+			int cur = start;
+			int end = end_;
+			/** The first codepoint boundary after byte {@code i}, or {@code end}.
+			 *  A continuation byte has the top two bits {@code 10}, the same test that
+			 *  {@code size$imm} uses, so this flow emits exactly {@code size$imm} elements. */
+			private int boundaryAfter(int i) {
+				int j = i + 1;
+				while (j < this.end && (utf8.get(j) & 0xC0) == 0x80) { ++j; }
+				return j;
+			}
+			/** Emit the codepoint at the cursor and move the cursor past it. */
+			private Str next() {
+				int from = this.cur;
+				int to = boundaryAfter(from);
+				this.cur = to;
+				return fromTrustedUtf8(utf8.slice(from, to - from));
+			}
+			/** A codepoint boundary strictly inside the remaining window, or -1.
+			 *  This is conservative: a short window with two codepoints can still give
+			 *  -1, for example a 1-byte codepoint before a 4-byte one, where the byte
+			 *  midpoint moves forward to {@code end}. A refused split loses only an
+			 *  optimisation. {@code canSplit$read} and {@code split$mut} both use this
+			 *  helper, so the two always agree. */
+			private int midBoundary() {
+				int mid = this.cur + (this.end - this.cur) / 2;
+				while (mid < this.end && (utf8.get(mid) & 0xC0) == 0x80) { ++mid; }
+				return mid <= this.cur || mid >= this.end ? -1 : mid;
+			}
 			@Override public Bool_0 isFinite$mut() {
 				return True_0.$self;
 			}
@@ -159,34 +186,34 @@ public interface Str extends base.Str_0 {
 					sink_m$.stopDown$mut();
 					return Void_0.$self;
 				}
-				var ch = charAtUnchecked(this.cur++);
-				sink_m$.$hash$mut(ch);
+				sink_m$.$hash$mut(next());
 				return Void_0.$self;
 			}
+			/** Move the cursor to the end of the window, which makes {@code isRunning}
+			 *  false. The window end is a byte offset, so this needs no scan. */
 			@Override public Void_0 stopUp$mut() {
-				this.cur = size$imm();
+				this.cur = this.end;
 				return Void_0.$self;
 			}
 			@Override public Bool_0 isRunning$mut() {
 				return this.cur >= this.end ? False_0.$self : True_0.$self;
 			}
 			@Override public Void_0 for$mut(_Sink_1 downstream_m$) {
-				for (; this.cur < end; ++this.cur) {
-					downstream_m$.$hash$mut(charAtUnchecked(this.cur));
+				while (this.cur < this.end) {
+					downstream_m$.$hash$mut(next());
 				}
 				downstream_m$.stopDown$mut();
 				return Void_0.$self;
 			}
 			@Override public Opt_1 split$mut() {
-				var size = this.end - this.cur;
-				if (size <= 1) { return Opt_1.$self; }
-				var mid = this.cur + (size / 2);
-				var end_ = this.end;
+				int mid = midBoundary();
+				if (mid < 0) { return Opt_1.$self; }
+				int oldEnd = this.end;
 				this.end = mid;
-				return Opts_0.$self.$hash$imm(_codepoints$imm(mid, end_));
+				return Opts_0.$self.$hash$imm(_codepoints$imm(utf8, mid, oldEnd));
 			}
 			@Override public Bool_0 canSplit$read() {
-				return this.end - this.cur > 1 ? True_0.$self : False_0.$self;
+				return midBoundary() >= 0 ? True_0.$self : False_0.$self;
 			}
 		};
 	}

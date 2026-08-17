@@ -305,6 +305,30 @@ public class TestFlowSemantics {
       }
     """, Base.mutBaseAliases);}
 
+  /// The codepoints flow must emit every codepoint of a string, in order, for all
+  /// UTF-8 lengths from 1 to 4 bytes. The string is long enough that the
+  /// data-parallel machinery splits it, so the split path is covered too.
+  @Test void mutableStringsCodepointsMixedWidths() {ok(new Res("""
+    1024
+    1024
+    """, "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Str] s1 = {"a\\u{233}\\u{8364}\\u{119070}z\\u{223}\\u{28450}\\u{127881}"}
+      .let[Str] s2 = {s1 + s1}
+      .let[Str] s3 = {s2 + s2}
+      .let[Str] s4 = {s3 + s3}
+      .let[Str] s5 = {s4 + s4}
+      .let[Str] s6 = {s5 + s5}
+      .let[Str] s7 = {s6 + s6}
+      .let[Str] s = {s7 + s7}
+      .do {s.codepoints.join("").assertEq(s)}
+      .do {sys.io.println(s.codepoints.count.str)}
+      .do {sys.io.println(s.size.str)}
+      .return {{}}
+      }
+    """, Base.mutBaseAliases);}
+
   @Test void pushErrorAndThrowSeq() {ok(new Res("", "Program crashed with: \"hello\"[###]", 1), """
     package test
     Test: Main{sys -> Block#
