@@ -39,11 +39,27 @@ class ZigProgramBuilder {
         gen.visitTypeDef(pkg.name(), def, funs);
       }
     }
+    forceDirectCallTargets(gen);
 
     this.packageFiles = buildPackageFiles(gen);
     this.packageFiles.putAll(cachedContent);
 
     this.mainFile = buildMainFile(gen);
+  }
+
+  /// Emits the type of every {@link MIR.DirectCall} target that the walk above did not reach. The
+  /// per-literal method wrappers are emitted with the object literal that creates them, and a
+  /// devirtualised call site can name a literal that no package it generates creates.
+  ///
+  /// A target in a cached package needs nothing: that package's text was generated in full when it
+  /// was not yet cached, so it already holds the wrapper.
+  private void forceDirectCallTargets(ZigSingleCodegen gen) {
+    for (var target : new codegen.optimisations.RapidTypeAnalysis(program).directCallTargets()) {
+      if (gen.emittedTypes.containsKey(target.getKey())) { continue; }
+      var owningPkg = gen.packageOf(target.getKey());
+      if (owningPkg == null || cachedPkg.contains(owningPkg)) { continue; }
+      gen.emitCreateObj(target.getValue(), true);
+    }
   }
 
   private Map<String, String> buildPackageFiles(ZigSingleCodegen gen) {
@@ -134,6 +150,7 @@ class ZigProgramBuilder {
     sb.append("pub const error_rt = @import(\"runtime/error.zig\");\n");
     sb.append("pub const errors = @import(\"runtime/errors/errors.zig\");\n");
     sb.append("pub const shadow_stack_mod = @import(\"runtime/shadow_stack.zig\");\n");
+    sb.append("pub const op_counters = @import(\"runtime/op_counters.zig\");\n");
     sb.append("pub const worker_mod = @import(\"runtime/worker.zig\");\n");
     sb.append("pub const reactor = @import(\"runtime/io/reactor.zig\");\n");
     sb.append("pub const JoinObligation = @import(\"runtime/sync/join_obligation.zig\").JoinObligation;\n");
@@ -241,6 +258,7 @@ class ZigProgramBuilder {
     sb.append("pool.run();\n");
     sb.append("log.dumpAllTraceBuffers();\n");
     sb.append("gc.dump_allocs();\n");
+    sb.append("op_counters.dump();\n");
     sb.append("}\n");
     return sb.toString();
   }

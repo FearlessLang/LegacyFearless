@@ -15,6 +15,7 @@ const var_rt = @import("intrinsics/var.zig");
 const list_rt = @import("intrinsics/list.zig");
 const isopod_rt = @import("intrinsics/isopod.zig");
 const error_rt = @import("error.zig");
+const op_counters = @import("op_counters.zig");
 
 // ==========================================
 // Comptime Hashing (FNV-1a 64-bit)
@@ -110,6 +111,7 @@ pub const FatPtr = extern struct {
 				return copy;
 			},
 			.heap => {
+				op_counters.bump(.rc_increment);
 				const obj = ptr.boxed_value();
 				const count = obj.ref_count.fetchAdd(1, .monotonic);
 				// 4096 feels right here as that's the most cores Linux can currently support, but this is likely never going
@@ -139,6 +141,7 @@ pub const FatPtr = extern struct {
 	}
 
 	noinline fn rc_decrement_slow(ptr: *const FatPtr) void {
+		op_counters.bump(.rc_decrement);
 		const obj = ptr.boxed_value();
 		const old_count = obj.ref_count.fetchSub(1, .release);
 		if (std.debug.runtime_safety) assert(old_count != 0);
@@ -173,6 +176,7 @@ pub const FatPtr = extern struct {
 
 	pub fn box_transient(ptr: *const FatPtr) FatPtr {
 		if (!ptr.is_transient()) return ptr.*;
+		op_counters.bump(.boxed_transient);
 		const box = ptr.vt.box_fn orelse @panic("Transient object has no boxing hook");
 		return box(ptr.*);
 	}
@@ -246,6 +250,7 @@ inline fn resolve_method(receiver: FatPtr, hash: u64, ic: *InlineCache) *const a
 			return target;
 		}
 	}
+	op_counters.bump(.ic_slow_probe);
 	return resolve_method_slow(receiver, hash, ic);
 }
 
@@ -330,6 +335,7 @@ pub fn GenDispatchCacheType(comptime tag: MethodDispatchUniquenessTag) type {
 pub fn call(receiver: FatPtr, comptime target_method: u64, args: anytype, comptime src: std.builtin.SourceLocation) FatPtr {
 	switch (receiver.vt.storage_mode) {
 		.primitive => {
+			op_counters.bump(.virtual_call_primitive);
 			if (receiver.vt == &nat_rt.VT_Nat) return nat_rt.dispatch(target_method, receiver, args);
 			if (receiver.vt == &int_rt.VT_Int) return int_rt.dispatch(target_method, receiver, args);
 			if (receiver.vt == &float_rt.VT_Float) return float_rt.dispatch(target_method, receiver, args);
@@ -337,6 +343,7 @@ pub fn call(receiver: FatPtr, comptime target_method: u64, args: anytype, compti
 			unreachable;
 		},
 		.primitiveContainer => {
+			op_counters.bump(.virtual_call_primitive);
 			if (receiver.vt == &var_rt.VT_Var) return var_rt.dispatch(target_method, receiver, args);
 			if (receiver.vt == &isopod_rt.VT_IsoPod) return isopod_rt.dispatch(target_method, receiver, args);
 			unreachable;
@@ -345,6 +352,8 @@ pub fn call(receiver: FatPtr, comptime target_method: u64, args: anytype, compti
 		// TODO: can't do nat/int/var/iso as a `switch (receiver.vt)` because of
 		// Zig bug: https://github.com/ziglang/zig/issues/22351
 	}
+
+	op_counters.bump(.virtual_call);
 
 	// Static Cache (One per call-site, specialized by args type)
 	const CacheType = GenDispatchCacheType(.{
@@ -372,6 +381,19 @@ pub fn call(receiver: FatPtr, comptime target_method: u64, args: anytype, compti
 	return @call(.auto, func, full_args);
 }
 
+/// A call whose receiver's declared type makes every runtime value a `.primitive`, so the
+/// storage-mode switch and the inline cache of `call` are both dead weight. `module` is the
+/// intrinsic module of the receiver type, and its `dispatch` resolves `target_method` at comptime.
+pub inline fn dispatch_primitive(
+	comptime module: type,
+	comptime target_method: u64,
+	receiver: FatPtr,
+	args: anytype,
+) FatPtr {
+	op_counters.bump(.direct_call_primitive);
+	return module.dispatch(target_method, receiver, args);
+}
+
 // ==========================================
 // Object Allocation
 // ==========================================
@@ -388,6 +410,7 @@ pub fn obj_k(
 	comptime vt: *const VTable,
 	captures: Captures,
 ) FatPtr {
+	op_counters.bump(.heap_obj);
 	const Layout = GenObjectLayoutType(Captures);
 	const align_log2: u8 = @intFromEnum(std.mem.Alignment.of(Layout));
 
@@ -415,6 +438,7 @@ pub fn obj_k(
 }
 
 pub fn obj_k_singleton(comptime vt: *const VTable) FatPtr {
+	op_counters.bump(.singleton_obj);
 	const Layout = GenObjectLayoutType(extern struct {});
 	// Wrap to ensure this instance is statically allocated
 	const Wrapper = struct {
@@ -440,6 +464,7 @@ pub fn init_transient_obj(
 	comptime vt: *const VTable,
 	captures: Captures,
 ) FatPtr {
+	op_counters.bump(.transient_obj);
 	obj.* = .{
 		.header = .{
 			.ref_count = std.atomic.Value(u32).init(IMMORTAL_REFCOUNT),

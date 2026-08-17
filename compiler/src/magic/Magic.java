@@ -5,6 +5,8 @@ import failure.CompileError;
 import id.Id;
 import visitors.FullEAntlrVisitor;
 
+import java.lang.reflect.Modifier;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
@@ -64,6 +66,21 @@ public class Magic {
   public static final Id.DecId SafeFlowSource = new Id.DecId("base.flows._SafeSource", 0);
 
   public static final Id.DecId MapK = new Id.DecId("base.Maps", 0);
+
+  /// Every `DecId` this class names. A whole-program analysis over the MIR misses these: some of
+  /// them have no object literal at all, because the runtime provides the instance and its vtable.
+  /// The set is deliberately over-wide -- an extra entry only makes a caller more conservative,
+  /// while a missing one makes it unsound -- so it comes from the fields of this class and needs
+  /// no upkeep when a new magic type arrives.
+  public static List<Id.DecId> allMagicDecs() { return MAGIC_DECS; }
+
+  private static final List<Id.DecId> MAGIC_DECS = Arrays.stream(Magic.class.getDeclaredFields())
+    .filter(f -> f.getType().equals(Id.DecId.class) && Modifier.isStatic(f.getModifiers()))
+    .map(f -> {
+      try { return (Id.DecId) f.get(null); }
+      catch (IllegalAccessException e) { throw new RuntimeException(e); }
+    })
+    .toList();
 
   public static astFull.T.Dec getFullDec(Function<Id.DecId, astFull.T.Dec> resolve, Id.DecId id) {
     var base = _getDec(resolve, id);

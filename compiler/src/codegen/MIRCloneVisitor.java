@@ -115,6 +115,14 @@ public interface MIRCloneVisitor extends MIRVisitor<MIR.E> {
     );
   }
 
+  @Override default MIR.E visitDirectCall(MIR.DirectCall call, boolean checkMagic) {
+    var original = call.original().accept(this, checkMagic);
+    if (original instanceof MIR.MCall mCall) {
+      return new MIR.DirectCall(mCall, call.concreteType());
+    }
+    return original;
+  }
+
   @Override default MIR.E visitUpdatableListAsIdFnCall(MIR.UpdatableListAsIdFnCall call, boolean checkMagic) {
     var e = call.e().accept(this, checkMagic);
     if (e instanceof MIR.MCall mCall) {

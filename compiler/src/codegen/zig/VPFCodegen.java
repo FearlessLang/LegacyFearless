@@ -25,7 +25,11 @@ class VPFCodegen {
     MIR.BoolExpr boolExpr, // null unless a BoolExpr wraps the call
     List<SubExprInfo> subExprs, // receiver at index 0, then the args
     List<SubExprInfo> plainExprs, // the sub-exprs that add no stack frame
-    String hashName
+    String hashName,
+    /// The one concrete receiver type, when devirtualisation resolved the combining call. The
+    /// combiner then calls the method wrapper directly. The hash stays necessary: `pushFrame`
+    /// reports it as the target method.
+    Optional<DecId> directTarget
   ) {}
 
   record SubExprInfo(MIR.E expr, boolean isFrameAdding, int index) {}
@@ -36,17 +40,19 @@ class VPFCodegen {
       case MIR.Box box -> findVPFCall(box.inner());
       case MIR.MCall call -> {
         if (call.variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
-          yield buildVPFInfo(call);
+          yield buildVPFInfo(call, Optional.empty());
         }
         yield null;
       }
+      case MIR.DirectCall dc when dc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable) ->
+        buildVPFInfo(dc.original(), Optional.of(dc.concreteType()));
       case MIR.BoolExpr boolExpr -> {
         // The recursive case, and thus the VPF call, is usually the else-branch
         var elseFun = parent.funMap.get(boolExpr.else_());
         if (elseFun != null) {
           var inner = findVPFCallInner(elseFun.body());
           if (inner != null) {
-            yield new VPFCallInfo(inner.vpfCall, boolExpr, inner.subExprs, inner.plainExprs, inner.hashName);
+            yield new VPFCallInfo(inner.vpfCall, boolExpr, inner.subExprs, inner.plainExprs, inner.hashName, inner.directTarget);
           }
         }
         yield null;
@@ -80,6 +86,7 @@ class VPFCodegen {
       case MIR.Box box -> containsVPFCall(box.inner(), visited);
       case MIR.Block block -> containsVPFCall(block.original(), visited);
       case MIR.MCall call -> call.variant().contains(MIR.MCall.CallVariant.VPFParallelisable);
+      case MIR.DirectCall dc -> dc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable);
       case MIR.BoolExpr boolExpr ->
         containsVPFCall(boolExpr.then(), visited) || containsVPFCall(boolExpr.else_(), visited);
       default -> false;
@@ -119,7 +126,7 @@ class VPFCodegen {
     }
 
     var sb = new StringBuilder();
-    sb.append("pub fn ").append(name).append("(").append(params).append(") rt.FatPtr {\n");
+    sb.append("pub fn ").append(name).append("(").append(params).append(") callconv(.c) rt.FatPtr {\n");
     if (!paramNames.isEmpty()) {
       sb.append("_ = .{ ");
       sb.append(String.join(", ", paramNames));
@@ -147,15 +154,31 @@ class VPFCodegen {
     }
     sb.append(".r1 = undefined };\n");
 
+    // The slot for the first frame-adding expr, when its callee has a `_transient` variant. The
+    // slot declaration sits before the fence and its drop-defer at function scope, so the slot
+    // outlives the combiner and the wait on a stolen frame: `fulfillChildObligation` hands
+    // `locals.r1` to the thief by value and this fiber then blocks until the thief is done.
+    var firstSlot = frameAddingExprs.isEmpty()
+      ? Optional.<ZigSingleCodegen.VPFResultSlot>empty()
+      : parent.vpfResultSlot(frameAddingExprs.getFirst().expr);
+    firstSlot.ifPresent(slot -> {
+      sb.append(slot.decl());
+      sb.append(slot.dropDefer());
+    });
+
     // Compiler fence. It writes the locals to memory before the frame push
     sb.append("asm volatile (\"\" ::: .{ .memory = true });\n");
 
     emitPushFrame(sb, vpf.hashName, "locals", localsName, thiefName);
 
     if (!frameAddingExprs.isEmpty()) {
-      var firstFrameAdding = frameAddingExprs.getFirst();
-      var firstExprCode = firstFrameAdding.expr.accept(parent, true);
-      sb.append("locals.r1 = ").append(firstExprCode).append(";\n");
+      if (firstSlot.isPresent()) {
+        sb.append(firstSlot.get().operandStatements());
+        sb.append("locals.r1 = ").append(firstSlot.get().call()).append(";\n");
+      } else {
+        var firstExprCode = frameAddingExprs.getFirst().expr.accept(parent, true);
+        sb.append("locals.r1 = ").append(firstExprCode).append(";\n");
+      }
     }
 
     sb.append("if (frame_idx_opt) |frame_idx| {\n");
@@ -199,12 +222,16 @@ class VPFCodegen {
     }
     if (body instanceof MIR.MCall call &&
         call.variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
-      return buildVPFInfo(call);
+      return buildVPFInfo(call, Optional.empty());
+    }
+    if (body instanceof MIR.DirectCall dc &&
+        dc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
+      return buildVPFInfo(dc.original(), Optional.of(dc.concreteType()));
     }
     return null;
   }
 
-  private VPFCallInfo buildVPFInfo(MIR.MCall call) {
+  private VPFCallInfo buildVPFInfo(MIR.MCall call, Optional<DecId> directTarget) {
     var subExprs = new ArrayList<SubExprInfo>();
     subExprs.add(new SubExprInfo(call.recv(), isFrameAddingExpr(call.recv()), 0));
     for (int i = 0; i < call.args().size(); i++) {
@@ -218,15 +245,17 @@ class VPFCodegen {
     var hashExpr = parent.sigBuilder.inlineHash(sig);
 
     var plainExprs = subExprs.stream().filter(s -> !s.isFrameAdding).toList();
-    return new VPFCallInfo(call, null, subExprs, plainExprs, hashExpr);
+    return new VPFCallInfo(call, null, subExprs, plainExprs, hashExpr, directTarget);
   }
 
-  /// Only an MCall and a BoolExpr add a stack frame. A Box is transparent here.
+  /// Only a call and a BoolExpr add a stack frame. A Box is transparent here. A `DirectCall`
+  /// counts: it is the devirtualised form of an `MCall` and still adds a frame, so leaving it out
+  /// would drop the shadow frame that lets a thief steal it.
   private boolean isFrameAddingExpr(MIR.E expr) {
     if (expr instanceof MIR.Box box) {
       return isFrameAddingExpr(box.inner());
     }
-    return expr instanceof MIR.MCall || expr instanceof MIR.BoolExpr;
+    return expr instanceof MIR.MCall || expr instanceof MIR.DirectCall || expr instanceof MIR.BoolExpr;
   }
 
   /// An instrumented thief. It computes one sub-expr, then pushes a shadow frame for the inner
@@ -465,6 +494,14 @@ class VPFCodegen {
     for (int i = 1; i < allArgs.length; i++) {
       argStrs.add(allArgs[i]);
     }
+    if (vpf.directTarget.isPresent()) {
+      var target = vpf.directTarget.get();
+      var methName = parent.id.getMName(vpf.vpfCall.mdf(), vpf.vpfCall.name());
+      var all = new ArrayList<String>();
+      all.add(recvStr);
+      all.addAll(argStrs);
+      return parent.methWrapperRef(target, methName) + "(" + String.join(", ", all) + ")";
+    }
     var argsTuple = argStrs.isEmpty() ? ".{}" : ".{ " + String.join(", ", argStrs) + " }";
     return "rt.call(" + recvStr + ", " + vpf.hashName + ", " + argsTuple + ", @src())";
   }
@@ -496,6 +533,9 @@ class VPFCodegen {
     }
     @Override public String visitMCall(MIR.MCall call, boolean checkMagic) {
       return delegate.emitMCall(call, this, checkMagic);
+    }
+    @Override public String visitDirectCall(MIR.DirectCall call, boolean checkMagic) {
+      return delegate.emitDirectCall(call, this, checkMagic);
     }
     @Override public String visitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
       // The parent does the type and vtable emission, and the magic

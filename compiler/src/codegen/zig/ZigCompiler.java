@@ -66,6 +66,14 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   }
   private Path zigOutDir(Path workDir) { return workDir.resolve("zig-out"); }
 
+  /// True when the generated Zig of this package is cached and reused by later programs. Only the
+  /// base library qualifies: its source does not change between programs, so its text can be kept
+  /// on disk. A pass that reasons about the whole program must not change such a package, because
+  /// the text it writes outlives the program it was generated from.
+  public static boolean isCacheablePackage(String name) {
+    return name.equals("base") || name.startsWith("base.");
+  }
+
   /// Returns the cached .zig content of the base packages, keyed by package name.
   public Map<String, String> loadCachedPackages(MIR.Program program) {
     var dir = versionedCacheDir();
@@ -73,7 +81,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     var cached = new HashMap<String, String>();
     for (var pkg : program.pkgs()) {
       var name = pkg.name();
-      if (!(name.equals("base") || name.startsWith("base."))) { continue; }
+      if (!isCacheablePackage(name)) { continue; }
       var file = dir.resolve(name.replace(".", "_") + ".zig");
       if (Files.exists(file)) {
         cached.put(name, IoErr.of(() -> Files.readString(file)));
@@ -148,7 +156,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     var dir = versionedCacheDir();
     IoErr.of(() -> Files.createDirectories(dir));
     for (var entry : program.packageFiles().entrySet()) {
-      if (!(entry.getKey().equals("base") || entry.getKey().startsWith("base."))) { continue; }
+      if (!isCacheablePackage(entry.getKey())) { continue; }
       var fileName = entry.getKey().replace(".", "_") + ".zig";
       IoErr.of(() -> Files.writeString(dir.resolve(fileName), entry.getValue()));
     }
@@ -258,6 +266,11 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     if (!opts.useLlvm() && System.getProperty("os.name").toLowerCase().contains("linux")) {
       cmd.add("-Dtarget=native-native-gnu.2.34");
     }
+    // Opt-in operation counters. An env var, and not a build option, keeps them reachable from a
+    // benchmark run without a rebuild of the compiler.
+    if (System.getenv("FEART_OP_COUNTERS") != null) {
+      cmd.add("-Dop_counters=true");
+    }
     var pb = new ProcessBuilder(cmd)
       .directory(workDir.toFile())
       .redirectErrorStream(true);
@@ -290,6 +303,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           const log_safety = b.option(bool, "log_safety", "Enable safety-related logging (default: false)") orelse %s;
           const log_dispatch = b.option(bool, "log_dispatch", "Enable dispatch/method resolution logging (default: false)") orelse false;
           const log_alloc_caching = b.option(bool, "log_alloc_caching", "Emit alloc-recycler miss events to the trace ring buffer (default: false).") orelse false;
+          const op_counters = b.option(bool, "op_counters", "Count object construction, refcount traffic and method dispatch; prints a table to stderr on exit. (default: false)") orelse false;
           const track_allocs = b.option(bool, "track_allocs", "Record per-call-site allocation counts/bytes; dumps to FEART_ALLOCS_OUT (default ./feart-allocs.tsv) on exit. Slows execution significantly. (default: false)") orelse false;
           const trace_frames = b.option(bool, "trace_frames", "Push a per-call trace stack so an uncaught crash prints a Fearless stack trace (default: false)") orelse %s;
           const tokens_threshold = b.option(u32, "tokens_threshold", "Heartbeat promotion token threshold; lower forces more aggressive VPF promotion (default: 25_000_000)") orelse %d;
@@ -302,6 +316,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           build_options.addOption(bool, "log_trace", log_trace);
           build_options.addOption(bool, "log_alloc_caching", log_alloc_caching);
           build_options.addOption(bool, "track_allocs", track_allocs);
+          build_options.addOption(bool, "op_counters", op_counters);
           build_options.addOption(bool, "trace_frames", trace_frames);
           build_options.addOption(u32, "tokens_threshold", tokens_threshold);
           build_options.addOption(bool, "enable_vpf", enable_vpf);

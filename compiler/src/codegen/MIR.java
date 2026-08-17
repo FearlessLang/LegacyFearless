@@ -205,6 +205,19 @@ public sealed interface MIR {
     }
   }
 
+  /// A method call whose receiver type is known to be exactly one concrete literal, so the
+  /// receiver's vtable never has to be read. Codegen emits a direct call to the per-literal
+  /// method wrapper of {@code concreteType}, which takes `(receiver, args...)` and reads the
+  /// captures out of the receiver itself. A backend with no such wrapper falls back to
+  /// {@link #original()}, which is the equivalent virtual call.
+  record DirectCall(MCall original, Id.DecId concreteType) implements E {
+    @Override public MT t() { return original.t(); }
+
+    @Override public <R> R accept(MIRVisitor<R> v, boolean checkMagic) {
+      return v.visitDirectCall(this, checkMagic);
+    }
+  }
+
   record UpdatableListAsIdFnCall(MIR.MCall e) implements E {
     @Override public MT t() {return e.t();}
     @Override public <R> R accept(MIRVisitor<R> v, boolean checkMagic) {

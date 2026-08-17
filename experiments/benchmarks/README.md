@@ -35,7 +35,7 @@ faster on the current 1 MiB corpus.
 | Configuration | Compiler flags | Purpose |
 |---|---|---|
 | `feart` | `--feart` | FeaRT with VPF automatic parallelism enabled. |
-| `feart-novpf` | `--feart --no-vpf` | Sequential elision: the same source with the heartbeat and VPF machinery compiled out. |
+| `feart-novpf` | `--feart --no-vpf` | Sequential elision: the same source with all VPF machinery compiled out. The binary carries no locals structs, retain/drop hooks, thief functions, frame pushes, or compiler fences, so this column is the genuine scalar baseline. |
 | `java` | *(none)* | Original Java backend. |
 
 The configurations are allowed to use all logical cores. This is the operating
@@ -118,6 +118,24 @@ grep        0.171s       0.592s  0.602s    1.017x   0.983x      0.283x
 ----------  ------  -----------  ------  --------  -------  ----------
 geomean          -            -       -    0.178x   5.603x      0.458x
 ```
+
+### Scalar performance changes after this table
+
+The table above predates the scalar-performance work of 2026-08-17/18
+(RTA devirtualisation, the true sequential elision, tail-call emission with
+`callconv(.c)`, and transient return slots). Two consequences:
+
+- `feart-novpf` now measures a genuine sequential elision. The earlier
+  binaries still carried the VPF locals structs, hooks, and fences, so the
+  old `speedup` column overstates the benefit of VPF itself.
+- The absolute `feart-novpf` times fell substantially. Single timed runs on
+  the same machine: `mapHeavy` 33.8s to about 10s, `mandelbrot` 49.6s to
+  about 38s, `nqueens` 45.1s to about 35s. The VPF builds also improved:
+  `mandelbrot` 3.0s to about 1.2s, with `nqueens` and `mapHeavy` at about
+  2.6s and 1.8s.
+
+These spot measurements are single runs, not `hyperfine` sweeps. Rerun
+`./run.sh` to regenerate the full table.
 
 ### VPF effect
 

@@ -3,6 +3,7 @@ package main.zig;
 import ast.Program;
 import codegen.MIR;
 import codegen.MIRInjectionVisitor;
+import codegen.optimisations.DevirtualiseByRTA;
 import codegen.optimisations.OptimisationBuilder;
 import codegen.zig.ZigBuildOpts;
 import codegen.zig.ZigCompiler;
@@ -39,10 +40,7 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   @Override default void cachePackageTypes(Program program) {
     var versionedDir = new ZigCompiler(verbosity(), io(), buildOpts()).versionedCacheDir();
     var baseDecs = program.ds().values().stream()
-      .filter(d -> {
-        var pkg = d.name().pkg();
-        return pkg.equals("base") || pkg.startsWith("base.");
-      })
+      .filter(d -> ZigCompiler.isCacheablePackage(d.name().pkg()))
       .collect(Collectors.groupingBy(d -> d.name().pkg()));
     baseDecs.forEach((pkg, decs) ->
       new HDCache(versionedDir, program, backendName()).cacheTypeInfo(pkg, decs));
@@ -52,10 +50,17 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   @Override default MIR.Program lower(Program program, ConcurrentHashMap<Long, TsT> resolvedCalls) {
     var mir = new MIRInjectionVisitor(cachedPkg(), program, resolvedCalls).visitProgram();
     var magic = new ZigMagicImpls(null, null, mir.p());
-    return new OptimisationBuilder(magic)
+    var devirtualise = new DevirtualiseByRTA(magic, ZigCompiler::isCacheablePackage);
+    var res = new OptimisationBuilder(magic)
       .withBoolIfOptimisation()
       .withBoxingOptimisation()
+      .withOptimisation(devirtualise)
       .run(mir);
+    if (verbosity().printCodegen()) {
+      System.err.println("[devirtualise] " + devirtualise.rewrittenCalls()
+        + " call sites, over " + devirtualise.targets().size() + " concrete types");
+    }
+    return res;
   }
 
   @Override default ZigProgram codeGeneration(MIR.Program mir) {

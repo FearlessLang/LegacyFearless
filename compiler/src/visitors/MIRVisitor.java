@@ -22,6 +22,9 @@ public interface MIRVisitor<R> {
   default R visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
     return call.original().accept(this, checkMagic);
   }
+  default R visitDirectCall(MIR.DirectCall call, boolean checkMagic) {
+    return call.original().accept(this, checkMagic);
+  }
   default R visitUpdatableListAsIdFnCall(MIR.UpdatableListAsIdFnCall call, boolean checkMagic) {
     return call.e().accept(this, checkMagic);
   }

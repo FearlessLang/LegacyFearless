@@ -15,10 +15,13 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-/**
- * Inlines all boolean `.if` and `?` method calls as ternaries if the ThenElse/1 argument is a literal and does not
- * capture itself. This inlining is shallow but the DevirtualisationOptimisation may extend it.
- */
+/// Inlines all boolean `.if` and `?` method calls as ternaries if the ThenElse/1 argument is a
+/// literal and does not capture itself. The inlining is shallow.
+///
+/// It is correct because the `ThenElse` is a `CreateObj` written at the call site: the capture
+/// names of the arm are then the same `MIR.X` objects as the ones in the enclosing scope, so an
+/// inlined arm body reads bindings that exist. See {@link DevirtualiseByRTA} for the general case,
+/// where the receiver comes from anywhere and only the receiver expression may cross the boundary.
 public class BoolIfOptimisation implements MIRCloneVisitor {
   private final MagicImpls<?> magic;
   private Map<MIR.FName, MIR.Fun> funs;
