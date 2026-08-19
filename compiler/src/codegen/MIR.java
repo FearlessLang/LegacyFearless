@@ -22,11 +22,6 @@ public sealed interface MIR {
 
   record Program(ast.Program p, List<Package> pkgs) implements MIR {
     public TypeDef of(Id.DecId id) {
-      /*List<String>domain= pkgs.stream()
-         //for easier debugging
-        .flatMap(p->p.defs.keySet().stream())
-        .map(s->s.toString())
-        .toList();*/
       return pkgs.stream()
         .filter(pkg->pkg.defs.containsKey(id))
         .map(pkg->pkg.defs.get(id))
@@ -37,8 +32,8 @@ public sealed interface MIR {
   record Package(String name, Map<Id.DecId, TypeDef> defs, List<Fun> funs) implements MIR {}
   record TypeDef(Id.DecId name, List<MT.Plain> impls, List<Sig> sigs, Optional<CreateObj> singletonInstance) implements MIR {
     public TypeDef {
-      // None of our literals should be compatible with each other due to conflicting methods, so we can rely on this
-      // in Mearless.
+      // Literals conflict on methods, so no literal is compatible with another.
+      // Mearless relies on this.
       assert impls.stream()
         .map(MT.Plain::id)
         .map(Id.DecId::name)
@@ -205,11 +200,10 @@ public sealed interface MIR {
     }
   }
 
-  /// A method call whose receiver type is known to be exactly one concrete literal, so the
-  /// receiver's vtable never has to be read. Codegen emits a direct call to the per-literal
-  /// method wrapper of {@code concreteType}, which takes `(receiver, args...)` and reads the
-  /// captures out of the receiver itself. A backend with no such wrapper falls back to
-  /// {@link #original()}, which is the equivalent virtual call.
+  /// A call whose receiver is exactly one concrete literal, so nothing reads the
+  /// vtable. Codegen emits a direct call to the per-literal method wrapper of
+  /// {@code concreteType}, which takes `(receiver, args...)` and reads the captures out
+  /// of the receiver. A backend with no such wrapper falls back to {@link #original()}.
   record DirectCall(MCall original, Id.DecId concreteType) implements E {
     @Override public MT t() { return original.t(); }
 

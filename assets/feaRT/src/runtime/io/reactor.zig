@@ -21,15 +21,14 @@ const MpmcBoundedQueue = @import("../sync/mpmc.zig").MpmcBoundedQueue;
 const gc = @import("../gc.zig");
 const process = @import("../process_singletons.zig");
 
-/// Stream/"current position" offset sentinel (= -1 as u64). For a stream fd
-/// (stdout/stderr) io_uring uses the file's current position, giving ordinary
-/// `write`/`writev` semantics; the fallback must instead pick `write`/`writev`
-/// over `pwrite`/`pwritev` (which reject -1 on a pipe).
+/// "Current position" offset sentinel, -1 as u64. io_uring reads it as the
+/// file's current position, giving ordinary `write`/`writev` semantics. The
+/// fallback must pick `write`/`writev` instead, because `pwrite`/`pwritev`
+/// reject -1 on a pipe.
 pub const NO_OFFSET: u64 = std.math.maxInt(u64);
 
-/// What the backend should do. The io_uring poller ignores `op` (the kernel
-/// already holds the request); the fallback thread switches on it to pick the
-/// blocking syscall.
+/// What the backend should do. The io_uring poller ignores `op`, because the
+/// kernel already holds the request; the fallback thread switches on it.
 const Op = union(enum) {
     openat: struct { dirfd: i32, path: [*:0]const u8, flags: std.posix.O, mode: std.posix.mode_t },
     read: struct { fd: i32, buf: []u8, offset: u64 },
@@ -38,25 +37,20 @@ const Op = union(enum) {
     close: struct { fd: i32 },
 };
 
-/// Lives stack-local in `awaitOp`'s frame on the (parked) fiber's stack -- its
-/// address is stable for the whole I/O and stays GC-reachable through the parked
-/// fiber's stack. The backend keys completions by `&Completion` (io_uring
-/// `user_data` / fallback queue node), so `obl` is always reachable when the
-/// completion fires.
+/// Stack-local in `awaitOp`'s frame on the parked fiber's stack, so its address
+/// is stable and GC-reachable for the whole I/O. The backend keys completions by
+/// `&Completion`, so `obl` is reachable when the completion fires.
 const Completion = struct {
     obl: JoinObligation,
     op: Op,
 };
 
-/// Spawn the backend thread. Called once from `main` after `completion.init`
-/// has registered the ready queue and before `pool.run()`.
+/// Call once from `main`, after the worker pool is built and before its run.
 pub fn init() !void {
     try backend.init();
 }
 
-/// Submit `op`, park the current fiber, and return the raw result once resumed.
-/// The `Completion` lives on this frame (the parked fiber's stack), so its
-/// address is stable and GC-reachable for the lifetime of the I/O.
+/// Submit `op`, park the current fiber, and return the raw result on resume.
 fn awaitOp(op: Op) i32 {
     var c = Completion{ .obl = JoinObligation.init(), .op = op };
     backend.submit(&c);
@@ -73,16 +67,14 @@ pub fn readAsync(fd: i32, buf: []u8, offset: u64) i32 {
     return awaitOp(.{ .read = .{ .fd = fd, .buf = buf, .offset = offset } });
 }
 
-/// `write(fd, buf)` for a stream fd (`offset = NO_OFFSET`) -- returns bytes
-/// written or `-errno`. The caller's `buf` lives in its frame, which stays alive
-/// on the parked fiber's stack for the whole op (same stability as `readAsync`).
+/// `write(fd, buf)` for a stream fd -- returns bytes written or `-errno`. The
+/// caller's `buf` stays alive in its frame on the parked fiber's stack.
 pub fn writeAsync(fd: i32, buf: []const u8, offset: u64) i32 {
     return awaitOp(.{ .write = .{ .fd = fd, .buf = buf, .offset = offset } });
 }
 
-/// `writev(fd, iovecs)` for a stream fd (`offset = NO_OFFSET`) -- returns bytes
-/// written or `-errno`. The caller's `iovecs` slice and the array it points at
-/// both live in the caller's frame, kept alive on the parked fiber's stack.
+/// `writev(fd, iovecs)` for a stream fd -- returns bytes written or `-errno`.
+/// The `iovecs` slice and its array both live in the caller's frame.
 pub fn writevAsync(fd: i32, iovecs: []const std.posix.iovec_const, offset: u64) i32 {
     return awaitOp(.{ .writev = .{ .fd = fd, .iovecs = iovecs, .offset = offset } });
 }
@@ -94,10 +86,10 @@ pub fn closeAsync(fd: i32) i32 {
 
 const backend = if (builtin.os.tag == .linux) LinuxBackend else FallbackBackend;
 
-/// io_uring backend: one shared ring, one sole CQ consumer (the poller), and a
-/// submit mutex serialising SQ production. Concurrent `io_uring_enter` from the
-/// poller (CQ only) and submitters (SQ only) is allowed, so no other locking is
-/// needed. The poller blocks in-kernel on `copy_cqe` until a completion is ready.
+/// One shared ring, the poller as sole CQ consumer, and a mutex serialising SQ
+/// production. Concurrent `io_uring_enter` from the poller and the submitters is
+/// allowed, so nothing else needs locking. The poller blocks in-kernel on
+/// `copy_cqe`.
 const LinuxBackend = struct {
     var ring: linux.IoUring = undefined;
     var submit_mutex: std.Io.Mutex = .init;
@@ -108,10 +100,9 @@ const LinuxBackend = struct {
         thread.detach();
     }
 
-    /// Hand all pending SQEs to the kernel, retrying on EINTR: BDWGC's
-    /// stop-the-world suspend signal routinely interrupts `io_uring_enter`,
-    /// and dropping the submit would leave the SQE in the userspace ring with
-    /// its fiber parked forever on a completion the kernel never produces.
+    /// Retries on EINTR: bdwgc's stop-the-world suspend signal routinely
+    /// interrupts `io_uring_enter`, and a dropped submit leaves the SQE in the
+    /// userspace ring with its fiber parked on a completion that never comes.
     fn submitPending() void {
         while (true) {
             _ = ring.submit() catch |err| switch (err) {
@@ -125,8 +116,8 @@ const LinuxBackend = struct {
     fn submit(c: *Completion) void {
         submit_mutex.lockUncancelable(process.runtime_io);
         defer submit_mutex.unlock(process.runtime_io);
-        // With the mutex held across get_sqe + submit, SQ depth stays ~1, so 256
-        // entries is ample; on a (theoretical) full SQ, flush and retry.
+        // The mutex spans get_sqe and submit, so SQ depth stays near 1 and 256
+        // entries is ample. Flush and retry if it ever fills.
         while (true) {
             const prepared = switch (c.op) {
                 .openat => |o| ring.openat(@intFromPtr(c), o.dirfd, o.path, o.flags, o.mode),
@@ -157,10 +148,9 @@ const LinuxBackend = struct {
     }
 };
 
-/// Single dedicated blocking-I/O thread for non-Linux targets. Submitters push
-/// `*Completion`s onto an MPMC queue; the thread drains it, runs the blocking
-/// syscall, and fulfils the obligation. Serialises all fallback I/O through one
-/// thread (acceptable per design). Mirrors the destroyer's lifecycle.
+/// One blocking-I/O thread for non-Linux targets. Submitters push
+/// `*Completion`s onto an MPMC queue; the thread drains it, runs the syscall and
+/// fulfils the obligation. All fallback I/O serialises through it, by design.
 const FallbackBackend = struct {
     var submit_queue: *MpmcBoundedQueue(*Completion) = undefined;
 
@@ -219,9 +209,9 @@ const FallbackBackend = struct {
         return @intCast(n);
     }
 
-    /// Map a Zig error back to `-errno` so the driver sees the same values it
-    /// would on the io_uring backend. Only the cases the file-read driver
-    /// distinguishes are mapped precisely; anything else collapses to `-EIO`.
+    /// Gives the driver the same values the io_uring backend would. Only the
+    /// cases the file-read driver distinguishes map precisely; the rest collapse
+    /// to `-EIO`.
     fn errToErrno(err: anyerror) i32 {
         const e: std.posix.E = switch (err) {
             error.FileNotFound => .NOENT,

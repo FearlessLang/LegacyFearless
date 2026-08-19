@@ -47,12 +47,12 @@ class ZigProgramBuilder {
     this.mainFile = buildMainFile(gen);
   }
 
-  /// Emits the type of every {@link MIR.DirectCall} target that the walk above did not reach. The
-  /// per-literal method wrappers are emitted with the object literal that creates them, and a
-  /// devirtualised call site can name a literal that no package it generates creates.
+  /// Emits the type of every {@link MIR.DirectCall} target the walk above did not reach. A
+  /// per-literal wrapper is emitted with the object literal that creates it, and a
+  /// devirtualised call site can name a literal no generated package creates.
   ///
-  /// A target in a cached package needs nothing: that package's text was generated in full when it
-  /// was not yet cached, so it already holds the wrapper.
+  /// A target in a cached package needs nothing: that text was generated in full before it was
+  /// cached, so it already holds the wrapper.
   private void forceDirectCallTargets(ZigSingleCodegen gen) {
     for (var target : new codegen.optimisations.RapidTypeAnalysis(program).directCallTargets()) {
       if (gen.emittedTypes.containsKey(target.getKey())) { continue; }
@@ -127,7 +127,7 @@ class ZigProgramBuilder {
   private String buildMainFile(ZigSingleCodegen gen) {
     var sb = new StringBuilder();
 
-    // Each import is `pub`, so that a package file can read it through `@import("root")`
+    // Each import is `pub`, so a package file reads it through `@import("root")`.
     sb.append("pub const std = @import(\"std\");\n");
     sb.append("pub const rt = @import(\"runtime/objs.zig\");\n");
     sb.append("pub const nat_rt = @import(\"runtime/intrinsics/nat.zig\");\n");
@@ -160,7 +160,7 @@ class ZigProgramBuilder {
     sb.append("pub const Fiber = @import(\"runtime/fiber.zig\").Fiber;\n");
     sb.append("comptime { _ = Fiber; }\n");
     sb.append("pub const native = @import(\"runtime/native.zig\");\n");
-    // A `@panic`-class fault in a fiber becomes a non-deterministic error. It unwinds to the
+    // A `@panic`-class fault in a fiber becomes a non-deterministic error that unwinds to the
     // nearest `CapTry` boundary or to the top level. See `runtime/errors/unwind.zig`.
     sb.append("pub const panic = std.debug.FullPanic(errors.ndPanicHandler);\n");
     sb.append('\n');
@@ -172,7 +172,7 @@ class ZigProgramBuilder {
     }
     sb.append('\n');
 
-    // The runtime refers to these VTables by name, so main.zig re-exports them
+    // The runtime names these VTables, so main.zig re-exports them.
     appendReExportIfPresent(sb, gen, "VT_Void_0", new Id.DecId("base.Void", 0));
     appendReExportIfPresent(sb, gen, "VT_True_0", new Id.DecId("base.True", 0));
     appendReExportIfPresent(sb, gen, "VT_False_0", new Id.DecId("base.False", 0));
@@ -225,7 +225,6 @@ class ZigProgramBuilder {
     sb.append("errors.installNdHandlers();\n");
     sb.append("const cpu_count = std.Thread.getCpuCount() catch 1;\n");
     sb.append("const pool = worker_mod.WorkerPool.init(cpu_count) catch @panic(\"OOM\");\n");
-    sb.append("completion.init(pool.ready_queue);\n");
     sb.append("reactor.init() catch @panic(\"OOM init reactor\");\n");
     sb.append("const main_fiber = Fiber.create(struct {\n");
     sb.append("fn run(_: *Fiber) void {\n");
@@ -254,7 +253,7 @@ class ZigProgramBuilder {
     sb.append("worker_mod.global_done.store(true, .release);\n");
     sb.append("}\n");
     sb.append("}.run, null) catch @panic(\"OOM\");\n");
-    sb.append("pool.enqueueFiber(main_fiber);\n");
+    sb.append("worker_mod.enqueueFiber(main_fiber);\n");
     sb.append("pool.run();\n");
     sb.append("log.dumpAllTraceBuffers();\n");
     sb.append("gc.dump_allocs();\n");

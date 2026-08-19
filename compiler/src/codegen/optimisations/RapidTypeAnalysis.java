@@ -14,24 +14,24 @@ import java.util.Set;
 
 /// Whole-program rapid type analysis over a {@link MIR.Program}.
 ///
-/// The table maps a declared type to every concrete type that can flow into a receiver of that
-/// declared type. A concrete type enters the table from an object literal ({@link MIR.CreateObj}),
-/// or from the fixed set of types the runtime provides itself (see {@link Magic}). A declared
-/// type with exactly one entry, and with an object literal behind it, has a monomorphic receiver.
+/// The table maps a declared type to every concrete type that can flow into a receiver of
+/// it. A concrete type enters from an object literal ({@link MIR.CreateObj}) or from the
+/// fixed set the runtime provides ({@link Magic}). One entry with an object literal behind
+/// it means a monomorphic receiver.
 ///
-/// {@link MIR.Program} holds every package of the final binary, the cached ones included: the
-/// Zig backend caches generated text, never the IR. So the table covers the whole program.
+/// {@link MIR.Program} holds every package of the final binary, cached ones included: the
+/// Zig backend caches generated text, never the IR. So the table is whole-program.
 public final class RapidTypeAnalysis {
   private final Map<Id.DecId, Set<Id.DecId>> impls = new HashMap<>();
   private final Map<Id.DecId, MIR.CreateObj> literals = new HashMap<>();
   private final Set<Id.DecId> directCallTargets = new HashSet<>();
 
   public RapidTypeAnalysis(MIR.Program p) {
-    // The runtime provides these without an object literal. Recording them keeps a declared type
-    // that a runtime-backed type implements out of the monomorphic set.
+    // The runtime provides these without an object literal. Recording them keeps a declared
+    // type that a runtime-backed type implements out of the monomorphic set.
     for (var magicDec : Magic.allMagicDecs()) {
-      // A program that never imports a magic type has no declaration for it, and `superDecIds`
-      // needs one.
+      // `superDecIds` needs a declaration, which a program that never imports the magic
+      // type does not have.
       if (!p.p().ds().containsKey(magicDec)) { continue; }
       record(p, magicDec);
     }
@@ -45,8 +45,8 @@ public final class RapidTypeAnalysis {
     }
   }
 
-  /// The single concrete type behind `declared`, when there is exactly one and an object literal
-  /// backs it. Empty for a polymorphic or runtime-backed receiver.
+  /// The one concrete type behind `declared`, when an object literal backs it. Empty for a
+  /// polymorphic or runtime-backed receiver.
   public Optional<MIR.CreateObj> monomorphicImpl(Id.DecId declared) {
     var candidates = impls.get(declared);
     if (candidates == null || candidates.size() != 1) { return Optional.empty(); }
@@ -59,10 +59,10 @@ public final class RapidTypeAnalysis {
     }
   }
 
-  /// Collects every object literal of one expression tree. A `BoolExpr` arm is a separate `Fun`,
-  /// which the package walk reaches on its own, so this walk does not follow arms.
+  /// Every object literal of one expression tree. A `BoolExpr` arm is a separate `Fun` that
+  /// the package walk reaches on its own, so this does not follow arms.
   private void collect(MIR.Program p, MIR.E e) {
-    // An MIR body nests deeply, so the walk keeps its own stack.
+    // An MIR body nests deeply, so recursion is not an option here.
     var work = new ArrayList<MIR.E>();
     work.add(e);
     while (!work.isEmpty()) {
@@ -100,9 +100,9 @@ public final class RapidTypeAnalysis {
     }
   }
 
-  /// Every concrete type a {@link MIR.DirectCall} in this program names, paired with its object
-  /// literal. A backend that emits per-literal method wrappers lazily has to force each of these,
-  /// because a call site can name a literal that its own package never creates.
+  /// Every concrete type a {@link MIR.DirectCall} names, with its object literal. A backend
+  /// that emits per-literal wrappers lazily must force each one, because a call site can name
+  /// a literal its own package never creates.
   public List<Map.Entry<Id.DecId, MIR.CreateObj>> directCallTargets() {
     return directCallTargets.stream()
       .filter(literals::containsKey)

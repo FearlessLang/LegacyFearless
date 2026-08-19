@@ -67,11 +67,11 @@ public class Magic {
 
   public static final Id.DecId MapK = new Id.DecId("base.Maps", 0);
 
-  /// Every `DecId` this class names. A whole-program analysis over the MIR misses these: some of
-  /// them have no object literal at all, because the runtime provides the instance and its vtable.
-  /// The set is deliberately over-wide -- an extra entry only makes a caller more conservative,
-  /// while a missing one makes it unsound -- so it comes from the fields of this class and needs
-  /// no upkeep when a new magic type arrives.
+  /// Every `DecId` this class names. A whole-program analysis over the MIR misses these:
+  /// some have no object literal at all, because the runtime provides the instance and its
+  /// vtable. Built from the fields of this class, so a new magic type needs no upkeep, and
+  /// deliberately over-wide: a spare entry only makes a caller more conservative, while a
+  /// missing one makes it unsound.
   public static List<Id.DecId> allMagicDecs() { return MAGIC_DECS; }
 
   private static final List<Id.DecId> MAGIC_DECS = Arrays.stream(Magic.class.getDeclaredFields())

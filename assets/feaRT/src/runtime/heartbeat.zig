@@ -10,6 +10,7 @@ const shadow_stack_mod = @import("shadow_stack.zig");
 const worker_mod = @import("worker.zig");
 const log = @import("log.zig");
 const scope_mod = @import("scope.zig");
+const op_counters = @import("op_counters.zig");
 const build_options = @import("build_options");
 
 const ShadowFrame = shadow_stack_mod.ShadowFrame;
@@ -20,75 +21,116 @@ const StolenTask = worker_mod.StolenTask;
 pub const TOKENS_THRESHOLD: u32 = @import("build_options").tokens_threshold;
 const ARE_HEARTBEATS_ENABLED = @import("build_options").enable_vpf;
 
-/// Pointer to the running fiber's tokens counter. Swapped by
-/// fiber.switchFiber alongside the shadow stack thread-locals. Null when
-/// no fiber is running (e.g. on the scheduler fiber).
+/// The running fiber's tokens counter, swapped by `fiber.switchFiber` with the
+/// shadow stack thread-locals. Null when no fiber runs on this thread.
 pub threadlocal var tls_tokens_ptr: ?*u32 = null;
 
-/// This is called at the beginning of _every_ stack frame, effectively once per reduction step.
-/// So, this is where we do our work tracking (token granting & promotion purchasing).
-/// Each step gives you 1 token. Once you have enough tokens to purchase a promotion, we
-/// promote the oldest promotable stack frame. The child gets half of the parent's tokens.
-/// This is an implementation of the algorithm described in Section 4 of
-/// Automatic Parallelism Management by Westrick et. al.
+/// Runs at the top of every stack frame, so once per reduction step. Each step
+/// grants one token. A promotion costs `TOKENS_THRESHOLD` tokens, which are
+/// destroyed; what survives the charge splits evenly between parent and child.
+/// The charge is what bounds promotions at `W / TOKENS_THRESHOLD` (APM Theorem
+/// 4.1 with C/N = 1/TOKENS_THRESHOLD); the split alone bounds nothing. Tokens
+/// are spent only on a promotion that published, so a frame with nothing to
+/// promote keeps saving towards the next promotable one.
+///
+/// Section 4 of Automatic Parallelism Management, Westrick et al.
 pub inline fn tryPromote() void {
     comptime if (!ARE_HEARTBEATS_ENABLED) return;
     const tokens_ptr = tls_tokens_ptr orelse return;
     if (tokens_ptr.* >= TOKENS_THRESHOLD) {
-        tokens_ptr.* /= 2; // parent keeps half
-        // Don't promote into a cancelled subtree -- stealing work we're about
-        // to abort just burns a thief fiber. The TLS load is cheap and the
-        // parent walk in Scope.cancelled() is short (scope depth = terminal-
-        // nesting depth, 1 in practice).
-        if (!scope_mod.currentCancelled()) {
-            doPromote(tokens_ptr.*); // child will get the same half
+        // Both tests are inline and reject without a call, which is what keeps
+        // a miss cheap; nothing else may run on the healthy path. Promoting
+        // into a cancelled subtree only burns a thief fiber on work that is
+        // about to abort.
+        if (hasPromotableFrame() and !scope_mod.currentCancelled()) {
+            const remainder = (tokens_ptr.* - TOKENS_THRESHOLD) / 2;
+            if (doPromote(remainder)) {
+                op_counters.bump(.promotion);
+                tokens_ptr.* = remainder;
+            }
+        } else {
+            // doPromote records its own reason.
+            if (op_counters.ENABLED) {
+                if (!hasPromotableFrame()) {
+                    op_counters.bump(.promotion_miss_no_frame);
+                } else {
+                    op_counters.bump(.promotion_miss_cancelled);
+                }
+            }
+            periodicDrain(tokens_ptr.*);
         }
     }
-    // Overflow shouldn't be an issue here because we check the threshold first, which is guaranteed to be <= U32 MAX
+    // The threshold check above bounds this below U32_MAX, so it cannot overflow.
+    op_counters.bump(.token_granted);
     tokens_ptr.* += 1;
 }
 
-noinline fn doPromote(child_initial_tokens: u32) void {
-    // Get current worker
+/// True when the running fiber has an un-promoted shadow frame.
+///
+/// Reads the thread-local inline, which is safe because `tryPromote` sits at the
+/// top of a generated method: there is no fiber-switch point across which the
+/// compiler could cache a stale TLS base. The `noinline` accessor would
+/// reintroduce the call this check exists to avoid.
+inline fn hasPromotableFrame() bool {
+    const cursor = shadow_stack_mod.shadow_cursor orelse return false;
+    return cursor.lowest_unpromoted < cursor.top;
+}
+
+/// A fiber that runs a long time without reaching the scheduler still has to
+/// drain objects handed back by other workers. The inline rejection above skips
+/// `doPromote` and its drain, so keep that liveness on a coarse cadence.
+inline fn periodicDrain(tokens: u32) void {
+    if (tokens & 0xFFFF == 0) drainMergeQueueOnly();
+}
+
+noinline fn drainMergeQueueOnly() void {
     const worker = worker_mod.getCurrentWorker() orelse return;
+    worker.drainMergeQueue();
+}
 
-    // Get current fiber's shadow stack (null if no fiber running)
-    const shadow_top_ptr = shadow_stack_mod.getShadowTop() orelse return;
-    const top = shadow_top_ptr.*;
+/// Promote the oldest un-promoted frame of the running fiber. True only when the
+/// promotion published its join obligation, which is what makes it worth
+/// charging for; every early return leaves the work to the parent.
+noinline fn doPromote(child_initial_tokens: u32) bool {
+    const worker = worker_mod.getCurrentWorker() orelse {
+        op_counters.bump(.promotion_miss_no_fiber);
+        return false;
+    };
 
-    log.trace_scheduling(.hb_entry, worker.id, top, @intFromPtr(worker.current_fiber));
+    worker.drainMergeQueue();
 
-    if (top == 0) return;
+    const cursor = shadow_stack_mod.getShadowCursor() orelse {
+        op_counters.bump(.promotion_miss_no_fiber);
+        return false;
+    };
+    const frame_idx = cursor.lowest_unpromoted;
 
-    const frames = shadow_stack_mod.getShadowStack() orelse return;
+    log.trace_scheduling(.hb_entry, worker.id, cursor.top, @intFromPtr(worker.current_fiber));
 
-    // Scan from index 0 (oldest) upward for first frame not yet promoted
-    var frame_idx: usize = 0;
-    while (frame_idx < top) : (frame_idx += 1) {
-        if (frames[frame_idx].join_obligation.load(.monotonic) == null) {
-            break;
-        }
+    // Re-test: the frame state can change between the inline check and here.
+    if (frame_idx >= cursor.top) {
+        op_counters.bump(.promotion_miss_no_frame);
+        return false;
     }
-    if (frame_idx >= top) return; // All frames already promoted
 
-    // Check if task queue has space before doing any work
-    if (worker.task_queue.len() >= worker.task_queue.capacity() - 1) {
-        log.trace_scheduling(.hb_enqueue_fail, 0, worker.task_queue.len(), worker.task_queue.capacity());
-        return;
-    }
+    const frames = shadow_stack_mod.getShadowStack() orelse {
+        op_counters.bump(.promotion_miss_no_fiber);
+        return false;
+    };
 
-    // Allocate obligation from pool
-    const obligation = worker.allocObligation() orelse return;
+    const obligation = worker.allocObligation() orelse {
+        op_counters.bump(.promotion_miss_pool_empty);
+        return false;
+    };
 
-    // Allocate task from pool
     const task = worker.allocTask() orelse {
         worker.recycleObligation(obligation);
-        return;
+        op_counters.bump(.promotion_miss_pool_empty);
+        return false;
     };
 
     const frame = &frames[frame_idx];
 
-    // Copy locals into task
     if (std.debug.runtime_safety) {
         std.debug.assert(frame.locals_size <= task.locals_copy.len);
     }
@@ -101,14 +143,12 @@ noinline fn doPromote(child_initial_tokens: u32) void {
     task.thief_fn = frame.thief_fn;
     task.obligation = obligation;
     task.initial_tokens = child_initial_tokens;
-    // tls_tokens_ptr is guaranteed non-null here: tryPromote only calls
-    // doPromote when it is non-null, and no fiber switch happens in between.
+    // Non-null: tryPromote only calls doPromote when it is, and no fiber switch
+    // happens in between.
     task.parent_tokens_ptr = tls_tokens_ptr.?;
-    // Capture the promoter's scope so the thief fiber inherits it.
     task.scope = scope_mod.active_scope;
-    // Snapshot the promoter's trace stack so the thief fiber can show this call
-    // chain beneath a fiber boundary if it crashes. doPromote runs on the
-    // promoter fiber, so its trace TLS is live here.
+    // The thief fiber shows this call chain beneath a fiber boundary if it
+    // crashes. doPromote runs on the promoter, so its trace TLS is live here.
     if (build_options.trace_frames) {
         const trace_top_ptr = shadow_stack_mod.getTraceTop().?;
         const trace_frames = shadow_stack_mod.getStackTrace().?;
@@ -119,47 +159,44 @@ noinline fn doPromote(child_initial_tokens: u32) void {
     const child_obl = worker.allocObligation() orelse {
         worker.recycleObligation(obligation);
         worker.recycleTask(task);
-        return;
+        op_counters.bump(.promotion_miss_pool_empty);
+        return false;
     };
     frame.child_obligation.store(child_obl, .monotonic);
     task.child_obligation = child_obl;
+    // Published before the task can be dequeued, so the join point always finds
+    // the task it has to race for.
+    frame.task.store(task, .monotonic);
 
     log.trace_scheduling(.hb_promote, frame_idx, @intFromPtr(obligation), @intFromPtr(child_obl));
 
-    // The thief task must be in some worker's queue before the
-    // join obligation becomes observable, otherwise a queue-full window
-    // between CAS and enqueue would leave the parent waiting on an obligation
-    // that nothing will ever fulfill (the lost-task hang).
-    //
-    // If the queue is full now, abandon the promotion entirely -- frame's
-    // join_obligation is still null, so popAndClaim takes the no-promotion
-    // branch and the parent runs the work itself. Recycle the prepared
-    // resources and we're done.
-    const enqueued = worker.task_queue.enqueue(task);
-    if (!enqueued) {
-        worker.recycleObligation(obligation);
-        worker.recycleObligation(child_obl);
-        worker.recycleTask(task);
-        // Clear child_obligation back out -- the frame might still be claimed
-        // by a future promotion attempt for the same frame index, and we
-        // don't want a stale pointer left lying around.
-        frame.child_obligation.store(null, .monotonic);
-        log.trace_scheduling(.hb_enqueue_fail, @intFromPtr(task), @intFromPtr(obligation), 0);
-        return;
-    }
+    // Before the join obligation becomes observable: a window between CAS and
+    // enqueue would leave the parent waiting on an obligation nothing fulfills.
+    // `enqueueTask` is total, so admission never refuses and tokens deplete the
+    // way the model assumes.
+    worker_mod.enqueueTask(task);
     log.trace_scheduling(.hb_enqueue, @intFromPtr(task), @intFromPtr(obligation), 0);
 
-    // PUBLISH the obligation. If CAS fails the parent has already claimed the
-    // frame (or another promoter beat us), so the queued task corresponds to
-    // dead work. Mark it cancelled so thiefTrampoline no-ops when it runs.
+    // Publish. A failed CAS means the parent or another promoter claimed the
+    // frame, so the queued task is dead work.
     if (frame.join_obligation.cmpxchgStrong(null, obligation, .release, .monotonic)) |old| {
-        task.cancelled.store(true, .release);
-        // Clear the speculatively-stored child_obligation: the parent didn't
-        // see our promotion (CAS lost), so it never wrote into it. The thief
-        // will recycle the obligations it owns when it observes .cancelled.
+        // Claimed either way, so the frame leaves the un-promoted suffix.
+        cursor.lowest_unpromoted = frame_idx + 1;
+        // Take the execution rights back if no worker holds them. The winner
+        // recycles the obligations; the task stays in its queue for the
+        // dequeuing worker to retire. Losing costs a thief fiber whose result
+        // nobody reads, but stays correct.
+        if (task.claimed.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
+            worker.recycleObligation(obligation);
+            worker.recycleObligation(child_obl);
+        }
         frame.child_obligation.store(null, .monotonic);
+        frame.task.store(null, .monotonic);
         log.trace_scheduling(.hb_cas_fail, frame_idx, @intFromPtr(old), 0);
-        return;
+        op_counters.bump(.promotion_miss_cas_lost);
+        return false;
     }
     log.trace_scheduling(.hb_cas_ok, frame_idx, @intFromPtr(obligation), 0);
+    cursor.lowest_unpromoted = frame_idx + 1;
+    return true;
 }

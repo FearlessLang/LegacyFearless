@@ -125,8 +125,7 @@ const VT_TestVoid: objs.VTable = .{
     .storage_mode = .singleton,
 };
 
-/// Invoke a code-generated method for one of the Mearless functions implementing
-/// one of the IsoPod methods.
+/// Invoke the generated Mearless function of an IsoPod method.
 fn fearlessBody(comptime name: []const u8, args: anytype) FatPtr {
     if (comptime @hasDecl(root, "pkg_base")) {
         if (comptime @hasDecl(root.pkg_base, name)) {
@@ -164,21 +163,21 @@ test "IsoPod consume transfers exactly once and next releases overwritten value"
     var b = objs.obj_k(Captures, &vt_b, .{});
     var c = objs.obj_k(Captures, &vt_c, .{});
     var pod = make(a.share());
-    try testing.expectEqual(@as(u32, 2), a.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
 
     var consumed = consume(pod.share());
-    try testing.expectEqual(@as(u32, 2), a.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
     consumed.rc_decrement();
-    try testing.expectEqual(@as(u32, 1), a.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), a.boxed_value().refCountForTest());
 
     _ = next(pod.share(), b.share());
-    try testing.expectEqual(@as(u32, 2), b.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), b.boxed_value().refCountForTest());
     _ = next(pod.share(), c.share());
-    try testing.expectEqual(@as(u32, 1), b.boxed_value().ref_count.load(.monotonic));
-    try testing.expectEqual(@as(u32, 2), c.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), b.boxed_value().refCountForTest());
+    try testing.expectEqual(@as(u32, 2), c.boxed_value().refCountForTest());
 
     pod.rc_decrement();
-    try testing.expectEqual(@as(u32, 1), c.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), c.boxed_value().refCountForTest());
 
     a.rc_decrement();
     b.rc_decrement();
@@ -215,12 +214,12 @@ test "IsoPod peek shares the stored value with the viewer" {
     const vt: objs.VTable = .{ .type_name = "test.IsoPeek", .hashes = &.{}, .methods = &.{}, .method_names = &.{}, };
     var value = objs.obj_k(Captures, &vt, .{});
     var pod = make(value.share());
-    try testing.expectEqual(@as(u32, 2), value.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), value.boxed_value().refCountForTest());
 
     var seen: FatPtr = undefined;
     var viewer = objs.obj_k(PeekViewerCaptures, &VT_PeekViewer, .{ .result_ptr = @intFromPtr(&seen) });
     var result = peek(pod.share(), viewer.share());
-    try testing.expectEqual(@as(u32, 3), value.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 3), value.boxed_value().refCountForTest());
 
     result.rc_decrement();
     seen.rc_decrement();

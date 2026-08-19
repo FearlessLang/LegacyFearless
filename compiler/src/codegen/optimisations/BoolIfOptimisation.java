@@ -6,22 +6,18 @@ import id.Id;
 import magic.Magic;
 import magic.MagicImpls;
 import program.typesystem.XBs;
-import utils.Streams;
 
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
-/// Inlines all boolean `.if` and `?` method calls as ternaries if the ThenElse/1 argument is a
-/// literal and does not capture itself. The inlining is shallow.
+/// Inlines a boolean `.if` or `?` call as a ternary when the ThenElse/1 argument is a
+/// literal that does not capture itself. The inlining is shallow.
 ///
-/// It is correct because the `ThenElse` is a `CreateObj` written at the call site: the capture
-/// names of the arm are then the same `MIR.X` objects as the ones in the enclosing scope, so an
-/// inlined arm body reads bindings that exist. See {@link DevirtualiseByRTA} for the general case,
-/// where the receiver comes from anywhere and only the receiver expression may cross the boundary.
+/// Correct because the `ThenElse` is a `CreateObj` written at the call site, so the arm's
+/// capture names are the same `MIR.X` objects as in the enclosing scope and an inlined arm
+/// body reads bindings that exist. {@link DevirtualiseByRTA} is the general case.
 public class BoolIfOptimisation implements MIRCloneVisitor {
   private final MagicImpls<?> magic;
   private Map<MIR.FName, MIR.Fun> funs;
@@ -43,14 +39,14 @@ public class BoolIfOptimisation implements MIRCloneVisitor {
   }
 
   private Optional<MIR.BoolExpr> boolIfOptimisation(MIR.MCall original) {
-    // We need to make sure that this is a canonical ThenElse literal (i.e. no extra methods and the lambda is made inline here)
-    // The restriction about the lambda being created inline here allows us to assume any captures are present
+    // A canonical ThenElse literal: no extra methods, and the lambda made inline here.
+    // The inline restriction is what lets the captures be assumed present.
     assert original.args().size() == 1;
     var thenElse_ = original.args().getFirst();
     if (!(thenElse_ instanceof MIR.CreateObj thenElse)) { return Optional.empty(); }
     var thenElseDec = this.magic.p().of(thenElse.t().name().orElseThrow());
     var thenElseMs = this.magic.p().meths(XBs.empty(), thenElse.t().mdf(), thenElseDec.toIT(), 0);
-    // just checking size here is fine because it must have .then and .else, so less than 2 is impossible and >2 is not covered by this optimisation
+    // .then and .else are mandatory, so under 2 is impossible and over 2 is out of scope.
     assert thenElseMs.size() >= 2;
     if (thenElseMs.size() != 2) { return Optional.empty(); }
 
@@ -60,8 +56,7 @@ public class BoolIfOptimisation implements MIRCloneVisitor {
       return Optional.empty();
     }
 
-    // This optimisation is shallow, it will only inline one level of a .if
-    // If there is a nested .if, that nested if could also be optimised, but it will not be inlined into this one.
+    // One level only. A nested `.if` can be optimised in turn, but never inlined here.
     return Optional.of(new MIR.BoolExpr(original, original.recv(), then.fName().orElseThrow(), else_.fName().orElseThrow()));
   }
 }

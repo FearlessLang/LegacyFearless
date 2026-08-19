@@ -3,6 +3,7 @@ const Fiber = @import("fiber.zig").Fiber;
 const switchFiber = @import("fiber.zig").switchFiber;
 const JoinObligation = @import("sync/join_obligation.zig").JoinObligation;
 const MpmcBoundedQueue = @import("sync/mpmc.zig").MpmcBoundedQueue;
+const ChaseLevDeque = @import("sync/chase_lev.zig").ChaseLevDeque;
 const gc = @import("gc.zig");
 const process = @import("process_singletons.zig");
 const log = @import("log.zig");
@@ -11,8 +12,11 @@ const signals = @import("errors/signals.zig");
 const trace = @import("errors/trace.zig");
 const shadow_stack = @import("shadow_stack.zig");
 const build_options = @import("build_options");
+const op_counters = @import("op_counters.zig");
 
-const FatPtr = @import("objs.zig").FatPtr;
+const objs = @import("objs.zig");
+
+const FatPtr = objs.FatPtr;
 const TraceFrame = trace.TraceFrame;
 const TRACE_CAP = shadow_stack.TRACE_CAP;
 const LocalsDropHook = *const fn (*anyopaque) void;
@@ -24,27 +28,28 @@ pub const StolenTask = struct {
 	obligation: *JoinObligation,
 	child_obligation: ?*JoinObligation,
 	initial_tokens: u32,
-	/// Points at the parent fiber's tokens counter. The thief fiber copies
-	/// this into its own parent_tokens_ptr field on construction, and the
-	/// scheduler writes any leftover tokens back through this pointer when
-	/// the thief fiber completes (state == .Done).
+	/// The promoter's tokens counter. The thief fiber copies it into its own
+	/// `parent_tokens_ptr` and refunds through it just before it fulfills the
+	/// obligation that can wake the parent.
 	parent_tokens_ptr: *u32,
-	/// Captured from the promoter's TLS `active_scope` at heartbeat time.
-	/// The thief fiber inherits this via its `saved_scope` slot so cancel
-	/// propagates across the fork. Null if the promoter had no scope pushed.
+	/// The promoter's TLS `active_scope` at heartbeat time. The thief inherits it
+	/// through `saved_scope`, so cancel propagates across the fork. Null when the
+	/// promoter had no scope pushed.
 	scope: ?*scope_mod.Scope,
-	/// Snapshot of the promoter's trace stack at heartbeat time, copied into the
-	/// thief fiber (with a boundary sentinel) so a crash on a stolen subtree
-	/// shows the promoter's call chain. Zero-size when `trace_frames` is off.
+	/// The promoter's trace stack at heartbeat time, copied into the thief fiber
+	/// with a boundary sentinel, so a crash on a stolen subtree shows the
+	/// promoter's call chain. Zero-size when `trace_frames` is off.
 	trace_frames: [if (build_options.trace_frames) TRACE_CAP else 0]TraceFrame = undefined,
 	trace_top: usize = 0,
-	/// Set by `doPromote` when the publish-obligation CAS fails after the
-	/// task was already enqueued. The thief trampoline checks this first
-	/// thing on entry: if true, it skips `thief_fn`, recycles the unclaimed
-	/// obligations, and returns. Required because the enqueue-first ordering
-	/// in heartbeat.zig means a queued task may correspond to a frame the
-	/// parent has already claimed (and so has no consumer for our result).
-	cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+	/// Execution rights. Every side that could run the work CASes `false -> true`
+	/// and only the winner proceeds: the dequeuing worker, the promoter's
+	/// publish-CAS-lost path, and the parent reclaiming an unstolen task.
+	///
+	/// Cleanup follows the claim. The obligations belong to the winner and the
+	/// task memory to whoever dequeues it. A task still in a queue must never be
+	/// recycled, or the next promotion hands the same pointer out twice and the
+	/// queue holds one task in two places.
+	claimed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
 
 pub const Worker = struct {
@@ -53,14 +58,30 @@ pub const Worker = struct {
 
 	id: usize,
 	current_fiber: ?*Fiber,
-	/// The scheduler fiber lives on the OS thread's stack.
-	/// We context-switch back to it when a fiber parks or completes.
+	/// Lives on the OS thread's stack. A fiber that parks or completes switches
+	/// back to it.
 	scheduler_fiber: Fiber,
+	/// Any worker may take any fiber, so this is a full MPMC queue rather than an
+	/// owner-private structure, and a steal is just `dequeue` on a victim.
+	// TODO: a Chase-Lev deque could remove a few atomic ops if this shows up
+	// poorly in a profile.
 	ready_queue: *MpmcBoundedQueue(*Fiber),
-	task_queue: *MpmcBoundedQueue(*StolenTask),
+	/// Promoted tasks. Only this worker pushes and takes, at the bottom end; any
+	/// other worker steals from the top. It grows on demand, so a promotion is
+	/// never refused for want of space.
+	task_queue: *ChaseLevDeque(*StolenTask),
+
+	/// Victim-picking xorshift, seeded from the worker id so no two workers walk
+	/// the victim list in lockstep.
+	steal_rng: u64,
 
 	/// Per-worker trace buffer
 	trace_buf: log.TraceBuffer,
+
+	/// Heap objects a foreign worker could not release, because this worker's
+	/// biased count still covers the reference. Drained between fiber slices and
+	/// on the heartbeat fire path.
+	merge_queue_head: objs.MergeQueue = .{ .raw = null },
 
 	obligation_pool: [OBL_POOL_CAP]?*JoinObligation = .{null} ** OBL_POOL_CAP,
 	obligation_pool_len: usize = 0,
@@ -87,13 +108,13 @@ pub const Worker = struct {
 			self.task_pool_len -= 1;
 			const task = self.task_pool[self.task_pool_len].?;
 			self.task_pool[self.task_pool_len] = null;
-			// Reset the cancel flag -- recycled tasks must not carry the bit
-			// set by a previous CAS-fail rollback into a fresh promotion.
-			task.cancelled.store(false, .monotonic);
+			// A recycled task must not carry the bit won by whoever retired the
+			// promotion it held before.
+			task.claimed.store(false, .monotonic);
 			return task;
 		}
 		const task = gc.allocator.create(StolenTask) catch return null;
-		task.cancelled = std.atomic.Value(bool).init(false);
+		task.claimed = std.atomic.Value(bool).init(false);
 		return task;
 	}
 
@@ -116,51 +137,102 @@ pub const Worker = struct {
 		}
 	}
 
-	/// Park the current fiber: set its state to Parked and switch to the scheduler.
+	/// Fold the biased half of every object handed back to this worker into its
+	/// shared half. One relaxed load when there is nothing to do.
+	pub inline fn drainMergeQueue(self: *Worker) void {
+		if (self.merge_queue_head.load(.monotonic) == null) return;
+		objs.drainMergeQueue(&self.merge_queue_head);
+	}
+
+	/// Set the fiber state to Parked and switch to the scheduler.
 	pub fn parkCurrentFiber(self: *Worker) void {
 		const fiber = self.current_fiber.?;
 		fiber.state = .Parked;
-		// Switch back to scheduler -- scheduler_fiber has no shadow stack to swap to,
-		// so we just do a raw switchTo here (the scheduler doesn't use shadow stacks).
+		// A raw switchTo: the scheduler fiber uses no shadow stack, so there is
+		// nothing to swap.
 		const switchTo = @import("fiber.zig").switchFiber;
 		switchTo(fiber, &self.scheduler_fiber);
 	}
 };
 
-/// Thread-local pointer to the current worker.
-/// IMPORTANT: Always use getCurrentWorker() to read this -- direct reads can be
-/// cached by the compiler in callee-saved registers, producing stale values
-/// after fiber migration (switchTo can resume on a different OS thread).
+/// Read this only through `getCurrentWorker`. The compiler can cache a direct
+/// read in a callee-saved register, and `switchTo` may resume the fiber on a
+/// different OS thread, which makes such a value stale.
 pub threadlocal var tls_current_worker: ?*Worker = null;
 
-/// Fresh read of tls_current_worker. Must be noinline with an asm barrier to
-/// prevent the compiler from caching the TLS address or return value across
-/// fiber context switches (switchTo can resume a fiber on a different OS thread
-/// with a different TLS base, so cached TLS values become stale).
+/// Fresh read of `tls_current_worker`. Noinline with an asm barrier, so the
+/// compiler cannot cache the TLS address or the result across a fiber switch:
+/// `switchTo` may resume on another OS thread with a different TLS base.
 pub noinline fn getCurrentWorker() ?*Worker {
 	const w = tls_current_worker;
 	asm volatile ("" ::: .{ .memory = true });
 	return w;
 }
 
+/// The biased-reference-counting identity of the running worker, `worker.id + 1`,
+/// or 0 when this thread runs no worker. Noinline for the same reason as
+/// `getCurrentWorker`: a cached read would let a reference-count operation take
+/// the biased path on the wrong thread.
+pub noinline fn currentWorkerIdPlusOne() u32 {
+	const w = tls_current_worker;
+	asm volatile ("" ::: .{ .memory = true });
+	const worker = w orelse return 0;
+	return @intCast(worker.id + 1);
+}
+
+/// The merge queue of the worker whose biased identity is `owner_id`.
+pub fn mergeQueueFor(owner_id: u32) ?*objs.MergeQueue {
+	const pool = global_pool orelse return null;
+	if (owner_id == 0 or owner_id > pool.workers.len) return null;
+	return &pool.workers[owner_id - 1].merge_queue_head;
+}
+
 pub var global_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
-/// Global reference to the worker pool to prevent GC from collecting it.
-/// (GC scans the data segment but might not scan Zig thread-locals or
-/// OS stack frames that aren't active during fiber execution.)
+/// Keeps the pool alive: the GC scans the data segment, but not Zig
+/// thread-locals or OS stack frames that are inactive during fiber execution.
 var global_pool: ?*WorkerPool = null;
+
+/// Total: it always places the fiber, and never blocks or refuses. A fiber that
+/// exists has to go somewhere, and a caller that spins waiting to place one
+/// stops draining queues, which is a livelock. Nothing in the scheduler applies
+/// backpressure by refusing work; `enqueueTask` is total for the same reason.
+///
+/// Fibers have no worker affinity, so the running worker's queue is a locality
+/// preference only and the shared ready list takes the rest.
+pub fn enqueueFiber(fiber: *Fiber) void {
+	fiber.state = .Ready;
+	if (getCurrentWorker()) |w| {
+		if (w.ready_queue.enqueue(fiber)) return;
+	}
+	const pool = global_pool orelse @panic("enqueueFiber before the worker pool exists");
+	pool.sharedReadyPush(fiber);
+}
+
+/// Admit `task` for stealing on the promoting worker's deque. Total: the deque
+/// grows rather than refusing, so a task that does not fit needs no second path.
+///
+/// Totality keeps the token accounting honest. A promotion that could fail
+/// leaves the fiber's tokens above the threshold, so every following frame tries
+/// again and the attempt count tracks total work rather than work over the
+/// threshold.
+///
+/// Only a worker thread runs Fearless code, so neither failure below is
+/// reachable. Both panic: a fallback would hide the bug that produced them.
+pub fn enqueueTask(task: *StolenTask) void {
+	const worker = getCurrentWorker() orelse @panic("enqueueTask with no current worker");
+	worker.task_queue.push(task) catch @panic("out of memory growing a worker task deque");
+}
 
 pub const WorkerPool = struct {
 	workers: []Worker,
 	threads: []std.Thread,
-	ready_queue: *MpmcBoundedQueue(*Fiber),
-	task_queue: *MpmcBoundedQueue(*StolenTask),
+	/// Unbounded overflow list for ready fibers. Takes what a full local queue
+	/// refuses, and everything pushed from a thread that runs no worker.
+	shared_ready: std.atomic.Value(?*Fiber),
 	num_workers: usize,
 
 	pub fn init(num_workers: usize) !*WorkerPool {
-		const ready_queue = try MpmcBoundedQueue(*Fiber).init(gc.allocator, 1024);
-		const task_queue = try MpmcBoundedQueue(*StolenTask).init(gc.allocator, 1024);
-
 		const workers = try gc.allocator.alloc(Worker, num_workers);
 		for (workers, 0..) |*w, i| {
 			w.* = .{
@@ -174,8 +246,9 @@ pub const WorkerPool = struct {
 					.context = null,
 					.state = .Running,
 				},
-				.ready_queue = ready_queue,
-				.task_queue = task_queue,
+				.ready_queue = try MpmcBoundedQueue(*Fiber).init(gc.allocator, 1024),
+				.task_queue = try ChaseLevDeque(*StolenTask).init(gc.allocator, 1024),
+				.steal_rng = i +% 0x9E3779B97F4A7C15,
 				.trace_buf = .{},
 			};
 			for (0..Worker.OBL_POOL_CAP) |j| {
@@ -196,38 +269,73 @@ pub const WorkerPool = struct {
 		pool.* = .{
 			.workers = workers,
 			.threads = threads,
-			.ready_queue = ready_queue,
-			.task_queue = task_queue,
+			.shared_ready = std.atomic.Value(?*Fiber).init(null),
 			.num_workers = num_workers,
 		};
-		// Store globally so GC can find it (prevents collection)
 		global_pool = pool;
 		return pool;
 	}
 
-	/// Enqueue a fiber to the global ready queue.
-	pub fn enqueueFiber(self: *WorkerPool, fiber: *Fiber) void {
-		fiber.state = .Ready;
-		self.ready_queue.enqueueWithSpin(fiber);
+	fn sharedReadyPush(self: *WorkerPool, fiber: *Fiber) void {
+		var old = self.shared_ready.load(.monotonic);
+		while (true) {
+			fiber.shared_ready_next = old;
+			if (self.shared_ready.cmpxchgWeak(old, fiber, .release, .monotonic)) |observed| {
+				old = observed;
+			} else return;
+		}
 	}
 
-	/// Run the worker pool. Main thread becomes worker 0.
-	/// Spawns N-1 OS threads for workers 1..N-1.
+	/// Splices a pre-linked chain back with one CAS. The `.release` publishes the
+	/// caller's non-atomic link writes to the next thread that swaps the head.
+	fn sharedReadyPushChain(self: *WorkerPool, chain_head: *Fiber, chain_tail: *Fiber) void {
+		var old = self.shared_ready.load(.monotonic);
+		while (true) {
+			chain_tail.shared_ready_next = old;
+			if (self.shared_ready.cmpxchgWeak(old, chain_head, .release, .monotonic)) |observed| {
+				old = observed;
+			} else return;
+		}
+	}
+
+	/// Takes the whole chain, returns its first fiber to run now and absorbs the
+	/// rest into `worker`'s local queue. What does not fit goes back to the
+	/// shared list, so it stays visible to thieves.
+	///
+	/// Swaps the whole head rather than popping one node: a fiber can be taken,
+	/// parked and re-pushed at the same address while another thread holds a
+	/// stale `shared_ready_next`.
+	fn sharedReadyDrain(self: *WorkerPool, worker: *Worker) ?*Fiber {
+		const first = self.shared_ready.swap(null, .acquire) orelse return null;
+		var chain = first.shared_ready_next;
+		first.shared_ready_next = null;
+		while (chain) |fiber| {
+			const next = fiber.shared_ready_next;
+			fiber.shared_ready_next = null;
+			if (!worker.ready_queue.enqueue(fiber)) {
+				fiber.shared_ready_next = next;
+				var tail = fiber;
+				while (tail.shared_ready_next) |n| tail = n;
+				self.sharedReadyPushChain(fiber, tail);
+				break;
+			}
+			chain = next;
+		}
+		return first;
+	}
+
+	/// The calling thread becomes worker 0; workers 1..N-1 get an OS thread.
 	pub fn run(self: *WorkerPool) void {
-		// Spawn worker threads 1..N-1
 		for (self.threads, 1..) |*t, i| {
 			t.* = std.Thread.spawn(.{}, workerLoop, .{&self.workers[i]}) catch @panic("Failed to spawn worker thread");
 		}
 
-		// Every runtime thread now exists, so stop-the-world cycle collection
-		// is safe to enable (see isSafeToCollectCycles in gc.zig for why it
-		// starts disabled).
+		// Every runtime thread now exists, which is what stop-the-world cycle
+		// collection needs. See `isSafeToCollectCycles` in gc.zig.
 		gc.enable_cycle_collection();
 
-		// Main thread runs worker 0
 		workerLoop(&self.workers[0]);
 
-		// Join all worker threads
 		for (self.threads) |t| {
 			t.join();
 		}
@@ -237,82 +345,119 @@ pub const WorkerPool = struct {
 fn thiefTrampoline(fiber: *Fiber) void {
 	const task: *StolenTask = @ptrCast(@alignCast(fiber.context.?));
 
-	// Cancellation check: if doPromote enqueued us but its publish-obligation
-	// CAS lost the race, our parent has already finished the work itself and
-	// nobody is waiting on `task.obligation`. Running thief_fn would just burn
-	// a fiber on dead work. Recycle the unclaimed obligations and bail.
-	if (task.cancelled.load(.acquire)) {
-		log.trace_scheduling(.thief_start, @intFromPtr(task), @intFromPtr(task.obligation), 0xCA11);
-		const w = getCurrentWorker().?;
-		// task.obligation was never observable to the parent (the CAS that
-		// would have published it failed), so no one will ever wait on it.
-		w.recycleObligation(task.obligation);
-		if (task.child_obligation) |co| w.recycleObligation(co);
-		w.recycleTask(task);
-		return;
-	}
-
+	// No claim check: `workerLoop` wins the claim before it builds this fiber, so
+	// a fiber only exists for work this side owns.
 	log.trace_scheduling(.thief_start, @intFromPtr(task), @intFromPtr(task.obligation), @intFromPtr(task.child_obligation));
 
-	// Call the thief function with copied locals and the child obligation.
-	// The thief function is responsible for waiting on the child obligation
-	// *after* it does its own parallel work.
+	// The thief function waits on the child obligation after its own parallel
+	// work, not before.
 	const result = task.thief_fn(&task.locals_copy, task.child_obligation);
 	log.trace_scheduling(.thief_fn_return, @intFromPtr(result.vt), @bitCast(result.data), 0);
 
-	// The fiber may have migrated to a different worker while waiting for the child obligation.
-	// MUST re-fetch the current worker!
+	// The wait on the child obligation may have migrated this fiber to another
+	// worker, so the worker MUST be re-fetched.
 	const current_worker = getCurrentWorker().?;
 
-	// Fulfill the obligation with the result
-	task.obligation.fulfill(result, current_worker.ready_queue);
+	// Before the fulfill: that can wake the parent, which may then finish and be
+	// destroyed while this fiber still holds a pointer into it.
+	current_worker.current_fiber.?.creditParentTokens();
+
+	task.obligation.fulfill(result);
 	log.trace_scheduling(.thief_fulfill, @intFromPtr(task.obligation), @intFromPtr(result.vt), @bitCast(result.data));
 
-	// Recycle task (child obligation is freed by the generated thief function)
+	// The generated thief function frees the child obligation.
 	current_worker.recycleTask(task);
 }
 
+fn nextRandom(worker: *Worker) u64 {
+	var x = worker.steal_rng;
+	x ^= x << 13;
+	x ^= x >> 7;
+	x ^= x << 17;
+	worker.steal_rng = x;
+	return x;
+}
+
+/// Own queue first, which is warmest, then the shared ready list, then one
+/// random victim. Null when the whole pool looks empty.
+fn findFiber(worker: *Worker) ?*Fiber {
+	if (worker.ready_queue.dequeue()) |fiber| return fiber;
+
+	const pool = global_pool orelse return null;
+	if (pool.sharedReadyDrain(worker)) |fiber| return fiber;
+
+	const n = pool.workers.len;
+	if (n < 2) return null;
+	// One victim per scheduler turn. A full sweep would let a worker spend its
+	// turn probing queues that one producer is refilling anyway.
+	var victim = nextRandom(worker) % n;
+	if (victim == worker.id) victim = (victim + 1) % n;
+	return pool.workers[victim].ready_queue.dequeue();
+}
+
+/// Sweeps of the whole pool before `stealTask` gives the turn back. A sweep
+/// repeats only after a lost race, which means a task was there to be had, so
+/// one retry buys the common case without spinning against a busy victim.
+const STEAL_PASSES = 2;
+
+/// Starts at a random offset, so no two workers converge on one victim order.
+fn stealTask(worker: *Worker, pool: *WorkerPool) ?*StolenTask {
+	const n = pool.workers.len;
+	if (n < 2) return null;
+
+	var pass: usize = 0;
+	while (pass < STEAL_PASSES) : (pass += 1) {
+		var contended = false;
+		const start = nextRandom(worker) % n;
+		var i: usize = 0;
+		while (i < n) : (i += 1) {
+			const victim = (start + i) % n;
+			if (victim == worker.id) continue;
+			switch (pool.workers[victim].task_queue.steal()) {
+				.task => |task| {
+					op_counters.bump(.task_stolen);
+					return task;
+				},
+				// A lost race, not an empty deque: the victim still holds work.
+				.abort => contended = true,
+				.empty => {},
+			}
+		}
+		if (!contended) return null;
+		std.atomic.spinLoopHint();
+	}
+	return null;
+}
+
+/// Own deque first, then a sweep of every other worker.
+fn findTask(worker: *Worker) ?*StolenTask {
+	if (worker.task_queue.take()) |task| return task;
+	const pool = global_pool orelse return null;
+	return stealTask(worker, pool);
+}
+
 fn workerLoop(worker: *Worker) void {
-	// Register thread with GC
 	if (worker.id != 0) {
 		gc.register_thread();
 	}
 
-	// Set thread-local worker pointer and trace buffer
 	tls_current_worker = worker;
 	log.tls_trace_buffer = &worker.trace_buf;
 
-	// Register this thread's signal alt stack + recovery stack so a fiber
-	// stack overflow on this worker becomes a catchable ND error.
+	// The signal alt stack and recovery stack are what make a fiber stack
+	// overflow on this worker a catchable ND error.
 	signals.initThreadSignalStacks();
 
-	// Worker loop
 	while (!global_done.load(.monotonic)) {
-		// 1. Check for stolen tasks -> wrap in thief fiber
-		if (worker.task_queue.dequeue()) |task| {
-			const fiber = Fiber.create(&thiefTrampoline, @ptrCast(task)) catch @panic("OOM creating thief fiber");
-			fiber.state = .Ready;
-			fiber.tokens = task.initial_tokens;
-			fiber.parent_tokens_ptr = task.parent_tokens_ptr;
-			fiber.saved_scope = task.scope;
-			if (build_options.trace_frames) {
-				trace.inheritStackTrace(fiber, &task.trace_frames, task.trace_top);
-			}
-			// The thief's completion is awaited through `task.obligation`.
-			// Record it as the fiber's root obligation so that if the thief
-			// unwinds (panic / `Error!`) `feart_unwind` delivers the error to
-			// the same obligation `thiefTrampoline` would otherwise fulfill.
-			fiber.root_obligation = task.obligation;
-			log.trace_scheduling(.fiber_enqueue, @intFromPtr(fiber), 0xFF, worker.id);
-			worker.ready_queue.enqueueWithSpin(fiber);
-			continue;
-		}
+		// 0. Release the objects foreign workers handed back. Nothing else may
+		// touch their biased counts, so a scheduler turn is where this belongs.
+		worker.drainMergeQueue();
 
-		// 2. Check for ready fibers -> switch to them
-		if (worker.ready_queue.dequeue()) |fiber| {
+		// 1. A runnable fiber.
+		if (findFiber(worker)) |fiber| {
 			log.trace_scheduling(.fiber_dequeue, @intFromPtr(fiber), @intFromEnum(fiber.state), worker.id);
-			// Spin until the fiber's state has been fully saved (prevents
-			// switching to a fiber that was enqueued before it parked).
+			// Spin until the fiber's state is saved, so this never switches to a
+			// fiber that was enqueued before it parked.
 			while (!fiber.resume_gate.load(.acquire)) {
 				std.atomic.spinLoopHint();
 			}
@@ -321,30 +466,58 @@ fn workerLoop(worker: *Worker) void {
 			log.trace_scheduling(.fiber_switch_to, @intFromPtr(fiber), worker.id, 0);
 			switchFiber(&worker.scheduler_fiber, fiber);
 
-			// Fiber returned to scheduler -- its state is now saved.
 			log.trace_scheduling(.fiber_switch_back, @intFromPtr(fiber), @intFromEnum(fiber.state), worker.id);
-			// Open the resume gate so the next dequeue can proceed.
-			fiber.resume_gate.store(true, .release);
+			// Before the gate opens: the worker spinning on it may then resume
+			// and destroy the fiber. Plain, because the release store below
+			// cannot move ahead of this load.
+			const finished = fiber.state == .Done;
 			worker.current_fiber = null;
 
-			if (fiber.state == .Done) {
-				// Credit any leftover APM tokens back to the parent fiber.
-				// The parent may be concurrently running on another worker
-				// and touching its own tokens counter via tryPromote, so this
-				// is a benign race on a single u32: at worst a handful of
-				// increments are lost, delaying the next promotion by an
-				// imperceptible amount. Tokens are heuristic, not accounting.
-				if (fiber.parent_tokens_ptr) |ptr| {
-					ptr.* += fiber.tokens;
-				}
+			if (finished) {
+				// A finished fiber sits in no queue: it reached the scheduler from
+				// fiber_trampoline rather than from a park, so nobody waits at its
+				// gate and this worker is its only owner.
 				log.trace_scheduling(.fiber_done, @intFromPtr(fiber), worker.id, 0);
 				fiber.destroy();
+			} else {
+				// Open the resume gate, so the worker that re-enqueues the fiber,
+				// or already waits on it, can proceed.
+				fiber.resume_gate.store(true, .release);
 			}
-			// If Parked, leave it -- it will be re-enqueued when its obligation is fulfilled
 			continue;
 		}
 
-		// 3. Nothing to do -- spin, with a small sleep to prevent spamming CPU usage
+		// 2. No fiber anywhere: turn a stolen task into a thief fiber.
+		if (findTask(worker)) |task| {
+			// Claim before spending a fiber stack. A parent that reached its join
+			// point first has taken the work back and run it inline. The task is
+			// out of every queue by now, so its memory, and the retained locals
+			// copy that `recycleTask` releases, are this worker's to retire. The
+			// claim winner recycled the obligations.
+			if (task.claimed.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) {
+				op_counters.bump(.task_dequeue_claim_lost);
+				worker.recycleTask(task);
+				continue;
+			}
+			op_counters.bump(.thief_fiber_created);
+			const fiber = Fiber.create(&thiefTrampoline, @ptrCast(task)) catch @panic("OOM creating thief fiber");
+			fiber.state = .Ready;
+			fiber.tokens = task.initial_tokens;
+			fiber.parent_tokens_ptr = task.parent_tokens_ptr;
+			fiber.saved_scope = task.scope;
+			if (build_options.trace_frames) {
+				trace.inheritStackTrace(fiber, &task.trace_frames, task.trace_top);
+			}
+			// A parent awaits the thief through `task.obligation`. Recording it as
+			// the root obligation makes `feart_unwind` deliver an error to the
+			// same obligation `thiefTrampoline` would otherwise fulfill.
+			fiber.root_obligation = task.obligation;
+			log.trace_scheduling(.fiber_enqueue, @intFromPtr(fiber), 0xFF, worker.id);
+			enqueueFiber(fiber);
+			continue;
+		}
+
+		// 3. Nothing to do. Sleep a little rather than burn the CPU.
 		std.atomic.spinLoopHint();
 		std.Io.sleep(process.runtime_io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
 	}

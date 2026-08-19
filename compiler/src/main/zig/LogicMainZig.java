@@ -23,18 +23,17 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 public interface LogicMainZig extends FullLogicMain<ZigProgram> {
-  /// This name keys the cached package type info, which decides if codegen skips a package. A
-  /// walk of the full cached-base tree finds that info, so a subdirectory cannot keep two
-  /// configurations apart, unlike in {@link ZigCompiler#versionedCacheDir}. The base library
-  /// holds VPF-parallelisable calls and thus generates different Zig with and without VPF. Each
-  /// configuration needs its own name here. If not, a `--no-vpf` build finds the type info of a
-  /// VPF build, skips base, and then has no Zig for it.
+  /// Keys the cached package type info, which decides whether codegen skips a package. That
+  /// info is found by a walk of the whole cached-base tree, so a subdirectory cannot separate
+  /// two configurations the way {@link ZigCompiler#versionedCacheDir} does. Base holds
+  /// VPF-parallelisable calls and so generates different Zig with and without VPF, and each
+  /// configuration needs its own name: otherwise a `--no-vpf` build finds the type info of a
+  /// VPF build, skips base, and has no Zig for it.
   @Override default String backendName() { return buildOpts().vpfEnabled() ? "zig" : "zig-novpf"; }
   Path executablePath();
   void setExecutablePath(Path path);
 
-  /// The FeaRT build configuration: optimisation mode, VPF, stack traces and more. No
-  /// cross-backend interface shows it.
+  /// Optimisation mode, VPF, stack traces and more. No cross-backend interface shows it.
   default ZigBuildOpts buildOpts() { return ZigBuildOpts.DEFAULT; }
 
   @Override default void cachePackageTypes(Program program) {

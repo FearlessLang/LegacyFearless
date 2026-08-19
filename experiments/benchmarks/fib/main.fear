@@ -1,0 +1,15 @@
+package bench
+
+/// Naive binary recursion, with no sequential cutoff. Every frame above the base
+/// case has exactly one promotable continuation, so the promotion count follows
+/// the token threshold alone and not the shape of the work. That makes this the
+/// instrument for tuning the threshold; the other benchmarks mix promotion
+/// policy with their own control flow.
+Fib: {
+  #(n: Nat): Nat -> n <= 1 ? {
+    .then -> n,
+    .else -> this#(n - 1) + (this#(n - 2))
+    }
+  }
+
+Test: Main {sys -> sys.io.println(Fib#(45).str)}

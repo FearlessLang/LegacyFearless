@@ -81,6 +81,7 @@ entry point. Each prints a deterministic checksum.
 | `mapHeavy` | 1,500,000 elements, 1000 mixing rounds | `8149048745584505931` | The same divide-and-conquer shape with expensive element work. |
 | `mandelbrot` | 2048 x 2048 pixels, at most 256 iterations | `252714035` | Escape-time calculation with irregular per-pixel work. |
 | `nqueens` | 14 queens | `365596` | Deep irregular search. |
+| `fib` | `fib(45)` | `1134903170` | Naive binary recursion with no sequential cutoff. Every frame above the base case is promotable, so the promotion count is a function of the token threshold alone. This is the instrument for tuning that threshold. |
 | `primes` | Trial division through 1,000,000 | `78498` | A flow pipeline whose terminal drives splitting. |
 | `wc` | 1 MiB generated corpus | `1048629 15009 164764` | Word, line, and byte counts over `Str.codepoints`. |
 | `grep` | 1 MiB generated corpus | `21` | Literal `needle` matching over `Str.codepoints`. |
@@ -123,19 +124,23 @@ geomean          -            -       -    0.178x   5.603x      0.458x
 
 The table above predates the scalar-performance work of 2026-08-17/18
 (RTA devirtualisation, the true sequential elision, tail-call emission with
-`callconv(.c)`, and transient return slots). Two consequences:
+`callconv(.c)`, transient return slots, and biased reference counting). Two
+consequences:
 
 - `feart-novpf` now measures a genuine sequential elision. The earlier
   binaries still carried the VPF locals structs, hooks, and fences, so the
   old `speedup` column overstates the benefit of VPF itself.
-- The absolute `feart-novpf` times fell substantially. Single timed runs on
-  the same machine: `mapHeavy` 33.8s to about 10s, `mandelbrot` 49.6s to
-  about 38s, `nqueens` 45.1s to about 35s. The VPF builds also improved:
-  `mandelbrot` 3.0s to about 1.2s, with `nqueens` and `mapHeavy` at about
-  2.6s and 1.8s.
+- The absolute times fell substantially. Three-run `hyperfine` means on the
+  same machine, against the table above:
 
-These spot measurements are single runs, not `hyperfine` sweeps. Rerun
-`./run.sh` to regenerate the full table.
+  | Benchmark | `feart-novpf` | `feart` |
+  |---|---|---|
+  | `mapHeavy` | 33.8s to 9.47s | 1.71s |
+  | `mandelbrot` | 49.6s to 24.23s | 3.0s to 1.26s |
+  | `nqueens` | 45.1s to 24.74s | 2.55s |
+
+These spot measurements cover three benchmarks only. Rerun `./run.sh` to
+regenerate the full table.
 
 ### VPF effect
 

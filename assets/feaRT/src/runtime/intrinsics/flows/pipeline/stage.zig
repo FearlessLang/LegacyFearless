@@ -1,9 +1,8 @@
 //! One pipeline stage: a worker fiber that runs a contiguous slice of the flow's
 //! op array over the ordered message stream, plus a supervisor fiber that turns
-//! the worker's fiber-death-on-throw (`feart_unwind`) into an in-band `err`
-//! message so stream order is preserved. Mirrors `intrinsics/try.zig`'s
-//! child-fiber pattern: catching a Fearless error means running the code on a
-//! disposable fiber and reading its root obligation.
+//! the worker's fiber-death-on-throw into an in-band `err` message, so stream
+//! order is preserved. Catching a Fearless error means running the code on a
+//! disposable fiber and reading its root obligation, as in `intrinsics/try.zig`.
 
 const std = @import("std");
 const build_options = @import("build_options");
@@ -28,8 +27,8 @@ const Ring = ring_mod.Ring;
 const FatPtr = objs.FatPtr;
 const Fiber = fiber_mod.Fiber;
 
-/// Shared by a stage's supervisor and worker; lives in the engine caller's
-/// GC-heap allocation, reachable from the caller's stack until after join.
+/// Shared by a stage's supervisor and worker. Lives in the engine caller's
+/// GC-heap allocation, reachable from its stack until after the join.
 pub const StageCtx = struct {
     /// Only stage 0 (in == null) touches the source.
     flow: *types.FeartFlow,
@@ -38,8 +37,8 @@ pub const StageCtx = struct {
     out: *Ring,
 };
 
-/// Spawn a fiber the way Try does, but without waiting: the caller owns `obl`
-/// (stack- or heap-resident, stable until fulfilled) and joins later.
+/// Spawn a fiber the way Try does, but without waiting. The caller owns `obl`
+/// and must keep it stable until it is fulfilled.
 pub fn spawnFiber(entry: *const fn (*Fiber) void, context: *anyopaque, obl: *JoinObligation) void {
     const worker = worker_mod.getCurrentWorker().?;
     const parent_fiber = worker.current_fiber.?;
@@ -50,8 +49,7 @@ pub fn spawnFiber(entry: *const fn (*Fiber) void, context: *anyopaque, obl: *Joi
     if (build_options.trace_frames) {
         trace.inheritStackTrace(child, &parent_fiber.trace_frames, parent_fiber.trace_top);
     }
-    child.state = .Ready;
-    worker.ready_queue.enqueueWithSpin(child);
+    worker_mod.enqueueFiber(child);
 }
 
 pub fn supervisorEntry(fiber: *Fiber) void {
@@ -62,28 +60,28 @@ pub fn supervisorEntry(fiber: *Fiber) void {
     if (error_rt.tagOf(result) == .none) {
         result.rc_decrement(); // Void from the worker's normal path
     } else {
-        // The worker unwound mid-element. Its already-enqueued outputs are a
-        // valid prefix (identical to sequential, where pre-throw emissions
-        // happened); the error follows them in stream order. Then tear down
-        // our ring ends on the dead worker's behalf.
+        // The worker unwound mid-element. Its enqueued outputs are a valid
+        // prefix, the same one a sequential run emits before the throw, so the
+        // error follows them in stream order. Then tear down the ring ends on
+        // the dead worker's behalf.
         _ = st.out.enqueue(.{ .err = result });
         if (st.in) |in| in.closeConsumer();
         st.out.closeProducer();
     }
-    const worker = worker_mod.getCurrentWorker().?;
-    fiber.root_obligation.?.fulfill(objs.obj_k_singleton(&pb.VT_Void_0).box_transient(), worker.ready_queue);
+    fiber.creditParentTokens();
+    fiber.root_obligation.?.fulfill(objs.obj_k_singleton(&pb.VT_Void_0).box_transient());
 }
 
 fn workerEntry(fiber: *Fiber) void {
     const st: *StageCtx = @ptrCast(@alignCast(fiber.context.?));
     if (st.in == null) runSourceStage(st) else runMidStage(st);
-    const worker = worker_mod.getCurrentWorker().?;
-    fiber.root_obligation.?.fulfill(objs.obj_k_singleton(&pb.VT_Void_0).box_transient(), worker.ready_queue);
+    fiber.creditParentTokens();
+    fiber.root_obligation.?.fulfill(objs.obj_k_singleton(&pb.VT_Void_0).box_transient());
 }
 
 /// Accept target for `exec.process_element` inside a stage: results go onto the
-/// output ring. Returning `false` (downstream closed) makes process_element set
-/// `stopped`, ending the stage loop.
+/// output ring. `false` means downstream closed, which makes process_element set
+/// `stopped` and end the stage loop.
 const RingAcceptCtx = struct { out: *Ring, out_closed: bool };
 fn ring_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *RingAcceptCtx = @ptrCast(@alignCast(ctx_ptr));
@@ -119,17 +117,16 @@ fn runMidStage(st: *StageCtx) void {
                 .data => |elem| {
                     exec.process_element(st.ops, elem, @ptrCast(&actx), &ring_accept, &stopped);
                     if (stopped) {
-                        // Our op ended the flow (limit exhausted / actor stop)
-                        // or downstream closed. Downstream still gets an
-                        // orderly stop; closing our input (below) tears the
-                        // upstream down.
+                        // The op ended the flow, or downstream closed. Either
+                        // way downstream gets an orderly stop, and closing the
+                        // input tears the upstream down.
                         if (!actx.out_closed) _ = st.out.enqueue(.stop);
                         break :loop;
                     }
                 },
-                // First error in stream order wins; nothing after it can be
-                // observed, so forward it and exit -- closing our input makes
-                // the upstream self-terminate instead of us draining it.
+                // The first error in stream order wins and nothing after it is
+                // observable. Closing the input makes the upstream
+                // self-terminate instead of draining it here.
                 .err => |payload| {
                     _ = st.out.enqueue(.{ .err = payload });
                     break :loop;

@@ -27,17 +27,16 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   }
 
   private Path cacheBaseDir() { return io.cachedBase().resolve("zig-cache"); }
-  /// The base library holds VPF-parallelisable calls, so its generated Zig differs between a VPF
-  /// build and a `--no-vpf` build. Each configuration gets its own cache directory. With a shared
-  /// directory, a `--no-vpf` build takes VPF-shaped base code and loses the sequential baseline
-  /// that it must measure. The split is at directory level, not at filename level, because
-  /// {@link main.java.HDCache} also caches the package type info here. That type info decides if
-  /// a package is cached at all, so the two must agree.
+  /// Base holds VPF-parallelisable calls, so its generated Zig differs between a VPF build
+  /// and a `--no-vpf` one, and each configuration needs its own cache directory: a shared one
+  /// gives a `--no-vpf` build VPF-shaped base code and loses the sequential baseline it must
+  /// measure. The split is at directory level because {@link main.java.HDCache} also caches
+  /// the package type info here, and that info decides whether a package is cached at all.
   public Path versionedCacheDir() {
     return cacheBaseDir().resolve(currentVersion() + (opts.vpfEnabled() ? "vpf" : "novpf"));
   }
   private static String currentVersion() { return "v" + ZIG_CACHE_VERSION + "-"; }
-  /// The content-addressed build cache of zig (`--cache-dir`). Each test compiles into its own
+  /// Zig's content-addressed build cache (`--cache-dir`). Each test compiles into its own
   /// throwaway output dir, so the tests share one warm cache under target/.
   private Path zigCacheDir() {
     if (opts.fastTestBuild()) { return targetDir().resolve("fearless-zig-cache/local"); }
@@ -45,20 +44,19 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   }
   /// The build runner and the fetched dependency packages, shared by the full machine
   private Path zigGlobalCacheDir() { return OsCache.root().resolve("zig-cache/global"); }
-  /// Only {@link ZigBuildOpts#fastTestBuild()} calls this. A test runs out of target/classes,
-  /// so the parent of the resource root is target.
+  /// Only {@link ZigBuildOpts#fastTestBuild()} calls this. A test runs out of
+  /// target/classes, so the parent of the resource root is target.
   private static Path targetDir() { return ResolveResource.artefact("/").getParent(); }
   /// The zig build tree: `build.zig`, the runtime source copy, the generated program and
   /// `zig-out`. The zig build cache keys on the absolute paths of the build root and its
-  /// sources, so a work dir that moves between compiles defeats the cache. Each test fork gets
-  /// one stable dir under target/, thus concurrent forks keep apart and the path stays equal.
+  /// sources, so a work dir that moves between compiles defeats it. Each test fork gets one
+  /// stable dir under target/, which keeps concurrent forks apart at a constant path.
   Path workDir() {
     if (opts.fastTestBuild()) { return targetDir().resolve("fearless-zig-work/fork-" + forkId()); }
     return io.output().resolve("zig-build");
   }
-  /// Identifies the surefire fork of this JVM, from the `surefire.forkNumber` that the pom puts
-  /// into argLine. A plain `java` run or an IDE run uses the pid, and loses only the cache reuse
-  /// between runs.
+  /// The surefire fork of this JVM, from the `surefire.forkNumber` the pom puts into argLine.
+  /// A plain `java` or IDE run uses the pid, and loses only cache reuse between runs.
   private static String forkId() {
     var fork = System.getProperty("surefire.forkNumber");
     if (fork != null && !fork.isBlank() && !fork.contains("$")) { return fork; }
@@ -66,15 +64,13 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   }
   private Path zigOutDir(Path workDir) { return workDir.resolve("zig-out"); }
 
-  /// True when the generated Zig of this package is cached and reused by later programs. Only the
-  /// base library qualifies: its source does not change between programs, so its text can be kept
-  /// on disk. A pass that reasons about the whole program must not change such a package, because
-  /// the text it writes outlives the program it was generated from.
+  /// True when this package's generated Zig is cached and reused by later programs. Only base
+  /// qualifies, its source being the same in every program. A whole-program pass must not
+  /// change such a package: the text it writes outlives the program it came from.
   public static boolean isCacheablePackage(String name) {
     return name.equals("base") || name.startsWith("base.");
   }
 
-  /// Returns the cached .zig content of the base packages, keyed by package name.
   public Map<String, String> loadCachedPackages(MIR.Program program) {
     var dir = versionedCacheDir();
     if (!Files.isDirectory(dir)) { return Map.of(); }
@@ -92,8 +88,8 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     }
     return cached;
   }
-  /// The FeaRT runtime source tree: the copy in the compiler, or `FEART_ROOT`. With
-  /// `FEART_ROOT` you can develop the runtime in a checkout and not build the compiler again.
+  /// The copy in the compiler, or `FEART_ROOT`, which lets you develop the runtime in a
+  /// checkout without building the compiler again.
   static Path feartRoot() {
     var envPath = System.getenv("FEART_ROOT");
     if (envPath != null) { return Path.of(envPath); }
@@ -137,9 +133,9 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     return outDir.resolve("bin/fearless-app");
   }
 
-  /// Deletes the cache directories of an old {@link #ZIG_CACHE_VERSION}. The siblings of the
-  /// current version hold the other VPF configuration, so they stay. Thus a change between
-  /// `--feart` and `--feart --no-vpf` does not discard the cache of the other build.
+  /// Deletes the cache directories of an old {@link #ZIG_CACHE_VERSION}. Siblings of the
+  /// current version hold the other VPF configuration and stay, so switching between
+  /// `--feart` and `--feart --no-vpf` keeps both caches.
   public static void cleanOldVersions(Path cacheBase) {
     if (!Files.isDirectory(cacheBase)) { return; }
     IoErr.of(() -> {
@@ -177,10 +173,10 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     copyNativeStaticLib(workDir);
   }
 
-  /// Copies the Rust C-ABI staticlib next to the runtime, so that build.zig can link it. The
-  /// lib holds the `frt_*` string and regex surface, which the Java backend also uses. Its
-  /// `<arch>-<os>-libnative_rt.a` name uses the arch and os spelling of the JNI `.so` loader in
-  /// assets/rt/NativeRuntime.java.
+  /// Copies the Rust C-ABI staticlib next to the runtime for build.zig to link. It holds the
+  /// `frt_*` string and regex surface the Java backend also uses. Its
+  /// `<arch>-<os>-libnative_rt.a` name follows the arch and os spelling of the JNI `.so`
+  /// loader in assets/rt/NativeRuntime.java.
   private void copyNativeStaticLib(Path workDir) throws IOException {
     var osName = System.getProperty("os.name").toLowerCase();
     String os;
@@ -205,8 +201,8 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
   }
 
-  /// Writes `content` only when the file holds different bytes. Thus an unchanged file keeps its
-  /// mtime, and zig needs only a stat.
+  /// Writes only when the bytes differ, so an unchanged file keeps its mtime and zig needs
+  /// only a stat.
   private static void writeIfChanged(Path dest, String content) throws IOException {
     var bytes = content.getBytes(StandardCharsets.UTF_8);
     if (Files.isRegularFile(dest) && Arrays.equals(Files.readAllBytes(dest), bytes)) { return; }
@@ -223,8 +219,8 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     }
   }
 
-  /// True when `dest` holds the bytes of `src`. `src` can be in the virtual file system of the
-  /// jar, so this compares the content and not the metadata.
+  /// `src` can live in the jar's virtual file system, so this compares content, not
+  /// metadata.
   private static boolean sameContent(Path src, Path dest) throws IOException {
     if (!Files.isRegularFile(dest)) { return false; }
     if (Files.size(dest) != Files.size(src)) { return false; }
@@ -234,13 +230,13 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   private void copyTree(Path source, Path target) throws IOException {
     try (var walker = Files.walk(source)) {
       walker.forEach(src -> IoErr.of(() -> {
-        // Resolve through a String: the source can be in the virtual file system of the jar
+        // Through a String: the source can be in the jar's virtual file system.
         var dest = target.resolve(source.relativize(src).toString());
         if (Files.isDirectory(src)) {
           Files.createDirectories(dest);
         } else {
           Files.createDirectories(dest.getParent());
-          // A rewrite of an equal file changes its mtime, and then zig hashes it again
+          // Rewriting an equal file changes its mtime, and zig then hashes it again.
           if (!sameContent(src, dest)) {
             Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING);
           }
@@ -259,15 +255,15 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
       "--global-cache-dir", globalCache.toAbsolutePath().toString(),
       "--prefix", outDir.toAbsolutePath().toString()
     ));
-    // The self-hosted (non-LLVM) linker cannot read the .sframe sections in the CRT objects of a
-    // very new host glibc or gcc. A pinned glibc version makes zig link its own CRT objects.
-    // Version 2.34 also runs on older stable distros. An LLVM build keeps a fully native target,
-    // because LLD reads .sframe and because ReleaseFast tunes for the native CPU.
+    // The self-hosted linker cannot read the .sframe sections in the CRT objects of a very
+    // new host glibc or gcc. A pinned glibc version makes zig link its own CRT objects, and
+    // 2.34 also runs on older stable distros. An LLVM build keeps a fully native target,
+    // because LLD reads .sframe and ReleaseFast tunes for the native CPU.
     if (!opts.useLlvm() && System.getProperty("os.name").toLowerCase().contains("linux")) {
       cmd.add("-Dtarget=native-native-gnu.2.34");
     }
-    // Opt-in operation counters. An env var, and not a build option, keeps them reachable from a
-    // benchmark run without a rebuild of the compiler.
+    // An env var rather than a build option, so a benchmark run reaches the counters without
+    // rebuilding the compiler.
     if (System.getenv("FEART_OP_COUNTERS") != null) {
       cmd.add("-Dop_counters=true");
     }
@@ -306,7 +302,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           const op_counters = b.option(bool, "op_counters", "Count object construction, refcount traffic and method dispatch; prints a table to stderr on exit. (default: false)") orelse false;
           const track_allocs = b.option(bool, "track_allocs", "Record per-call-site allocation counts/bytes; dumps to FEART_ALLOCS_OUT (default ./feart-allocs.tsv) on exit. Slows execution significantly. (default: false)") orelse false;
           const trace_frames = b.option(bool, "trace_frames", "Push a per-call trace stack so an uncaught crash prints a Fearless stack trace (default: false)") orelse %s;
-          const tokens_threshold = b.option(u32, "tokens_threshold", "Heartbeat promotion token threshold; lower forces more aggressive VPF promotion (default: 25_000_000)") orelse %d;
+          const tokens_threshold = b.option(u32, "tokens_threshold", "Heartbeat promotion token threshold; lower forces more aggressive VPF promotion (default: 64_000)") orelse %d;
           const enable_vpf = b.option(bool, "enable_vpf", "Compile in the heartbeat/VPF automatic parallelism system (default: true)") orelse %s;
 
           const build_options = b.addOptions();
@@ -351,8 +347,10 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
               else => {},
           }
 
+          // gc_mark.h includes gc.h and adds the mark-time API
+          // (GC_set_push_other_roots, GC_push_all_eager) the fiber stack hook needs.
           const c_libgc_tc = b.addTranslateC(.{
-              .root_source_file = gc_include.path(b, "gc.h"),
+              .root_source_file = gc_include.path(b, "gc_mark.h"),
               .target = target,
               .optimize = optimize,
               .link_libc = true,
@@ -367,9 +365,8 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           exe.root_module.addImport("libgc", c_libgc_mod);
           exe.root_module.linkLibrary(context_switch_lib);
 
-          // A direct link of the native runtime archive lets the linker drop its unused JNI
-          // objects. The archive needs libc (pthread and more), and its Rust objects need the
-          // platform unwinder in libgcc_s.
+          // Linking the archive directly lets the linker drop its unused JNI objects. The
+          // archive needs libc, and its Rust objects need the unwinder in libgcc_s.
           exe.root_module.addObjectFile(b.path("lib/native/libnative_rt.a"));
           exe.root_module.link_libc = true;
           exe.root_module.linkSystemLibrary("gcc_s", .{});
@@ -401,7 +398,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
         enableTracing || opts.logTrace(),
         enableTracing,
         opts.traceFrames(),
-        Optional.ofNullable(opts.tokensThreshold()).orElse(25_000_000),
+        Optional.ofNullable(opts.tokensThreshold()).orElse(64_000),
         opts.vpfEnabled(),
         opts.useLlvm(),
         opts.useLlvm());

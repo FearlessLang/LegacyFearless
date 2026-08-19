@@ -9,9 +9,8 @@ const log = @import("../log.zig");
 
 pub const VarCell = extern struct {
     ref_count: std.atomic.Value(u32),
-    /// Atomic pointer to a heap-allocated FatPtr.
-    /// The language guarantees data race freedom, so we only need
-    /// acquire/release ordering for cross-thread visibility (like Java volatile).
+    /// The language guarantees data race freedom, so acquire/release is enough
+    /// for cross-thread visibility.
     value: std.atomic.Value(*FatPtr),
 };
 
@@ -102,7 +101,6 @@ const VT_TestVoid: objs.VTable = .{
     .storage_mode = .singleton,
 };
 
-// Factory vtable for Vars#(initialValue)
 fn vars_create(self: FatPtr, value: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
     return make(value);
@@ -124,7 +122,7 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
         h("mut .swap/1") => swap(self, args[0]),
         h("mut :=/1"), h("mut .set/1") => set(self, args[0]),
         h("mut <-/1"), h("mut .update/1") => {
-            // not decrementing self, because it's moving into the swap call
+            // self is not decremented: it moves into the swap call.
             const current = self.data.cell.value.load(.monotonic).*.share();
             const new_val = objs.call(args[0], h("mut #/1"), .{current}, @src());
             return swap(self, new_val);
@@ -146,25 +144,25 @@ test "Var get set and swap retain returned values and release overwritten storag
     var b = objs.obj_k(Captures, &vt_b, .{});
     var c = objs.obj_k(Captures, &vt_c, .{});
     var cell_fp = make(a.share());
-    try testing.expectEqual(@as(u32, 2), a.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
 
     var got = get(cell_fp.share());
-    try testing.expectEqual(@as(u32, 3), a.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 3), a.boxed_value().refCountForTest());
     got.rc_decrement();
-    try testing.expectEqual(@as(u32, 2), a.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
 
     var old = swap(cell_fp.share(), b.share());
-    try testing.expectEqual(@as(u32, 2), a.boxed_value().ref_count.load(.monotonic));
-    try testing.expectEqual(@as(u32, 2), b.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
+    try testing.expectEqual(@as(u32, 2), b.boxed_value().refCountForTest());
     old.rc_decrement();
-    try testing.expectEqual(@as(u32, 1), a.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), a.boxed_value().refCountForTest());
 
     _ = set(cell_fp.share(), c.share());
-    try testing.expectEqual(@as(u32, 1), b.boxed_value().ref_count.load(.monotonic));
-    try testing.expectEqual(@as(u32, 2), c.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), b.boxed_value().refCountForTest());
+    try testing.expectEqual(@as(u32, 2), c.boxed_value().refCountForTest());
 
     cell_fp.rc_decrement();
-    try testing.expectEqual(@as(u32, 1), c.boxed_value().ref_count.load(.monotonic));
+    try testing.expectEqual(@as(u32, 1), c.boxed_value().refCountForTest());
 
     a.rc_decrement();
     b.rc_decrement();

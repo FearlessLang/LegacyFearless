@@ -18,24 +18,18 @@ const Fiber = fiber_mod.Fiber;
 const JoinObligation = shadow_stack.JoinObligation;
 const h = objs.hash_signature;
 
-// ==========================================
-// Fiber-isolated exception handling (Try / CapTry)
-// ==========================================
-//
-// `Try`/`CapTry` run their lambda in a disposable child fiber so that a
-// deterministic `Error!` (which lowers to `feart_unwind`, abandoning the
-// failing Zig frames) has a fiber boundary to unwind to. The child's
-// `root_obligation` carries either the lambda's normal result or -- if it
-// unwinds -- the tag-typed error payload (see `error.zig`). The parent's
-// `.run` then classifies the result: an ordinary value becomes `m.ok`, a
-// deterministic error becomes `m.info` (both `Try` and `CapTry`), and a
-// non-deterministic error becomes `m.info` only for `CapTry` while a plain
-// `Try` re-propagates it (a deterministic handler must not absorb ND).
+// `Try`/`CapTry` run their lambda on a disposable child fiber, so that a
+// deterministic `Error!` -- which lowers to `feart_unwind` and abandons the
+// failing Zig frames -- has a fiber boundary to unwind to. The child's
+// `root_obligation` carries the lambda's result or the tag-typed error payload.
+// `.run` then classifies it: an ordinary value becomes `m.ok`, a deterministic
+// error becomes `m.info`, and an ND error becomes `m.info` only for `CapTry`.
+// A deterministic handler must not absorb ND, so `Try` re-propagates it.
 
 const TryActionCaptures = extern struct {
     f: FatPtr,
-    /// The `iso` data for `#/2`, or a Void singleton placeholder for `#/1`.
-    /// Always a valid FatPtr so the uniform capture share/drop path applies.
+    /// The `iso` data for `#/2`, or a Void singleton for `#/1`. Always a valid
+    /// FatPtr, so the uniform capture share/drop path applies.
     data: FatPtr,
     has_data: bool,
     catch_nd: bool,
@@ -50,41 +44,35 @@ fn make_try_action(f: FatPtr, data: FatPtr, has_data: bool, catch_nd: bool) FatP
     });
 }
 
-// ------------------------------------------
-// Child-fiber spawn + wait
-// ------------------------------------------
-
 const ChildCtx = struct {
     f: FatPtr,
     data: ?FatPtr,
 };
 
-/// Entry point of a Try/CapTry child fiber: run the lambda and deliver its
-/// result to the parent through `root_obligation`. If the lambda unwinds
-/// (`Error!` or a panic), `feart_unwind` fulfills the same obligation with the
-/// error payload instead, so this never reaches the fulfill below in that case.
+/// Runs the lambda and delivers its result through `root_obligation`. On an
+/// unwind `feart_unwind` fulfills that same obligation with the error payload,
+/// and this never reaches its own fulfill.
 fn childEntry(fiber: *Fiber) void {
     const ctx: *ChildCtx = @ptrCast(@alignCast(fiber.context.?));
     const result = if (ctx.data) |d|
         objs.call(ctx.f, comptime h("read #/1"), .{d}, @src())
     else
         objs.call(ctx.f, comptime h("read #/0"), .{}, @src());
-    const worker = worker_mod.getCurrentWorker().?;
-    fiber.root_obligation.?.fulfill(result.box_transient(), worker.ready_queue);
+    fiber.creditParentTokens();
+    fiber.root_obligation.?.fulfill(result.box_transient());
 }
 
-/// Run `f#`/`f#data` on a fresh child fiber and block the current fiber until it
-/// completes. Returns either the lambda's value or a tag-typed error payload
-/// (classify with `error_rt.tagOf`). Ownership of `f`/`data` transfers to the
-/// child.
+/// Run `f#`/`f#data` on a fresh child fiber and block until it completes.
+/// Returns the lambda's value or a tag-typed error payload; classify with
+/// `error_rt.tagOf`. Ownership of `f`/`data` transfers to the child.
 pub fn runInChildFiber(f: FatPtr, data: ?FatPtr) FatPtr {
     const worker = worker_mod.getCurrentWorker().?;
     const parent_fiber = worker.current_fiber.?;
     const obl = worker.allocObligation() orelse @panic("OOM allocating Try obligation");
 
-    // `ctx` lives on the parent's stack; the parent parks in `wait` below and is
-    // not resumed until the child has fulfilled the obligation (after it has
-    // already consumed `ctx`), so the pointer stays valid for the child's read.
+    // `ctx` lives on the parent's stack. The parent parks in `wait` below and
+    // resumes only once the child has fulfilled the obligation, which is after
+    // it consumed `ctx`, so the pointer stays valid for the child's read.
     var ctx = ChildCtx{ .f = f, .data = data };
     const child = Fiber.create(&childEntry, &ctx) catch @panic("OOM creating Try fiber");
     child.root_obligation = obl;
@@ -93,17 +81,12 @@ pub fn runInChildFiber(f: FatPtr, data: ?FatPtr) FatPtr {
     if (build_options.trace_frames) {
         trace.inheritStackTrace(child, &parent_fiber.trace_frames, parent_fiber.trace_top);
     }
-    child.state = .Ready;
-    worker.ready_queue.enqueueWithSpin(child);
+    worker_mod.enqueueFiber(child);
 
     const result = obl.wait(worker_mod.getCurrentWorker().?);
     shadow_stack.freeObligation(obl);
     return result;
 }
-
-// ------------------------------------------
-// TryAction.run (native)
-// ------------------------------------------
 
 fn tryaction_run(self: FatPtr, m: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
@@ -126,17 +109,13 @@ fn tryaction_run(self: FatPtr, m: FatPtr) callconv(.c) FatPtr {
                 result.rc_decrement();
                 return objs.call(m, comptime h("mut .info/1"), .{info}, @src());
             }
-            // Plain `Try` does not catch ND: re-propagate on the parent fiber.
+            // `Try` does not catch ND: re-propagate on the parent fiber.
             unwind.feart_unwind(result);
         },
     }
 }
 
 pub const VT_TryAction = actions.ActionVTable("<runtime try action>", &tryaction_run, null);
-
-// ------------------------------------------
-// Try / CapTry factory singletons
-// ------------------------------------------
 
 fn try_make_1(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     defer self.rc_decrement();
@@ -162,8 +141,8 @@ fn captry_make_2(self: FatPtr, data: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     return make_try_action(f, data, true, true);
 }
 
-/// `ToIso[CapTry]` methods. CapTry is a stateless singleton, so both just hand
-/// the singleton straight back (RC ops on a singleton are no-ops).
+/// `ToIso[CapTry]` methods. CapTry is a stateless singleton, so both hand it
+/// straight back.
 fn captry_iso(self: FatPtr) callconv(.c) FatPtr {
     return self;
 }

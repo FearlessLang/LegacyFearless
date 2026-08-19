@@ -1,56 +1,104 @@
-//! Opt-in counters for the operations the scalar performance work is meant to remove:
-//! object construction, refcount traffic and method dispatch.
+//! Opt-in counters for the operations the scalar performance work is meant to
+//! remove: object construction, refcount traffic and method dispatch.
 //!
-//! Wall time on a benchmark moves for many reasons, so the measure of an optimisation is the
-//! count of operations it removes. Build with `-Dop_counters=true` (the compiler passes it when
-//! `FEART_OP_COUNTERS` is set in the environment) and the program prints a table to stderr at
-//! exit. With the option off, every function here is an empty inline body and the counters
-//! compile out.
+//! Wall time moves for many reasons, so the measure of an optimisation is the
+//! count of operations it removes. Build with `-Dop_counters=true`, which the
+//! compiler passes when `FEART_OP_COUNTERS` is in the environment, and the
+//! program prints a table to stderr at exit. With the option off every function
+//! here is an empty inline body.
 
 const std = @import("std");
-const ENABLED = @import("build_options").op_counters;
+/// Test this before evaluating anything that exists only to classify a bump:
+/// with the option off such work must not be on the path at all.
+pub const ENABLED = @import("build_options").op_counters;
 
-/// One counter per operation kind. Adding a kind needs no other change: the dump walks the enum.
+/// Adding a kind needs no other change: the dump walks the enum.
 pub const Op = enum {
     /// `rt.obj_k`: a refcounted heap object.
     heap_obj,
-    /// `rt.obj_k_singleton`: a statically allocated instance, no refcounting.
+    /// `rt.obj_k_singleton`: a static instance, no refcounting.
     singleton_obj,
     /// `rt.init_transient_obj`: a stack slot, no refcounting.
     transient_obj,
-    /// `FatPtr.box_transient` on a live transient: a stack slot that had to become a heap object.
+    /// A live transient that had to become a heap object.
     boxed_transient,
-    /// An atomic increment of a heap object's refcount.
     rc_increment,
-    /// An atomic decrement of a heap object's refcount.
     rc_decrement,
-    /// `rt.call` on an object receiver: storage-mode switch, then the inline cache.
+    /// An increment that missed the biased count and paid for an atomic. The
+    /// biased hit rate is `1 - rc_shared_increment / rc_increment`.
+    rc_shared_increment,
+    rc_shared_decrement,
+    /// A fold of a biased count into a shared count. At most one per object.
+    rc_merge,
+    /// An object handed to its owning worker because a foreign worker released a
+    /// reference the owner's biased count still covered.
+    rc_queue_push,
+    /// `rt.call` on an object receiver: storage-mode switch, then inline cache.
     virtual_call,
     /// `rt.call` that the storage-mode switch sent to an intrinsic module.
     virtual_call_primitive,
     /// A call site that reached an intrinsic module with no storage-mode switch.
     direct_call_primitive,
-    /// An inline-cache probe that missed entry 0 and had to walk the polymorphic entries.
+    /// A probe that missed entry 0 and walked the polymorphic entries.
     ic_slow_probe,
+    /// A `doPromote` that published its join obligation and was charged for.
+    promotion,
+    promotion_miss_no_frame,
+    promotion_miss_cancelled,
+    /// Always zero: a task deque grows rather than refusing. Kept so a counter
+    /// dump holds its shape.
+    promotion_miss_queue_full,
+    /// The publish CAS lost: the parent or another promoter claimed the frame.
+    promotion_miss_cas_lost,
+    /// No obligation or task left in the worker pools.
+    promotion_miss_pool_empty,
+    /// Always zero, like `promotion_miss_queue_full`: an enqueue has no way to
+    /// report a loss back to the promoter.
+    promotion_miss_enqueue_fail,
+    /// A published promotion the parent took back at its join point because no
+    /// worker had claimed it. Bounds how much of the promotion rate becomes
+    /// real fibers.
+    promotion_reclaimed,
+    /// No worker, fiber or shadow stack. Expect ~0; anything else means the
+    /// thread-local swap is wrong.
+    promotion_miss_no_fiber,
+    /// A shadow frame pushed at a VPF call site: the ceiling on promotions.
+    vpf_frame_push,
+    /// Taken from another worker's deque by the steal step of `findTask`.
+    task_stolen,
+    /// A task that won its claim at dequeue and got a real fiber, with the stack
+    /// that costs. Bounded by `promotion - promotion_reclaimed`.
+    thief_fiber_created,
+    /// Dequeued after the parent had reclaimed it. The dequeue and the recycle
+    /// are wasted, but no stack was spent.
+    task_dequeue_claim_lost,
+    /// One token granted, so one `tryPromote` call, so one frame. This is `W` in
+    /// the APM cost model and the denominator of the Theorem 4.1 bound
+    /// `promotions <= W / TOKENS_THRESHOLD`. Strictly larger than
+    /// `vpf_frame_push`, which counts VPF call sites only.
+    ///
+    /// Bumps a contended atomic on the hottest path in the program. Read it for
+    /// structure, never for timing.
+    token_granted,
 };
 
 const COUNT = @typeInfo(Op).@"enum".fields.len;
 
 var counters: [COUNT]std.atomic.Value(u64) = @splat(std.atomic.Value(u64).init(0));
 
-/// Records one operation. `.monotonic` is enough: the totals are only read after every worker has
-/// stopped, and a lost update between threads would not change a conclusion drawn from millions of
-/// operations.
+/// `.monotonic` is enough: the totals are read only after every worker has
+/// stopped, and a lost update would not change a conclusion drawn from millions
+/// of operations.
 pub inline fn bump(comptime op: Op) void {
     if (!ENABLED) return;
     _ = counters[@intFromEnum(op)].fetchAdd(1, .monotonic);
 }
 
-/// A devirtualised call site has no counter: nothing on its path is shared with any other call
-/// form, so a bump there would be the only cost it has. Its count is the drop in `virtual_call`
-/// between two builds, and the compiler reports how many call sites it rewrote.
+/// Prints the table to stderr.
 ///
-/// Prints the table to stderr. Does nothing when the option is off.
+/// A devirtualised call site has no counter: nothing on its path is shared with
+/// another call form, so a bump would be its only cost. Read its count as the
+/// drop in `virtual_call` between two builds.
 pub fn dump() void {
     if (!ENABLED) return;
     std.debug.print("[op_counters]\n", .{});

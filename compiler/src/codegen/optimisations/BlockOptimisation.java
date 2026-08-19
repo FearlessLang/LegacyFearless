@@ -83,8 +83,8 @@ public class BlockOptimisation implements
           }
           stmts.offerFirst(new MIR.Block.BlockStmt.Throw(res.get()));
         } else if (mCall.name().equals(new Id.MethName(".loop", 1))) {
-          // We intentionally do not inline the block function because, often it is implemented with a Block itself,
-          // so leaving it as a different function lets us apply this optimisation to it as well.
+          // The block function is often implemented with a Block itself, so leaving it
+          // separate lets this optimisation apply to it too.
           stmts.offerFirst(new MIR.Block.BlockStmt.Loop(mCall.args().getFirst()));
         } else if (mCall.name().equals(new Id.MethName(".if", 1))) {
           var res = this.visitReturn(mCall.args().getFirst());

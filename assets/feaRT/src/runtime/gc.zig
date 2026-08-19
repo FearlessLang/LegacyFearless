@@ -6,8 +6,7 @@ const process = @import("process_singletons.zig");
 
 const libgc = @import("libgc");
 
-/// Set by `main` from `init.environ_map.get("FEART_ALLOCS_OUT")`. `null` means
-/// fall back to the default path.
+/// From `FEART_ALLOCS_OUT`. Null selects the default path.
 pub var allocs_out_path: ?[]const u8 = null;
 
 pub fn set_allocs_out_path(path: ?[]const u8) void {
@@ -19,53 +18,57 @@ const DEFAULT_RC_COLLECTION_THRESHOLD: usize = 256;
 
 threadlocal var rc_delta: usize = 0;
 
-/// Starts false: a stop-the-world during startup deadlocks, because glibc
-/// masks all signals in a thread while it is inside `pthread_create`, so the
-/// collector's suspend signal can never be acknowledged by the main thread
-/// mid-spawn-loop. `WorkerPool.run` enables collection once every runtime
-/// thread exists.
+/// Starts false: glibc masks all signals inside `pthread_create`, so a
+/// stop-the-world during the spawn loop never gets its suspend signal
+/// acknowledged. `WorkerPool.run` enables collection once every thread exists.
 var isSafeToCollectCycles = std.atomic.Value(bool).init(false);
 
-/// Stop-the-world guard for fiber context switches. Mid-switch, the GC's
-/// recorded stack bottom (`mem_base`) and the hardware stack pointer can refer
-/// to two different fiber stacks; a collection snapshotting a thread in that
-/// window scans across disjoint mappings and segfaults in
-/// `GC_push_all_stacks`. Switches register as readers around the window;
-/// `collectCycles` is the writer and stops the world only once no thread is
-/// mid-switch, with writer priority (pending collection makes new switches
-/// spin). Everything is seq_cst: the reader's increment/re-check and the
-/// writer's flag-set/counter-read form a Dekker pair.
+/// Stop-the-world guard for fiber context switches. Mid-switch, `mem_base` and
+/// the hardware stack pointer can name two different fiber stacks, and a
+/// collection that snapshots a thread there scans across disjoint mappings and
+/// segfaults in `GC_push_all_stacks`. Switches are readers, `collectCycles` is
+/// the writer and has priority. All seq_cst: the reader's increment/re-check
+/// and the writer's flag-set/counter-read are a Dekker pair.
 var switching_threads = std.atomic.Value(usize).init(0);
 var collect_pending = std.atomic.Value(bool).init(false);
 
-/// Enter the switch window (mem_base and stack pointer about to disagree).
-/// The matching `endStackSwitch` runs on the same OS thread but in the
-/// switched-to context: the landing side of the swap carries the baton.
+/// Enter the switch window. The matching `endStackSwitch` runs on the same OS
+/// thread but in the switched-to context: the landing side carries the baton.
 pub fn beginStackSwitch() void {
 	while (true) {
 		while (collect_pending.load(.seq_cst)) std.atomic.spinLoopHint();
 		_ = switching_threads.fetchAdd(1, .seq_cst);
 		if (!collect_pending.load(.seq_cst)) return;
-		// A collection slipped in between the check and our increment; back
-		// out so its drain can complete, then wait it out.
+		// A collection slipped in between the check and the increment; back out
+		// so its drain can complete, then wait it out.
 		_ = switching_threads.fetchSub(1, .seq_cst);
 	}
 }
 
-/// Leave the switch window: mem_base and the stack pointer agree again.
 pub fn endStackSwitch() void {
 	_ = switching_threads.fetchSub(1, .seq_cst);
 }
 
+/// What `GC_malloc` gives unasked. Anything stricter needs `GC_memalign`.
+const GC_MALLOC_ALIGNMENT: usize = @alignOf(std.c.max_align_t);
+
 fn gc_alloc(ctx: *anyopaque, len: usize, ptr_align: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
-	_ = ctx; _ = ptr_align;
+	_ = ctx;
 	if (TRACK_ALLOCS) track_record(ret_addr, len);
-	const ptr = libgc.GC_malloc(len);
+	const alignment = ptr_align.toByteUnits();
+	// `GC_memalign` returns a pointer into the middle of its block, so the result
+	// can never go to `GC_free`. That suits the policy of leaving `gc.allocator`
+	// memory to the collector, and it is the only way to allocate an over-aligned
+	// type such as a cache-line-padded queue.
+	const ptr = if (alignment > GC_MALLOC_ALIGNMENT)
+		libgc.GC_memalign(alignment, len)
+	else
+		libgc.GC_malloc(len);
 	if (ptr == null) return null;
 	return @ptrCast(ptr);
 }
 
-/// We do not implement realloc because Zig's resize contract is stricter than libgc's realloc
+/// No realloc: Zig's resize contract is stricter than libgc's.
 fn gc_resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
 	_ = ctx; _ = buf; _ = buf_align; _ = new_len; _ = ret_addr;
 	return false;
@@ -93,26 +96,25 @@ pub const allocator = std.mem.Allocator{
 	.vtable = &gc_vtable,
 };
 
-/// Initialize the garbage collector with thread support.
 pub fn init_gc() void {
 	libgc.GC_init();
 
-	// Because reference counting will catch most uses, we manually GC to catch cycles lazily
+	// Reference counting catches most garbage, so collect cycles lazily by hand.
 	libgc.GC_disable();
 
 	libgc.GC_allow_register_threads();
 
-	// Pre-grow the heap to skip warmup collection thrash. Must be after GC_init.
-	// _ = libgc.GC_expand_hp(256 * 1024 * 1024);
-
-	// TODO: this is questionably safe with my fiber system, lets see...
+	// TODO: confirm incremental collection is safe with the fiber system.
 	libgc.GC_enable_incremental();
 
-	// bdwgc doesn't scan TLS by default, so register the main thread's
-	// recycler pool as a root range. Worker threads do the same in
-	// `register_thread`.
+	// bdwgc does not scan TLS, so the recycler pool needs an explicit root
+	// range. Worker threads do the same in `register_thread`.
   const recycle_pool_info = alloc_recycler.get_pool_info();
 	libgc.GC_add_roots(recycle_pool_info.start, recycle_pool_info.end);
+
+	initFiberRegistry();
+	prev_push_other_roots = libgc.GC_get_push_other_roots();
+	libgc.GC_set_push_other_roots(&pushFiberStacks);
 
 	destroyer.init();
 
@@ -123,10 +125,9 @@ pub fn init_gc() void {
 }
 
 pub inline fn recycleDestroy(comptime T: type, ptr: *T, comptime source: log.RawFreeSource) void {
-    // The destroyer overlays a `?*Node` link onto the first 8 bytes of every
-    // freed allocation, so anything sent its way must be ≥ 8 bytes. Pad the
-    // type at the call site if you hit this -- see types.OpsRefCount for an
-    // example.
+    // The destroyer overlays a `?*Node` link onto the first 8 bytes of a freed
+    // allocation, so anything sent there must be >= 8 bytes. Pad the type at the
+    // call site; types.OpsRefCount is an example.
     comptime std.debug.assert(@sizeOf(T) >= @sizeOf(destroyer.Node));
     const size = @sizeOf(T);
     const align_log2: u8 = @intFromEnum(std.mem.Alignment.of(T));
@@ -138,10 +139,8 @@ pub inline fn recycleDestroy(comptime T: type, ptr: *T, comptime source: log.Raw
     }
 }
 
-/// Mirror of `recycleDestroy`. Try the per-thread pool first; fall back to a
-/// fresh GC_malloc on miss. Only the fallback bumps `rc_delta` -- pool hits
-/// reuse storage that was already counted at its original alloc, keeping the
-/// counter paired with `recycleDestroy` (which never decrements).
+/// Mirror of `recycleDestroy`. Only the miss path bumps `rc_delta`: a pool hit
+/// reuses storage already counted at its first alloc.
 pub inline fn recycleAlloc(comptime T: type) *T {
     comptime std.debug.assert(@sizeOf(T) >= @sizeOf(destroyer.Node));
     const align_log2: u8 = @intFromEnum(std.mem.Alignment.of(T));
@@ -153,10 +152,9 @@ pub inline fn recycleAlloc(comptime T: type) *T {
     return fresh;
 }
 
-/// Slice flavour. Byte size is computed at runtime; pool lookup picks the
-/// smallest class >= that size, so callers whose byte size doesn't fall in
-/// CLASS_SIZES silently degrade to a fresh `allocator.alloc` (same behavior
-/// as today). Returned slice has length `n`; any class slack is unused.
+/// Slice flavour. The pool picks the smallest class >= the byte size, so a size
+/// outside CLASS_SIZES falls back to `allocator.alloc`. The returned slice has
+/// length `n` and any class slack is unused.
 pub inline fn recycleAllocSlice(comptime T: type, n: usize) []T {
     const align_log2: u8 = @intFromEnum(std.mem.Alignment.of(T));
     const bytes = @sizeOf(T) * n;
@@ -169,10 +167,8 @@ pub inline fn recycleAllocSlice(comptime T: type, n: usize) []T {
     return fresh;
 }
 
-/// Mirror of `recycleDestroy` for slices. Byte size is computed at runtime;
-/// `alloc_recycler.push` requires an exact class match, so non-class sizes
-/// fall through to `destroyer.submit` (which batches the bdwgc lock). The
-/// runtime asserts capture the Treiber-overlay invariant (need >= 8 bytes).
+/// Mirror of `recycleDestroy` for slices. `alloc_recycler.push` needs an exact
+/// class match, so a non-class size falls through to `destroyer.submit`.
 pub inline fn recycleDestroySlice(comptime T: type, slice: []T, comptime source: log.RawFreeSource) void {
     std.debug.assert(slice.len >= 1);
     const size = @sizeOf(T) * slice.len;
@@ -216,12 +212,11 @@ pub fn maybeCollectCycles() void {
 
 fn collectCycles() void {
 	rc_delta = 0;
-	// Single collector at a time; a concurrent loser skips: its garbage is
-	// picked up by the winner's collection.
+	// One collector at a time. A loser skips: the winner picks up its garbage.
 	if (collect_pending.cmpxchgStrong(false, true, .seq_cst, .seq_cst) != null) return;
 	defer collect_pending.store(false, .seq_cst);
-	// Drain mid-switch threads; new switches spin on `collect_pending`, so
-	// this terminates within a register-swap's time.
+	// New switches spin on `collect_pending`, so this drain terminates within a
+	// register swap's time.
 	while (switching_threads.load(.seq_cst) != 0) std.atomic.spinLoopHint();
 	libgc.GC_enable();
 	defer libgc.GC_disable();
@@ -232,8 +227,6 @@ pub fn rcDeltaForTest() usize {
 	return rc_delta;
 }
 
-/// Register the current thread with the garbage collector.
-/// Call this when a new thread is spawned.
 pub fn register_thread() void {
 	var sb: libgc.struct_GC_stack_base = undefined;
 	_ = libgc.GC_get_stack_base(&sb);
@@ -243,20 +236,140 @@ pub fn register_thread() void {
 	libgc.GC_add_roots(recycle_pool_info.start, recycle_pool_info.end);
 }
 
-/// Unregister the current thread from the garbage collector.
-/// Call this when a thread is about to exit.
 pub fn unregister_thread() void {
 	_ = libgc.GC_unregister_my_thread();
 }
 
-/// Register a memory range `[start, end)` so the GC scans it for pointers.
 pub fn addRoots(start: *anyopaque, end: *anyopaque) void {
 	libgc.GC_add_roots(start, end);
 }
 
-/// Unregister a previously registered root range.
 pub fn removeRoots(start: *anyopaque, end: *anyopaque) void {
 	libgc.GC_remove_roots(start, end);
+}
+
+// Fiber stacks do not use `GC_add_roots`: bdwgc holds root ranges in a fixed
+// 2048-entry static array, and a program with more live fibers than that aborts
+// with "Too many root sets". Every live fiber is listed here instead, and a
+// `push_other_roots` hook pushes its live stack region at the end of each mark
+// root scan.
+//
+// The registry is a chain of fixed-size segments of atomic slots. Every mutation
+// is one atomic store, so a world-stopped snapshot is always consistent, and
+// segments are append-only, so the hook never walks reused storage.
+
+const REG_SEG_SLOTS = 1024;
+
+const RegSegment = struct {
+	slots: [REG_SEG_SLOTS]std.atomic.Value(?*anyopaque),
+	next: std.atomic.Value(?*RegSegment),
+};
+
+/// A null `seg` means "not registered".
+pub const RegSlot = struct {
+	seg: ?*RegSegment = null,
+	idx: usize = 0,
+};
+
+/// A plain global, so the data-segment scan keeps the segments -- and through
+/// them the `Fiber` structs -- alive across a cycle collection.
+var reg_head: ?*RegSegment = null;
+var reg_seg_count: std.atomic.Value(usize) = std.atomic.Value(usize).init(0);
+/// Guards a segment append only. Slot claim and release are lock-free.
+var reg_append_lock: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+/// Where this thread stopped last time, so a claim usually succeeds on its
+/// first probe instead of rescanning the chain.
+threadlocal var reg_cursor_seg: ?*RegSegment = null;
+threadlocal var reg_cursor_idx: usize = 0;
+
+fn newRegSegment() *RegSegment {
+	const seg = allocator.create(RegSegment) catch @panic("OOM allocating fiber registry segment");
+	for (&seg.slots) |*slot| slot.* = std.atomic.Value(?*anyopaque).init(null);
+	seg.next = std.atomic.Value(?*RegSegment).init(null);
+	_ = reg_seg_count.fetchAdd(1, .monotonic);
+	return seg;
+}
+
+/// Never moves or frees an existing segment: a stop-the-world scan may be
+/// walking the chain.
+fn appendRegSegment() *RegSegment {
+	while (reg_append_lock.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+		std.atomic.spinLoopHint();
+	}
+	defer reg_append_lock.store(false, .release);
+
+	var tail = reg_head.?;
+	while (tail.next.load(.acquire)) |n| tail = n;
+	const seg = newRegSegment();
+	tail.next.store(seg, .release);
+	return seg;
+}
+
+fn initFiberRegistry() void {
+	reg_head = newRegSegment();
+}
+
+/// Call only once the stack is mapped and `sp` points at a prepared frame: the
+/// hook may read the slot the instant it lands.
+pub fn registerFiber(fiber: *anyopaque) RegSlot {
+	while (true) {
+		var seg = reg_cursor_seg orelse reg_head.?;
+		var idx = reg_cursor_idx;
+		// One pass over every segment that existed at entry. A slot freed behind
+		// the cursor is picked up on the wrap.
+		var segments_left = reg_seg_count.load(.monotonic) + 1;
+		while (segments_left > 0) : (segments_left -= 1) {
+			while (idx < REG_SEG_SLOTS) : (idx += 1) {
+				const slot = &seg.slots[idx];
+				if (slot.load(.monotonic) != null) continue;
+				if (slot.cmpxchgStrong(null, fiber, .release, .monotonic) == null) {
+					reg_cursor_seg = seg;
+					reg_cursor_idx = idx + 1;
+					return .{ .seg = seg, .idx = idx };
+				}
+			}
+			seg = seg.next.load(.acquire) orelse reg_head.?;
+			idx = 0;
+		}
+		const fresh = appendRegSegment();
+		reg_cursor_seg = fresh;
+		reg_cursor_idx = 0;
+	}
+}
+
+/// MUST happen strictly before the stack is unmapped: the hook scans whatever a
+/// live slot points at, and an unmapped stack faults.
+pub fn unregisterFiber(slot: RegSlot) void {
+	const seg = slot.seg orelse return;
+	seg.slots[slot.idx].store(null, .release);
+}
+
+/// The hook bdwgc already had, chained rather than replaced.
+var prev_push_other_roots: libgc.GC_push_other_roots_proc = null;
+
+/// Runs at the end of `GC_push_roots` with the world stopped, so it must not
+/// allocate or lock.
+///
+/// A Running fiber's saved `sp` is stale, but the thread-stack scan already
+/// covers its live region, so pushing it again is redundant, never unsound.
+/// Scanning `sp`..top also keeps dead pointers above `sp` from holding garbage.
+fn pushFiberStacks() callconv(.c) void {
+	const Fiber = @import("fiber.zig").Fiber;
+	var seg = reg_head;
+	while (seg) |s| {
+		for (&s.slots) |*slot| {
+			const raw = slot.load(.acquire) orelse continue;
+			const fiber: *Fiber = @ptrCast(@alignCast(raw));
+			const sp = fiber.sp;
+			const bottom = @intFromPtr(fiber.stack_bottom);
+			const top = bottom + fiber.stack_size;
+			if (sp < bottom or sp >= top) continue;
+			libgc.GC_push_all_eager(@ptrFromInt(sp), @ptrFromInt(top));
+		}
+		seg = s.next.load(.acquire);
+	}
+	if (prev_push_other_roots) |prev| prev();
 }
 
 const SetStackBottomArgs = struct { mem_base: *anyopaque };
@@ -269,33 +382,29 @@ fn setStackBottomLocked(arg: ?*anyopaque) callconv(.c) ?*anyopaque {
 	return null;
 }
 
-/// Update the GC's notion of where this thread's stack bottom lives. Performed
-/// under libgc's alloc lock so it's safe to call from a fiber-switch.
+/// Runs under libgc's alloc lock, so a fiber switch may call it.
 pub fn setStackBottom(mem_base: *anyopaque) void {
 	var args = SetStackBottomArgs{ .mem_base = mem_base };
 	_ = libgc.GC_call_with_alloc_lock(&setStackBottomLocked, @ptrCast(&args));
 }
 
-/// Returns the OS-thread stack bottom as libgc currently sees it. Useful when
-/// switching off a fiber stack back onto the scheduler's OS stack.
 pub fn currentStackBase() *anyopaque {
 	var sb: libgc.struct_GC_stack_base = undefined;
 	_ = libgc.GC_get_stack_base(&sb);
 	return sb.mem_base.?;
 }
 
-/// Print this thread's current RC delta. Gated on `-Dtrack_allocs=true`. Each
-/// worker should call this just before exiting so we can see whether RC was
-/// balanced on the way out, since the delta is thread-local.
+/// This thread's RC delta, which shows whether reference counting balanced.
+/// Gated on `-Dtrack_allocs=true`. Call from each worker just before it exits.
 pub fn dump_rc_delta() void {
 	if (!TRACK_ALLOCS) return;
 	const tid = std.Thread.getCurrentId();
 	std.debug.print("[track_allocs] thread {d}: rc_delta={d}\n", .{ tid, rc_delta });
 }
 
-/// Dump per-call-site allocation counts/bytes to a TSV file. Only does anything
-/// when built with `-Dtrack_allocs=true`. Output path is `FEART_ALLOCS_OUT` env
-/// var, defaulting to `./feart-allocs.tsv`. Resolve addresses with
+/// Per-call-site allocation counts and bytes, as TSV. Needs
+/// `-Dtrack_allocs=true`. The path is `FEART_ALLOCS_OUT`, default
+/// `./feart-allocs.tsv`. Resolve addresses with
 /// `addr2line -e ./zig-out/bin/feart -f -i 0xADDR`.
 pub fn dump_allocs() void {
 	if (!TRACK_ALLOCS) return;

@@ -14,17 +14,17 @@ import java.util.stream.Collectors;
 
 /// Per-function summaries that let a caller give a callee the storage for its result.
 ///
-/// `freshObj(f)` is the one `CreateObj` whose fresh instance `f` returns: the body of `f`
-/// (through `Box` and `Block`) is that transient-eligible `CreateObj`, or a tail
+/// `freshObj(f)` is the one `CreateObj` whose fresh instance `f` returns: the body of `f`,
+/// seen through `Box` and `Block`, is that transient-eligible `CreateObj`, or a tail
 /// `DirectCall`/`StaticCall` to a function with the same summary.
 ///
-/// `paramMayEscape(f, i)` is false only when the value of param `i` provably stays inside the
-/// frame of `f`: it is not a capture of a `CreateObj`, not the returned value, not an operand of
-/// a virtual call, and it only flows to non-escaping positions of known callees. The fixpoint is
+/// `paramMayEscape(f, i)` is false only when param `i` provably stays inside the frame of
+/// `f`: not a capture of a `CreateObj`, not the returned value, not an operand of a virtual
+/// call, and flowing only into non-escaping positions of known callees. The fixpoint is
 /// optimistic: every param starts at "does not escape" and escapes propagate until stable.
 ///
-/// `slotWanted(f)` holds the functions that some `DirectCall`/`StaticCall` site targets, so
-/// codegen emits a `_transient` variant only for a function some site can reference.
+/// `slotWanted(f)` holds the functions some `DirectCall`/`StaticCall` site targets, so
+/// codegen emits a `_transient` variant only where a site can reference it.
 public final class ReturnShapeAnalysis {
   private final MIR.Program p;
   private final Map<MIR.FName, MIR.Fun> funMap;
@@ -50,16 +50,14 @@ public final class ReturnShapeAnalysis {
 
   public boolean slotWanted(MIR.FName f) { return wantedFuns.contains(f); }
 
-  /// True unless the analysis proved that param `argIndex` of `f` stays inside the frame of `f`.
   public boolean paramMayEscape(MIR.FName f, int argIndex) {
     var flags = paramEscapes.get(f);
     return flags == null || argIndex >= flags.length || flags[argIndex];
   }
 
-  /// The function behind the per-literal method wrapper a `DirectCall` targets, resolved the
-  /// same way codegen binds the wrapper: first on the concrete literal itself, then up the
-  /// inheritance chain. A miss returns empty and every user of this treats that as "assume the
-  /// worst".
+  /// The function behind the per-literal wrapper a `DirectCall` targets, resolved the way
+  /// codegen binds it: the concrete literal first, then up the inheritance chain. A miss
+  /// returns empty, which every caller reads as "assume the worst".
   public Optional<MIR.Fun> calleeOf(MIR.DirectCall d) {
     var key = new MIR.FName(d.concreteType(), d.original().name(), false, d.original().mdf());
     var cached = calleeCache.get(key);
@@ -87,7 +85,7 @@ public final class ReturnShapeAnalysis {
         .findFirst()
         .orElse(Optional.empty());
     } catch (RuntimeException ignored) {
-      // A parent outside the MIR defs (a magic type) has no fun to find
+      // A parent outside the MIR defs, so a magic type, has no fun to find.
       return Optional.empty();
     }
   }
@@ -176,8 +174,8 @@ public final class ReturnShapeAnalysis {
           return;
         }
         var flags = paramEscapes.get(callee.get().name());
-        // The callee fun takes (methodArgs..., self, captures...), so the receiver maps to the
-        // fun arg after the method args and arg i maps to fun arg i.
+        // The callee fun takes (methodArgs..., self, captures...), so the receiver maps to
+        // the fun arg after the method args, and arg i maps to fun arg i.
         walkOperand(call.recv(), call.args().size(), flags, escaped);
         for (int i = 0; i < call.args().size(); i++) {
           walkOperand(call.args().get(i), i, flags, escaped);
@@ -225,7 +223,7 @@ public final class ReturnShapeAnalysis {
   }
 
   /// A `BoolExpr` arm is a separate function whose args are the same-named captures of the
-  /// enclosing scope, so an escape of an arm param is an escape of the same-named enclosing var.
+  /// enclosing scope, so an arm param escaping means that enclosing var escapes.
   private void armEscapes(MIR.FName arm, Set<String> escaped) {
     var fun = funMap.get(arm);
     if (fun == null) { return; }
@@ -245,7 +243,7 @@ public final class ReturnShapeAnalysis {
       case MIR.X ignored -> {}
       case MIR.Box box -> collectWanted(box.inner());
       case MIR.Block block -> collectWanted(block.original());
-      case MIR.CreateObj ignored -> {} // the method bodies are their own funs
+      case MIR.CreateObj ignored -> {} // The method bodies are their own funs.
       case MIR.BoolExpr b -> collectWanted(b.condition());
       case MIR.MCall call -> {
         collectWanted(call.recv());

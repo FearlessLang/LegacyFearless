@@ -1,37 +1,29 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-// Logging configuration from build options
 const log_scheduling = @import("build_options").log_scheduling;
 const log_safety = @import("build_options").log_safety;
 const log_dispatch = @import("build_options").log_dispatch;
 const log_trace = @import("build_options").log_trace;
 const log_alloc_caching = @import("build_options").log_alloc_caching;
 
-/// Conditional scheduling-related logging.
-/// Compiles away to zero-cost when disabled (-Dlog-scheduling=false, the default).
+/// Compiles away when `-Dlog-scheduling` is off, which is the default.
 pub inline fn scheduling(comptime fmt: []const u8, args: anytype) void {
 	if (!log_scheduling) return;
 	std.debug.print("[SCHEDULING] " ++ fmt ++ "\n", args);
 }
 
-/// Conditional safety-related logging.
-/// Compiles away to zero-cost when disabled (-Dlog-safety=false, the default).
+/// Compiles away when `-Dlog-safety` is off, which is the default.
 pub inline fn safety(comptime fmt: []const u8, args: anytype) void {
 	if (!log_safety) return;
 	std.debug.print("[SAFETY] " ++ fmt ++ "\n", args);
 }
 
-/// Conditional dispatch/method resolution logging.
-/// Compiles away to zero-cost when disabled (-Dlog-dispatch=false, the default).
+/// Compiles away when `-Dlog-dispatch` is off, which is the default.
 pub inline fn dispatch(comptime fmt: []const u8, args: anytype) void {
 	if (!log_dispatch) return;
 	std.debug.print("[DISPATCH] " ++ fmt ++ "\n", args);
 }
-
-// ==========================================
-// Trace ring buffer infrastructure
-// ==========================================
 
 pub const TraceEvent = struct {
 	tag: Tag,
@@ -41,7 +33,6 @@ pub const TraceEvent = struct {
 	c: usize,
 
 	pub const Tag = enum(u8) {
-		// Heartbeat events
 		hb_entry,
 		hb_promote,
 		hb_cas_ok,
@@ -49,7 +40,6 @@ pub const TraceEvent = struct {
 		hb_enqueue,
 		hb_enqueue_fail,
 
-		// Application events (MF_Fib_apply)
 		app_push_frame,
 		app_cas_claimed,
 		app_cas_promoted,
@@ -57,27 +47,23 @@ pub const TraceEvent = struct {
 		app_wait_enter,
 		app_wait_return,
 
-		// Thief events
 		thief_start,
 		thief_child_wait,
 		thief_fn_return,
 		thief_fulfill,
 
-		// Obligation lifecycle
 		obl_alloc,
 		obl_fulfill,
 		obl_wait_ready,
 		obl_wait_park,
 		obl_wait_resume,
 
-		// Fiber lifecycle
 		fiber_enqueue,
 		fiber_dequeue,
 		fiber_switch_to,
 		fiber_switch_back,
 		fiber_done,
 
-		// Alloc recycler events
 		alloc_recycle_miss,
 		alloc_recycle_drain,
 		alloc_raw_free,
@@ -94,21 +80,20 @@ pub const RawFreeSource = enum(u8) {
 	fiber_destroy = 6,
 	error_release = 7,
 	map_release = 8,
+	rc_merge_node = 9,
 };
 
 pub const TRACE_BUF_SIZE: usize = 65536;
 
 pub const TraceBuffer = struct {
 	events: [TRACE_BUF_SIZE]TraceEvent = undefined,
-	/// Atomic head counter -- signal handler (heartbeat) and normal code
-	/// both call log() on the same OS thread, so we need fetchAdd to
-	/// ensure each gets a unique slot.
+	/// The heartbeat signal handler and normal code both call `log` on the same
+	/// OS thread, so the slot claim has to be a fetchAdd.
 	head: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 
 	pub fn log(self: *TraceBuffer, tag: TraceEvent.Tag, a: usize, b: usize, v: usize) void {
 		if (!log_trace) return;
 		const ts = globalTs();
-		// fetchAdd gives each caller (fiber code or signal handler) a unique slot.
 		const idx = self.head.fetchAdd(1, .monotonic) & (TRACE_BUF_SIZE - 1);
 		self.events[idx] = .{
 			.tag = tag,
@@ -119,16 +104,15 @@ pub const TraceBuffer = struct {
 		};
 	}
 
-	/// Dump the trace buffer contents to stderr using write(2) (signal-safe).
+	/// Writes to stderr through write(2), so it is signal-safe.
 	pub fn dump(self: *const TraceBuffer, worker_id: usize) void {
 		var buf: [256]u8 = undefined;
 		const h = self.head.load(.monotonic);
 
-		// Header
 		var n = bufPrintHeader(&buf, worker_id, h);
 		sysWrite(&buf, n);
 
-		// Print events from oldest to newest
+		// Oldest to newest.
 		const count = @min(h, TRACE_BUF_SIZE);
 		const start = if (h > TRACE_BUF_SIZE) h - TRACE_BUF_SIZE else 0;
 
@@ -142,30 +126,27 @@ pub const TraceBuffer = struct {
 	}
 };
 
-/// Thread-local trace buffer pointer (set per worker thread).
 pub threadlocal var tls_trace_buffer: ?*TraceBuffer = null;
 
-/// Global array of trace buffer pointers, indexed by worker ID.
+/// Indexed by worker id.
 pub var trace_buffers: [MAX_WORKERS]?*TraceBuffer = [_]?*TraceBuffer{null} ** MAX_WORKERS;
 pub var num_workers: usize = 0;
 
 const MAX_WORKERS = 64;
 
-/// Global monotonic timestamp counter.
 var global_ts_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(0);
 
 fn globalTs() u64 {
 	return global_ts_counter.fetchAdd(1, .monotonic);
 }
 
-/// Fresh read of tls_trace_buffer. See getCurrentWorker() for rationale.
+/// Fresh read, for the reason `getCurrentWorker` gives.
 pub noinline fn getTraceBuffer() ?*TraceBuffer {
 	const tb = tls_trace_buffer;
 	asm volatile ("" ::: .{ .memory = true });
 	return tb;
 }
 
-/// Convenience: log to the current thread's trace buffer if available.
 pub inline fn trace(tag: TraceEvent.Tag, a: usize, b: usize, v: usize) void {
 	if (!log_trace) return;
 	if (getTraceBuffer()) |tb| {
@@ -182,10 +163,6 @@ pub inline fn trace_alloc_caching(tag: TraceEvent.Tag, a: usize, b: usize, v: us
 	if (!log_alloc_caching) return;
 	trace(tag, a, b, v);
 }
-
-// ==========================================
-// Signal-safe crash handler
-// ==========================================
 
 pub fn installCrashHandler() void {
 	if (!log_trace) return;
@@ -212,7 +189,6 @@ pub fn dumpAllTraceBuffers() void {
 }
 
 fn crashHandler(sig: c_int) callconv(.c) void {
-	// Write crash header
 	const header = "\n=== CRASH TRACE DUMP (signal ";
 	sysWrite(header, header.len);
 	var decbuf: [20]u8 = undefined;
@@ -221,19 +197,14 @@ fn crashHandler(sig: c_int) callconv(.c) void {
 	const trailer = ") ===\n";
 	sysWrite(trailer, trailer.len);
 
-	// Dump all trace buffers
 	dumpAllTraceBuffers();
 
 	const footer = "=== END TRACE DUMP ===\n";
 	sysWrite(footer, footer.len);
 
-	// Re-raise to get default behavior (core dump etc.)
+	// Re-raise for the default behaviour, such as a core dump.
 	std.posix.raise(@enumFromInt(sig)) catch {};
 }
-
-// ==========================================
-// Minimal signal-safe formatting helpers
-// ==========================================
 
 fn sysWrite(buf: [*]const u8, len: usize) void {
 	_ = std.posix.system.write(std.posix.STDERR_FILENO, buf, len);
@@ -254,10 +225,8 @@ fn bufPrintHeader(buf: *[256]u8, worker_id: usize, head: usize) usize {
 
 fn bufPrintEvent(buf: *[256]u8, ev: *const TraceEvent) usize {
 	var pos: usize = 0;
-	// ts
 	pos = appendHex(buf, pos, ev.ts);
 	pos = appendStr(buf, pos, " ");
-	// tag name
 	pos = appendStr(buf, pos, @tagName(ev.tag));
 	pos = appendStr(buf, pos, " a=");
 	pos = appendHex(buf, pos, ev.a);
@@ -308,7 +277,6 @@ fn fmtDec(val: anytype, buf: *[20]u8) usize {
 		tmp[n] = @intCast((x % 10) + '0');
 		x /= 10;
 	}
-	// Reverse
 	for (0..n) |i| {
 		buf[i] = tmp[n - 1 - i];
 	}
@@ -330,7 +298,6 @@ fn fmtHex(val: usize, buf: *[18]u8) usize {
 		tmp[n] = hex[x & 0xf];
 		x >>= 4;
 	}
-	// Reverse
 	for (0..n) |i| {
 		buf[2 + i] = tmp[n - 1 - i];
 	}
