@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const alloc_recycler = @import("alloc_recycler.zig");
 const log = @import("log.zig");
 const destroyer = @import("destroyer.zig");
@@ -105,7 +106,16 @@ pub fn init_gc() void {
 	libgc.GC_allow_register_threads();
 
 	// TODO: confirm incremental collection is safe with the fiber system.
-	libgc.GC_enable_incremental();
+	//
+	// Never on Darwin. There bdwgc tracks dirty pages through a Mach exception
+	// handler rather than a SIGSEGV handler, and Mach exceptions are delivered
+	// ahead of POSIX signals. It claims every EXC_BAD_ACCESS in the task,
+	// including a fiber guard-page hit, which it cannot forward to the handler
+	// `errors/signals.zig` installs. The faulting instruction then re-executes
+	// forever instead of becoming a catchable ND error.
+	if (comptime !builtin.os.tag.isDarwin()) {
+		libgc.GC_enable_incremental();
+	}
 
 	// bdwgc does not scan TLS, so the recycler pool needs an explicit root
 	// range. Worker threads do the same in `register_thread`.

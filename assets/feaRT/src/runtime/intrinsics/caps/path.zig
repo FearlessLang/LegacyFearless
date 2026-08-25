@@ -39,11 +39,8 @@ fn make_path(bytes: []u8, comptime vt: *const objs.VTable) FatPtr {
 /// (the root capability).
 fn cwd_alloc() []u8 {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const rc = std.os.linux.getcwd(&buf, buf.len);
-    const signed: isize = @bitCast(rc);
-    if (signed <= 0) @panic("getcwd failed");
-    // The raw syscall returns the length including the trailing NUL.
-    const len: usize = @as(usize, @intCast(signed)) - 1;
+    if (std.c.getcwd(&buf, buf.len) == null) @panic("getcwd failed");
+    const len = std.mem.len(@as([*:0]u8, @ptrCast(&buf)));
     const out = gc.recycleAllocSlice(u8, len);
     @memcpy(out, buf[0..len]);
     return out;

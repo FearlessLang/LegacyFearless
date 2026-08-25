@@ -36,7 +36,12 @@ public record ZigBuildOpts(
     if (fastTestBuild) { return "Debug"; }
     return debug ? "ReleaseSafe" : "ReleaseFast";
   }
-  public boolean useLlvm() { return !fastTestBuild; }
+  /// The self-hosted backend is only viable on Linux. On aarch64-macOS it balloons past
+  /// 100GB of RSS and gets killed, so LLVM stays on there even for test builds.
+  private static final boolean SELF_HOSTED_USABLE =
+    System.getProperty("os.name").toLowerCase().contains("linux");
+
+  public boolean useLlvm() { return !fastTestBuild || !SELF_HOSTED_USABLE; }
   public boolean traceFrames() { return stackTraces || debug; }
   public boolean logTrace() { return debug; }
 }

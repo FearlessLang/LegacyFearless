@@ -174,10 +174,7 @@ const FallbackBackend = struct {
                     .read => |r| readRes(r.fd, r.buf, r.offset),
                     .write => |w| writeRes(w.fd, w.buf, w.offset),
                     .writev => |w| writevRes(w.fd, w.iovecs),
-                    .close => |k| blk: {
-                        std.posix.close(k.fd);
-                        break :blk 0;
-                    },
+                    .close => |k| closeRes(k.fd),
                 };
                 completion.fulfill(&c.obl, completion.encodeInt(res));
             } else {
@@ -191,22 +188,30 @@ const FallbackBackend = struct {
         return @intCast(fd);
     }
 
+    /// Raw syscall returns already carry the `>= 0` success / `-errno` failure shape
+    /// the io_uring backend produces, so they need no mapping through `errToErrno`.
+    fn syscallRes(n: anytype) i32 {
+        if (n >= 0) return @intCast(n);
+        return -@as(i32, @intCast(@intFromEnum(std.posix.errno(n))));
+    }
+
+    fn closeRes(fd: i32) i32 {
+        return syscallRes(std.posix.system.close(fd));
+    }
+
     fn readRes(fd: i32, buf: []u8, offset: u64) i32 {
-        const n = std.posix.pread(fd, buf, offset) catch |e| return errToErrno(e);
-        return @intCast(n);
+        return syscallRes(std.posix.system.pread(fd, buf.ptr, buf.len, @bitCast(offset)));
     }
 
     fn writeRes(fd: i32, buf: []const u8, offset: u64) i32 {
-        const n = if (offset == NO_OFFSET)
-            std.posix.write(fd, buf) catch |e| return errToErrno(e)
-        else
-            std.posix.pwrite(fd, buf, offset) catch |e| return errToErrno(e);
-        return @intCast(n);
+        if (offset == NO_OFFSET) {
+            return syscallRes(std.posix.system.write(fd, buf.ptr, buf.len));
+        }
+        return syscallRes(std.posix.system.pwrite(fd, buf.ptr, buf.len, @bitCast(offset)));
     }
 
     fn writevRes(fd: i32, iovecs: []const std.posix.iovec_const) i32 {
-        const n = std.posix.writev(fd, iovecs) catch |e| return errToErrno(e);
-        return @intCast(n);
+        return syscallRes(std.posix.system.writev(fd, iovecs.ptr, @intCast(iovecs.len)));
     }
 
     /// Gives the driver the same values the io_uring backend would. Only the

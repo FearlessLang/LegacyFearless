@@ -43,12 +43,31 @@ threadlocal var pending_nd_msg: []const u8 = "";
 var old_sa_segv: std.posix.Sigaction = undefined;
 var old_sa_bus: std.posix.Sigaction = undefined;
 
+const is_darwin = builtin.os.tag.isDarwin();
+
 /// Minimal, mutable view of the kernel's register context for the architectures
 /// we support. Layout mirrors `std.debug.cpu_context`'s `signal_ucontext_t`
-/// (verified against the Linux kernel headers); we only read/write the
+/// (verified against the Linux kernel and Apple headers); we only read/write the
 /// instruction pointer, stack pointer and frame pointer, so trailing fields are
 /// omitted (the real structures are longer, accessed through a pointer).
-const NativeMcontext = switch (builtin.cpu.arch) {
+const NativeMcontext = if (is_darwin) switch (builtin.cpu.arch) {
+    .x86_64 => extern struct {
+        _trapno: u16, _cpu: u16, _err: u32, _faultvaddr: u64,
+        rax: u64, rbx: u64, rcx: u64, rdx: u64, rdi: u64, rsi: u64,
+        rbp: u64, rsp: u64,
+        r8: u64, r9: u64, r10: u64, r11: u64, r12: u64, r13: u64, r14: u64, r15: u64,
+        rip: u64,
+    },
+    .aarch64 => extern struct {
+        _far: u64 align(16),
+        _esr: u64,
+        x: [30]u64, // x0..x29 (x29 = frame pointer)
+        lr: u64, // x30
+        sp: u64,
+        pc: u64,
+    },
+    else => @compileError("ND signal handling unsupported on this architecture"),
+} else switch (builtin.cpu.arch) {
     .x86_64 => extern struct {
         r8: u64, r9: u64, r10: u64, r11: u64, r12: u64, r13: u64, r14: u64, r15: u64,
         rdi: u64, rsi: u64, rbp: u64, rbx: u64, rdx: u64, rax: u64, rcx: u64,
@@ -64,7 +83,16 @@ const NativeMcontext = switch (builtin.cpu.arch) {
     else => @compileError("ND signal handling unsupported on this architecture"),
 };
 
-const NativeUcontext = switch (builtin.cpu.arch) {
+/// Darwin reaches the register file through a pointer, every other target we
+/// support embeds it. `mcontextOf` hides the difference.
+const NativeUcontext = if (is_darwin) extern struct {
+    _onstack: i32,
+    _sigmask: std.c.sigset_t,
+    _stack: std.c.stack_t,
+    _link: ?*anyopaque,
+    _mcsize: u64,
+    mcontext: *NativeMcontext,
+} else switch (builtin.cpu.arch) {
     .x86_64 => extern struct {
         flags: usize,
         link: ?*anyopaque,
@@ -82,26 +110,31 @@ const NativeUcontext = switch (builtin.cpu.arch) {
     else => @compileError("ND signal handling unsupported on this architecture"),
 };
 
+inline fn mcontextOf(uctx: *NativeUcontext) *NativeMcontext {
+    return if (is_darwin) uctx.mcontext else &uctx.mcontext;
+}
+
 /// Rewrite a saved register context so that sigreturn resumes at `entry` on the
 /// recovery stack whose top is `sp_top`. The frame pointer is zeroed to cleanly
 /// terminate any stack walk; no return address is set because the trampoline is
 /// `noreturn`.
 fn setResumeContext(uctx: *NativeUcontext, entry: usize, sp_top: usize) void {
+    const mc = mcontextOf(uctx);
     switch (builtin.cpu.arch) {
         .x86_64 => {
             // SysV ABI: a callee entered via `call` sees rsp ≡ 8 (mod 16). We
             // jump in directly, so mimic that by under-aligning the 16-aligned
             // top by 8.
-            uctx.mcontext.rip = entry;
-            uctx.mcontext.rsp = (sp_top & ~@as(usize, 15)) - 8;
-            uctx.mcontext.rbp = 0;
+            mc.rip = entry;
+            mc.rsp = (sp_top & ~@as(usize, 15)) - 8;
+            mc.rbp = 0;
         },
         .aarch64 => {
             // AArch64 requires a 16-aligned sp at all times.
-            uctx.mcontext.pc = entry;
-            uctx.mcontext.sp = sp_top & ~@as(usize, 15);
-            uctx.mcontext.lr = 0;
-            uctx.mcontext.x[29] = 0; // frame pointer
+            mc.pc = entry;
+            mc.sp = sp_top & ~@as(usize, 15);
+            mc.lr = 0;
+            mc.x[29] = 0; // frame pointer
         },
         else => unreachable,
     }
@@ -119,7 +152,7 @@ fn isStackOverflow(addr: usize) bool {
 /// SA_SIGINFO fault handler for SIGSEGV/SIGBUS. Runs on the alt stack.
 fn ndSignalHandler(sig: std.posix.SIG, info: *const std.posix.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
     gc.disable_cycle_collection();
-    const addr = @intFromPtr(info.fields.sigfault.addr);
+    const addr = @intFromPtr(if (is_darwin) info.addr else info.fields.sigfault.addr);
     if (ctx != null and isStackOverflow(addr)) {
         pending_nd_msg = "Stack overflowed";
         const uctx: *NativeUcontext = @ptrCast(@alignCast(ctx.?));
