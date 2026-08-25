@@ -65,16 +65,9 @@ pub fn feart_unwind(payload: FatPtr) noreturn {
         crashAndExit(payload);
     }
 
-    // Clear the TLS shadow stack so the heartbeat cannot touch this fiber's
-    // about-to-be-freed locals.
-    shadow_stack.shadow_cursor = null;
-    shadow_stack.shadow_stack = null;
-    heartbeat.tls_tokens_ptr = null;
-    scope_mod.active_scope = null;
-    if (build_options.trace_frames) {
-        shadow_stack.trace_top = null;
-        shadow_stack.trace_stack = null;
-    }
+    // The loop above emptied the shadow stack; this stops the heartbeat
+    // refilling it before the scheduler retires the fiber.
+    fiber.vpf_enabled = false;
     // mem_base points at the OS stack while %rsp is still on the fiber's.
     // switchTo never returns here, so the scheduler ends the switch window.
     gc.beginStackSwitch();

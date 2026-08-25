@@ -32,7 +32,7 @@ pub const StolenTask = struct {
 	/// `parent_tokens_ptr` and refunds through it just before it fulfills the
 	/// obligation that can wake the parent.
 	parent_tokens_ptr: *u32,
-	/// The promoter's TLS `active_scope` at heartbeat time. The thief inherits it
+	/// The promoter's active scope at heartbeat time. The thief inherits it
 	/// through `saved_scope`, so cancel propagates across the fork. Null when the
 	/// promoter had no scope pushed.
 	scope: ?*scope_mod.Scope,

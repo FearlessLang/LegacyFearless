@@ -13,21 +13,18 @@
 //!
 //! ### Lifetime
 //! Scopes live on the GC heap (allocated by `pushScope` in the flow-instance
-//! VT). The TLS `active_scope`, `Fiber.saved_scope`, and `StolenTask.scope`
-//! are all GC-tracked roots, so the Scope stays live for as long as any of
-//! those references it -- even if the terminal that pushed it has already
-//! returned. (Earlier revisions stack-allocated the Scope and relied on the
-//! terminal outliving every reader; that invariant proved fragile under
-//! enqueue/CAS races at low APM thresholds.)
+//! VT). `Fiber.saved_scope` and `StolenTask.scope` are both GC-tracked roots,
+//! so the Scope stays live for as long as either references it -- even if the
+//! terminal that pushed it has already returned. (Earlier revisions
+//! stack-allocated the Scope and relied on the terminal outliving every reader;
+//! that invariant proved fragile under enqueue/CAS races at low APM
+//! thresholds.)
 //!
 //! ### Fiber interaction
-//! `active_scope` is a `threadlocal` just like `tls_tokens_ptr` and
-//! `shadow_stack`, but the authoritative per-fiber state lives in
-//! `Fiber.saved_scope`. `fiber.switchFiber` saves the current TLS into the
-//! outgoing fiber's slot and loads the incoming fiber's slot into TLS. Stolen
-//! tasks capture the promoter's scope into `StolenTask.scope` at promotion
-//! time (heartbeat.zig); the thief fiber's `saved_scope` is seeded from that
-//! before its first switchFiber installs it into TLS.
+//! `Fiber.saved_scope` is the only copy, reached through the fiber header, so a
+//! fiber switch neither saves nor restores it. Stolen tasks capture the
+//! promoter's scope into `StolenTask.scope` at promotion time (heartbeat.zig),
+//! and the thief fiber's `saved_scope` is seeded from that at creation.
 
 const std = @import("std");
 
@@ -57,14 +54,33 @@ pub const Scope = struct {
     }
 };
 
-/// TLS pointer to the current fiber's active scope. Null when no scope has
-/// been pushed on this fiber (e.g. the scheduler fiber, or below any terminal).
-pub threadlocal var active_scope: ?*Scope = null;
+/// The running fiber's active scope. Null when no scope has been pushed on it,
+/// and off a fiber stack.
+///
+/// Resolved through the worker rather than by masking `sp`: pipeline drivers and
+/// accept callbacks reach this from stacks that are not always a fiber's, where
+/// a mask would land on unrelated memory. `tryPromote` uses `cancelledOn`.
+pub fn activeScope() ?*Scope {
+    const f = fiber_mod.currentFiberOrNull() orelse return null;
+    return f.saved_scope;
+}
+
+pub fn setActiveScope(s: ?*Scope) void {
+    const f = fiber_mod.currentFiberOrNull() orelse return;
+    f.saved_scope = s;
+}
 
 /// True if the currently-active scope (or any of its ancestors) is cancelled.
-/// Null scope -> false. Hot path reads this once per chunk in run_chunk; keep
-/// the load order monotonic so the compiler doesn't pessimise the fast-path.
+/// Null scope -> false. Read once per chunk in run_chunk.
 pub fn currentCancelled() bool {
-    if (active_scope) |s| return s.cancelled();
+    if (activeScope()) |s| return s.cancelled();
     return false;
 }
+
+/// As `currentCancelled`, for a caller that already holds the fiber.
+pub inline fn cancelledOn(f: *const fiber_mod.Fiber) bool {
+    if (f.saved_scope) |s| return s.cancelled();
+    return false;
+}
+
+const fiber_mod = @import("fiber.zig");

@@ -24,28 +24,17 @@ const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
 
 // Each terminal pushes a new cancellation scope at entry, chained to the outer scope on the same
-// fiber. Thus all code below it finds a valid scope in TLS. The Scope stays on the GC heap,
-// because a thief task can capture it into TLS or StolenTask.scope and outlive the terminal.
+// fiber. Thus all code below it finds a valid scope. The Scope stays on the GC heap, because a
+// thief task can capture it into StolenTask.scope and outlive the terminal.
 fn pushScope() struct { current: *scope_mod.Scope, prev: ?*scope_mod.Scope } {
-    const prev = scope_mod.active_scope;
+    const prev = scope_mod.activeScope();
     const s = gc.allocator.create(scope_mod.Scope) catch @panic("OOM");
     s.* = scope_mod.Scope.init(prev);
-    scope_mod.active_scope = s;
-    // Mirror into Fiber.saved_scope, to get a GC root through the traced Fiber struct. BDW-GC
-    // does not scan the TLS `active_scope`, and ReleaseSafe DCE can drop the `sc.current`
-    // stack-local of the caller, because only `sc.prev` is read. Without the mirror, the GC can
-    // reclaim a live Scope. This shows as a small-address SEGV in the parent walk of
-    // `Scope.cancelled()`.
-    if (worker_mod.getCurrentWorker()) |w| {
-        if (w.current_fiber) |f| f.saved_scope = s;
-    }
+    scope_mod.setActiveScope(s);
     return .{ .current = s, .prev = prev };
 }
 fn popScope(prev: ?*scope_mod.Scope) void {
-    scope_mod.active_scope = prev;
-    if (worker_mod.getCurrentWorker()) |w| {
-        if (w.current_fiber) |f| f.saved_scope = prev;
-    }
+    scope_mod.setActiveScope(prev);
     // Do not free the Scope. The GC reclaims it when no reference remains.
 }
 

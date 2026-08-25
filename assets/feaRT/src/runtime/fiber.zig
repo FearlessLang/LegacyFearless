@@ -11,11 +11,83 @@ const MAX_SHADOW_DEPTH = shadow_stack.MAX_SHADOW_DEPTH;
 const TraceFrame = trace.TraceFrame;
 const TRACE_CAP = shadow_stack.TRACE_CAP;
 
-const STACK_SIZE = 2 * 1024 * 1024;
+pub const STACK_SIZE = 2 * 1024 * 1024;
 /// One page: 4KB on x86_64, 16KB on macOS ARM.
 const GUARD_SIZE = std.heap.page_size_min;
 
 const gc = @import("gc.zig");
+
+/// Bytes at the base of the mapping holding the `Fiber` itself, page-rounded so
+/// the guard page that follows it is aligned.
+pub const FIBER_REGION = std.mem.alignForward(usize, @sizeOf(Fiber), std.heap.page_size_min);
+
+/// The fiber whose stack the caller is running on.
+///
+/// A fiber's mapping is `STACK_SIZE`-aligned with the `Fiber` at its base, so
+/// masking the stack pointer finds it in two instructions with no memory access
+/// -- and, unlike a thread-local, it cannot go stale when a fiber resumes on a
+/// different OS thread.
+///
+/// Valid only on a mapped fiber stack. Generated Fearless code always is, which
+/// is what lets this skip any validity check. NOT valid on a worker's scheduler
+/// fiber, which runs on the OS thread stack.
+pub inline fn currentFiber() *Fiber {
+	const sp: usize = switch (builtin.cpu.arch) {
+		.x86_64 => asm ("mov %%rsp, %[ret]"
+			: [ret] "=r" (-> usize),
+		),
+		.aarch64 => asm ("mov %[ret], sp"
+			: [ret] "=r" (-> usize),
+		),
+		else => @compileError("Unsupported architecture"),
+	};
+	return @ptrFromInt(sp & ~@as(usize, STACK_SIZE - 1));
+}
+
+/// The fiber the calling thread is running, or null on a worker's scheduler
+/// stack.
+///
+/// For paths that may run off a fiber stack, where masking `sp` would land on
+/// unrelated memory. It costs the thread-local read `currentFiber` exists to
+/// avoid, so keep it off the hot paths. On the recovery stack this deliberately
+/// yields the *faulting* fiber, which is the one an unwind has to walk.
+pub fn currentFiberOrNull() ?*Fiber {
+	const worker = @import("worker.zig").getCurrentWorker() orelse return null;
+	const fiber = worker.current_fiber orelse return null;
+	return if (fiber.hasMappedStack()) fiber else null;
+}
+
+/// One `STACK_SIZE`-aligned, `STACK_SIZE`-sized read/write mapping, which is
+/// what makes `currentFiber`'s mask work. Over-allocate and trim, because mmap
+/// gives no way to ask for alignment.
+pub fn mapAlignedBlock() !usize {
+	const raw = try std.posix.mmap(
+		null,
+		2 * STACK_SIZE,
+		.{ .READ = true, .WRITE = true },
+		.{ .TYPE = .PRIVATE, .ANONYMOUS = true },
+		-1,
+		0,
+	);
+	const raw_addr = @intFromPtr(raw.ptr);
+	const base_addr = std.mem.alignForward(usize, raw_addr, STACK_SIZE);
+
+	if (base_addr > raw_addr) {
+		std.posix.munmap(raw[0 .. base_addr - raw_addr]);
+	}
+	const tail = base_addr + STACK_SIZE;
+	const raw_end = raw_addr + 2 * STACK_SIZE;
+	if (raw_end > tail) {
+		const tail_ptr: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(tail);
+		std.posix.munmap(tail_ptr[0 .. raw_end - tail]);
+	}
+	return base_addr;
+}
+
+pub fn unmapAlignedBlock(base_addr: usize) void {
+	const base: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(base_addr);
+	std.posix.munmap(base[0..STACK_SIZE]);
+}
 
 pub const Fiber = struct {
 	/// Saved stack pointer -- MUST be first field (offset 0) for assembly.
@@ -39,13 +111,16 @@ pub const Fiber = struct {
 	trace_frames: [if (build_options.trace_frames) TRACE_CAP else 0]TraceFrame = undefined,
 	trace_top: usize = 0,
 
-	/// APM tokens. Incremented by `tryPromote`, halved on a promotion attempt,
-	/// swapped in through `tls_tokens_ptr` on a fiber switch.
+	/// APM tokens. Incremented by `tryPromote`, halved on a promotion attempt.
 	tokens: u32 = 0,
 
-	/// The cancellation scope active on this fiber's stack. `switchFiber`
-	/// swaps it with TLS `active_scope`, so push/pop touches TLS only. A thief
-	/// fiber seeds it from the promoter's scope.
+	/// False wherever promotion must be suppressed: a scheduler fiber, a fiber
+	/// past its last frame, and the pseudo-fiber backing the recovery stack.
+	/// `tryPromote` tests this in place of the null thread-local it replaced.
+	vpf_enabled: bool = false,
+
+	/// The cancellation scope active on this fiber's stack. A thief fiber seeds
+	/// it from the promoter's scope.
 	saved_scope: ?*scope_mod.Scope = null,
 
 	/// Set for every fiber whose completion a parent awaits: thieves and
@@ -106,41 +181,40 @@ pub const Fiber = struct {
 	/// TODO: each fiber costs two VMAs (guard page + stack), so `vm.max_map_count`
 	/// caps live fibers at roughly half its value -- about 500K at the usual
 	/// 1048576. Pool the mmap'd stacks if that limit is ever reached.
+	///
+	/// The mapping is `STACK_SIZE`-aligned and laid out base-upwards as the
+	/// `Fiber`, a guard page, then the stack growing down from the top. That
+	/// alignment is what `currentFiber` masks for, and the guard sits between the
+	/// two so an overflow faults instead of overwriting the header.
 	pub fn create(
 		entry_fn: *const fn (*Fiber) void,
 		context: ?*anyopaque,
 	) !*Fiber {
-		const total_size = GUARD_SIZE + STACK_SIZE;
-		const base = try std.posix.mmap(
-			null,
-			total_size,
-			.{ .READ = true, .WRITE = true },
-			.{ .TYPE = .PRIVATE, .ANONYMOUS = true },
-			-1,
-			0,
-		);
+		const base_addr = try mapAlignedBlock();
 
-		// Guard page at the lowest address.
-		const guard: *align(std.heap.page_size_min) anyopaque = @ptrCast(@alignCast(base.ptr));
+		const guard: *align(std.heap.page_size_min) anyopaque = @ptrFromInt(base_addr + FIBER_REGION);
 		const mp_rc = std.posix.system.mprotect(guard, GUARD_SIZE, .{});
 		if (mp_rc != 0) return error.OutOfMemory;
 
-		const stack_bottom: [*]align(std.heap.page_size_min) u8 = @alignCast(base.ptr + GUARD_SIZE);
+		const stack_bottom: [*]align(std.heap.page_size_min) u8 =
+			@ptrFromInt(base_addr + FIBER_REGION + GUARD_SIZE);
 
-		const fiber = try gc.allocator.create(Fiber);
+		const fiber: *Fiber = @ptrFromInt(base_addr);
 		fiber.* = .{
 			.sp = 0,
 			.stack_bottom = stack_bottom,
-			.stack_size = STACK_SIZE,
+			.stack_size = STACK_SIZE - FIBER_REGION - GUARD_SIZE,
 			.entry_fn = entry_fn,
 			.context = context,
 			.state = .Fresh,
+			.vpf_enabled = true,
 		};
 
 		// The initial stack makes switchTo land at fiber_entry with the fiber
 		// pointer in the callee-saved register fiber_entry reads.
-		const stack_top_addr = @intFromPtr(stack_bottom) + STACK_SIZE;
-		const aligned_top = stack_top_addr & ~@as(usize, 15);
+		// Never equal to `base_addr + STACK_SIZE` once slots are reserved, and it
+		// only decreases from there, so a live `sp` always masks back to `base_addr`.
+		const aligned_top = (base_addr + STACK_SIZE) & ~@as(usize, 15);
 
 		switch (builtin.cpu.arch) {
 			.x86_64 => {
@@ -193,69 +267,29 @@ pub const Fiber = struct {
 		return fiber;
 	}
 
+	/// Nothing may touch `self` afterwards: the struct lives in the mapping this
+	/// unmaps.
 	pub fn destroy(self: *Fiber) void {
-		// `recycleDestroy` zeroes the struct, so a second destroy arrives with
-		// no mapped stack. Catching it here beats an underflow in the munmap
-		// length. Also catches a destroy of a worker's scheduler fiber.
+		// Catches a destroy of a worker's scheduler fiber, which owns no mapping.
 		std.debug.assert(self.hasMappedStack());
 
 		// Strictly before the munmap: the mark hook scans whatever a live slot
 		// points at, and an unmapped stack faults.
 		gc.unregisterFiber(self.registry_slot);
 
-		const base: [*]align(std.heap.page_size_min) u8 = @ptrFromInt(@intFromPtr(self.stack_bottom) - GUARD_SIZE);
-		std.posix.munmap(@alignCast(base[0 .. GUARD_SIZE + self.stack_size]));
-
-		// The GC is for cycle collection only, never a fallback for ordinary
-		// frees.
-		gc.recycleDestroy(Fiber, self, .fiber_destroy);
+		unmapAlignedBlock(@intFromPtr(self));
 	}
 };
 
 extern fn fiber_entry() void;
 pub extern fn switchTo(from: *Fiber, to: *Fiber) void;
 
-/// Switch fibers, swapping the thread-local shadow stack pointers and updating
-/// the GC's stack bounds.
+/// Switch fibers, updating the GC's stack bounds.
+///
+/// The shadow stack, tokens and scope live in the incoming fiber's header, so
+/// they arrive with the stack pointer. There is nothing to swap and no window in
+/// which the heartbeat could see a mismatched pair.
 pub fn switchFiber(from: *Fiber, to: *Fiber) void {
-	// Snapshot the outgoing fiber's scope TLS so it survives its next resume.
-	from.saved_scope = scope_mod.active_scope;
-
-	// Cursor first: the heartbeat handler checks it before shadow_stack, so a
-	// null cursor makes it return early during the transition.
-	shadow_stack.shadow_cursor = null;
-	heartbeat.tls_tokens_ptr = null;
-	// The handler runs on this thread and so sees program order; a compiler
-	// barrier against reordering the null write is enough.
-	asm volatile ("" ::: .{ .memory = true });
-
-	if (to.hasMappedStack()) {
-		shadow_stack.shadow_stack = &to.shadow_frames;
-		// shadow_stack must land before the cursor becomes non-null, so the
-		// heartbeat never sees a mismatched pair.
-		asm volatile ("" ::: .{ .memory = true });
-		shadow_stack.shadow_cursor = &to.shadow_cursor;
-		heartbeat.tls_tokens_ptr = &to.tokens;
-		scope_mod.active_scope = to.saved_scope;
-	} else {
-		shadow_stack.shadow_stack = null;
-		scope_mod.active_scope = null;
-	}
-
-	// Same null-first ordering as the shadow stack. Comptime-elides when
-	// trace_frames is off.
-	if (build_options.trace_frames) {
-		shadow_stack.trace_top = null;
-		asm volatile ("" ::: .{ .memory = true });
-		if (to.hasMappedStack()) {
-			shadow_stack.trace_stack = &to.trace_frames;
-			asm volatile ("" ::: .{ .memory = true });
-			shadow_stack.trace_top = &to.trace_top;
-		} else {
-			shadow_stack.trace_stack = null;
-		}
-	}
-
 	// mem_base and the stack pointer disagree from the setStackBottom below
 	// until the landing side's endStackSwitch, so block cycle collection.
 	gc.beginStackSwitch();
@@ -283,20 +317,10 @@ export fn fiber_trampoline(fiber: *Fiber) callconv(.c) noreturn {
 		entry(fiber);
 	}
 	fiber.state = .Done;
+	fiber.vpf_enabled = false;
 
 	const worker_mod = @import("worker.zig");
 	const worker = worker_mod.getCurrentWorker().?;
-
-	// Otherwise the heartbeat could read stale shadow frames whose locals point
-	// into this fiber's about-to-be-unmapped stack.
-	shadow_stack.shadow_cursor = null;
-	shadow_stack.shadow_stack = null;
-	heartbeat.tls_tokens_ptr = null;
-	scope_mod.active_scope = null;
-	if (build_options.trace_frames) {
-		shadow_stack.trace_top = null;
-		shadow_stack.trace_stack = null;
-	}
 
 	// mem_base points at the OS stack while the stack pointer is still on this
 	// fiber's; the scheduler ends the window after its switchFiber returns.

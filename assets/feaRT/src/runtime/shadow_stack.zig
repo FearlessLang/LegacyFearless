@@ -14,6 +14,7 @@ const build_options = @import("build_options");
 const gc = @import("gc.zig");
 const trace = @import("./errors/trace.zig");
 const op_counters = @import("op_counters.zig");
+const fiber_mod = @import("fiber.zig");
 
 pub const LocalsRetainHook = *const fn (*anyopaque, *anyopaque) void;
 pub const LocalsDropHook = *const fn (*anyopaque) void;
@@ -35,10 +36,8 @@ pub const ShadowFrame = struct {
 	task: std.atomic.Value(?*worker_mod.StolenTask) = std.atomic.Value(?*worker_mod.StolenTask).init(null),
 };
 
-pub threadlocal var shadow_stack: ?*[MAX_SHADOW_DEPTH]ShadowFrame = null;
-
-/// Both indices in one struct, so push, pop and the heartbeat reach them with a
-/// single thread-local read.
+/// Both indices in one struct, so push, pop and the heartbeat reach them off a
+/// single fiber pointer.
 pub const ShadowCursor = struct {
 	top: usize = 0,
 
@@ -49,34 +48,29 @@ pub const ShadowCursor = struct {
 	lowest_unpromoted: usize = 0,
 };
 
-pub threadlocal var shadow_cursor: ?*ShadowCursor = null;
-
 pub const TRACE_CAP = 256;
 
-/// Null when `trace_frames` is off. See [errors/trace.zig].
-pub threadlocal var trace_stack: ?*[TRACE_CAP]trace.TraceFrame = null;
-
-/// The true depth, so a ring-buffer overflow is reportable.
-pub threadlocal var trace_top: ?*usize = null;
-
-/// Fresh reads, for the reason `getCurrentWorker` gives.
-pub noinline fn getShadowStack() ?*[MAX_SHADOW_DEPTH]ShadowFrame {
-	const ss = shadow_stack;
-	asm volatile ("" ::: .{ .memory = true });
-	return ss;
+/// Null off a fiber stack.
+///
+/// Only `pushFrame` and `popAndClaim` mask the stack pointer directly, because
+/// only they are emitted per call and are always reached from generated code.
+/// Everything else resolves the fiber through the worker: a mask on a stack that
+/// is not a fiber's lands on unrelated memory rather than reading as absent.
+pub fn getShadowStack() ?*[MAX_SHADOW_DEPTH]ShadowFrame {
+	const f = fiber_mod.currentFiberOrNull() orelse return null;
+	return &f.shadow_frames;
 }
 
-pub noinline fn getShadowCursor() ?*ShadowCursor {
-	const sc = shadow_cursor;
-	asm volatile ("" ::: .{ .memory = true });
-	return sc;
+pub fn getShadowCursor() ?*ShadowCursor {
+	const f = fiber_mod.currentFiberOrNull() orelse return null;
+	return &f.shadow_cursor;
 }
 
 /// Null when the shadow stack is full.
 pub inline fn pushFrame(frame: ShadowFrame) ?usize {
-	asm volatile ("" ::: .{ .memory = true });
-	const ss = getShadowStack().?;
-	const cursor = getShadowCursor().?;
+	const f = fiber_mod.currentFiber();
+	const ss = &f.shadow_frames;
+	const cursor = &f.shadow_cursor;
 	const idx = cursor.top;
 	if (idx >= MAX_SHADOW_DEPTH) return null;
 	op_counters.bump(.vpf_frame_push);
@@ -89,9 +83,9 @@ pub inline fn pushFrame(frame: ShadowFrame) ?usize {
 /// Null when this fiber claimed the frame, or the join obligation when a thief
 /// had already taken it.
 pub inline fn popAndClaim(frame_idx: usize) ?*JoinObligation {
-	const ss = getShadowStack().?;
-	const cursor = getShadowCursor().?;
-	const frame = &ss[frame_idx];
+	const f = fiber_mod.currentFiber();
+	const cursor = &f.shadow_cursor;
+	const frame = &f.shadow_frames[frame_idx];
 	const prev = frame.join_obligation.cmpxchgStrong(null, CLAIMED, .acquire, .acquire);
 	cursor.top -= 1;
 	// The popped frame leaves the stack CLAIMED either way, so the prefix
@@ -118,8 +112,7 @@ pub fn freeObligation(obl: *JoinObligation) void {
 /// false return, so a lost claim leaves the task alive; a won claim leaves it in
 /// its queue for the dequeuing worker to retire.
 pub fn reclaimPromotion(frame_idx: usize, obligation: *JoinObligation) bool {
-	const ss = getShadowStack().?;
-	const frame = &ss[frame_idx];
+	const frame = &getShadowStack().?[frame_idx];
 	const task = frame.task.load(.acquire) orelse return false;
 	if (task.claimed.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return false;
 
@@ -134,24 +127,28 @@ pub fn reclaimPromotion(frame_idx: usize, obligation: *JoinObligation) bool {
 }
 
 pub inline fn fulfillChildObligation(frame_idx: usize, value: FatPtr) void {
-	const ss = getShadowStack().?;
-	const frame = &ss[frame_idx];
+	const frame = &getShadowStack().?[frame_idx];
 	const child_obl = frame.child_obligation.load(.acquire).?;
 	const boxed = value.box_transient();
 	child_obl.fulfill(boxed);
 }
 
-/// Fresh reads, for the reason `getCurrentWorker` gives.
-pub noinline fn getStackTrace() ?*[TRACE_CAP]trace.TraceFrame {
-	const ts = trace_stack;
-	asm volatile ("" ::: .{ .memory = true });
-	return ts;
+/// Null off a fiber stack, and always null when `trace_frames` is off.
+pub fn getStackTrace() ?*[TRACE_CAP]trace.TraceFrame {
+	if (build_options.trace_frames) {
+		const f = fiber_mod.currentFiberOrNull() orelse return null;
+		return &f.trace_frames;
+	}
+	return null;
 }
 
-pub noinline fn getTraceTop() ?*usize {
-	const tt = trace_top;
-	asm volatile ("" ::: .{ .memory = true });
-	return tt;
+/// The true depth, so a ring-buffer overflow is reportable.
+pub fn getTraceTop() ?*usize {
+	if (build_options.trace_frames) {
+		const f = fiber_mod.currentFiberOrNull() orelse return null;
+		return &f.trace_top;
+	}
+	return null;
 }
 
 pub const tracePush = trace.tracePush;

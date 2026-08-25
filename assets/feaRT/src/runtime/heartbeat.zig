@@ -13,6 +13,8 @@ const scope_mod = @import("scope.zig");
 const op_counters = @import("op_counters.zig");
 const build_options = @import("build_options");
 
+const fiber_mod = @import("fiber.zig");
+const Fiber = fiber_mod.Fiber;
 const ShadowFrame = shadow_stack_mod.ShadowFrame;
 const Worker = worker_mod.Worker;
 const JoinObligation = @import("sync/join_obligation.zig").JoinObligation;
@@ -20,10 +22,6 @@ const StolenTask = worker_mod.StolenTask;
 
 pub const TOKENS_THRESHOLD: u32 = @import("build_options").tokens_threshold;
 const ARE_HEARTBEATS_ENABLED = @import("build_options").enable_vpf;
-
-/// The running fiber's tokens counter, swapped by `fiber.switchFiber` with the
-/// shadow stack thread-locals. Null when no fiber runs on this thread.
-pub threadlocal var tls_tokens_ptr: ?*u32 = null;
 
 /// Runs at the top of every stack frame, so once per reduction step. Each step
 /// grants one token. A promotion costs `TOKENS_THRESHOLD` tokens, which are
@@ -36,22 +34,26 @@ pub threadlocal var tls_tokens_ptr: ?*u32 = null;
 /// Section 4 of Automatic Parallelism Management, Westrick et al.
 pub inline fn tryPromote() void {
     comptime if (!ARE_HEARTBEATS_ENABLED) return;
-    const tokens_ptr = tls_tokens_ptr orelse return;
+    // Generated code always runs on a fiber stack, so the header is always
+    // there to be found; the flag is what suppresses promotion.
+    const fiber = fiber_mod.currentFiber();
+    if (!fiber.vpf_enabled) return;
+    const tokens_ptr = &fiber.tokens;
     if (tokens_ptr.* >= TOKENS_THRESHOLD) {
         // Both tests are inline and reject without a call, which is what keeps
         // a miss cheap; nothing else may run on the healthy path. Promoting
         // into a cancelled subtree only burns a thief fiber on work that is
         // about to abort.
-        if (hasPromotableFrame() and !scope_mod.currentCancelled()) {
+        if (hasPromotableFrame(fiber) and !scope_mod.cancelledOn(fiber)) {
             const remainder = (tokens_ptr.* - TOKENS_THRESHOLD) / 2;
-            if (doPromote(remainder)) {
+            if (doPromote(fiber, remainder)) {
                 op_counters.bump(.promotion);
                 tokens_ptr.* = remainder;
             }
         } else {
             // doPromote records its own reason.
             if (op_counters.ENABLED) {
-                if (!hasPromotableFrame()) {
+                if (!hasPromotableFrame(fiber)) {
                     op_counters.bump(.promotion_miss_no_frame);
                 } else {
                     op_counters.bump(.promotion_miss_cancelled);
@@ -65,14 +67,9 @@ pub inline fn tryPromote() void {
     tokens_ptr.* += 1;
 }
 
-/// True when the running fiber has an un-promoted shadow frame.
-///
-/// Reads the thread-local inline, which is safe because `tryPromote` sits at the
-/// top of a generated method: there is no fiber-switch point across which the
-/// compiler could cache a stale TLS base. The `noinline` accessor would
-/// reintroduce the call this check exists to avoid.
-inline fn hasPromotableFrame() bool {
-    const cursor = shadow_stack_mod.shadow_cursor orelse return false;
+/// True when the fiber has an un-promoted shadow frame.
+inline fn hasPromotableFrame(fiber: *const Fiber) bool {
+    const cursor = &fiber.shadow_cursor;
     return cursor.lowest_unpromoted < cursor.top;
 }
 
@@ -91,7 +88,7 @@ noinline fn drainMergeQueueOnly() void {
 /// Promote the oldest un-promoted frame of the running fiber. True only when the
 /// promotion published its join obligation, which is what makes it worth
 /// charging for; every early return leaves the work to the parent.
-noinline fn doPromote(child_initial_tokens: u32) bool {
+noinline fn doPromote(fiber: *Fiber, child_initial_tokens: u32) bool {
     const worker = worker_mod.getCurrentWorker() orelse {
         op_counters.bump(.promotion_miss_no_fiber);
         return false;
@@ -99,10 +96,7 @@ noinline fn doPromote(child_initial_tokens: u32) bool {
 
     worker.drainMergeQueue();
 
-    const cursor = shadow_stack_mod.getShadowCursor() orelse {
-        op_counters.bump(.promotion_miss_no_fiber);
-        return false;
-    };
+    const cursor = &fiber.shadow_cursor;
     const frame_idx = cursor.lowest_unpromoted;
 
     log.trace_scheduling(.hb_entry, worker.id, cursor.top, @intFromPtr(worker.current_fiber));
@@ -113,10 +107,7 @@ noinline fn doPromote(child_initial_tokens: u32) bool {
         return false;
     }
 
-    const frames = shadow_stack_mod.getShadowStack() orelse {
-        op_counters.bump(.promotion_miss_no_fiber);
-        return false;
-    };
+    const frames = &fiber.shadow_frames;
 
     const obligation = worker.allocObligation() orelse {
         op_counters.bump(.promotion_miss_pool_empty);
@@ -143,17 +134,13 @@ noinline fn doPromote(child_initial_tokens: u32) bool {
     task.thief_fn = frame.thief_fn;
     task.obligation = obligation;
     task.initial_tokens = child_initial_tokens;
-    // Non-null: tryPromote only calls doPromote when it is, and no fiber switch
-    // happens in between.
-    task.parent_tokens_ptr = tls_tokens_ptr.?;
-    task.scope = scope_mod.active_scope;
+    task.parent_tokens_ptr = &fiber.tokens;
+    task.scope = fiber.saved_scope;
     // The thief fiber shows this call chain beneath a fiber boundary if it
-    // crashes. doPromote runs on the promoter, so its trace TLS is live here.
+    // crashes.
     if (build_options.trace_frames) {
-        const trace_top_ptr = shadow_stack_mod.getTraceTop().?;
-        const trace_frames = shadow_stack_mod.getStackTrace().?;
-        @memcpy(task.trace_frames[0..], trace_frames[0..]);
-        task.trace_top = trace_top_ptr.*;
+        @memcpy(task.trace_frames[0..], fiber.trace_frames[0..]);
+        task.trace_top = fiber.trace_top;
     }
 
     const child_obl = worker.allocObligation() orelse {

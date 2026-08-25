@@ -390,32 +390,43 @@ const POLYMORPHIC_INLINE_CACHE_SIZE = 4;
 /// A reader gets the key back with one exclusive-or. If a write of one thread ever interleaves
 /// with a write of another, the key a reader computes belongs to neither write and does not
 /// match its receiver, so the entry reads as a miss. This is what lets the two words stay
-/// correct if the cache becomes shared between threads: no reader can pair the key of one
+/// correct with the cache shared between threads: no reader can pair the key of one
 /// target with a different target.
 const MethodCacheEntry = struct {
-	target: usize = 0,
-	key_mix: usize = 0,
+	target: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+	key_mix: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
 
 	/// A target address is never zero, so zero marks an entry no write has filled.
-	inline fn isEmpty(self: MethodCacheEntry) bool {
-		return self.target == 0;
+	inline fn isEmpty(self: *const MethodCacheEntry) bool {
+		return self.target.load(.acquire) == 0;
 	}
 
-	inline fn targetFor(self: MethodCacheEntry, vt: *const VTable) ?*const anyopaque {
-		if (self.target == 0) { return null; }
-		if ((self.key_mix ^ self.target) != @intFromPtr(vt)) { return null; }
-		return @ptrFromInt(self.target);
+	/// Each word is read exactly once, so the compiler cannot re-load `target`
+	/// between the check and the jump. The acquire pairs with `publish`'s
+	/// release: a non-zero target implies its matching `key_mix` is visible.
+	inline fn targetFor(self: *const MethodCacheEntry, vt: *const VTable) ?*const anyopaque {
+		const t = self.target.load(.acquire);
+		if (t == 0) { return null; }
+		const k = self.key_mix.load(.monotonic);
+		if ((k ^ t) != @intFromPtr(vt)) { return null; }
+		return @ptrFromInt(t);
 	}
 
-	inline fn make(vt: *const VTable, target: *const anyopaque) MethodCacheEntry {
+	/// Invalidate, fill, then revalidate, so every state a concurrent reader can
+	/// observe is either the old entry or a clean miss.
+	inline fn publish(self: *MethodCacheEntry, vt: *const VTable, target: *const anyopaque) void {
 		const t = @intFromPtr(target);
-		return .{ .target = t, .key_mix = @intFromPtr(vt) ^ t };
+		self.target.store(0, .monotonic);
+		self.key_mix.store(@intFromPtr(vt) ^ t, .monotonic);
+		self.target.store(t, .release);
 	}
 };
 
 const InlineCache = struct {
 	entries: [POLYMORPHIC_INLINE_CACHE_SIZE]MethodCacheEntry = [_]MethodCacheEntry{.{}} ** POLYMORPHIC_INLINE_CACHE_SIZE,
-	next_index: u8 = 0,
+	/// Round-robin replacement cursor, so a miss touches one entry rather than
+	/// shifting all of them.
+	next_index: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
 };
 
 /// Slow path: a linear scan of the VTable.
@@ -451,12 +462,10 @@ fn resolve_method_slow(receiver: FatPtr, hash: u64, ic: *InlineCache) *const any
 
 	const target = lookup_method(receiver.vt, hash) orelse dispatch_failed(receiver, hash);
 
-	// Shift the entries down and put the resolved target at the top.
-	var i: u8 = POLYMORPHIC_INLINE_CACHE_SIZE - 1;
-	while (i > 0) : (i -= 1) {
-		ic.entries[i] = ic.entries[i - 1];
-	}
-	ic.entries[0] = MethodCacheEntry.make(receiver.vt, target);
+	// Fill the next slot in rotation. Entries fill 0 upwards, so the scan above
+	// may still stop at the first empty one.
+	const slot = ic.next_index.fetchAdd(1, .monotonic) % POLYMORPHIC_INLINE_CACHE_SIZE;
+	ic.entries[slot].publish(receiver.vt, target);
 
 	return target;
 }
@@ -506,7 +515,9 @@ pub fn GenDispatchCacheType(comptime tag: MethodDispatchUniquenessTag) type {
 		/// Makes the cache type of each call site unique.
 		const uniqueness_tag = tag;
 
-		threadlocal var ic: InlineCache = .{};
+		/// Shared across threads: the entry representation tolerates it (see
+		/// `MethodCacheEntry`), and one warm cache beats one per thread.
+		var ic: InlineCache = .{};
 	};
 }
 

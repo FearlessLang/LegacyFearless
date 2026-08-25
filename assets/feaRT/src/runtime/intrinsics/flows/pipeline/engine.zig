@@ -113,7 +113,7 @@ pub fn run(flow: *types.FeartFlow, ctx: *anyopaque, accept: exec.AcceptFn) void 
     // just shortens in-flight closure work (and is what `.any`'s accept fn
     // relies on).
     last.closeConsumer();
-    if (scope_mod.active_scope) |s| s.request();
+    if (scope_mod.activeScope()) |s| s.request();
     for (sup_obls) |*obl| {
         const r = completion.wait(obl);
         if (error_rt.tagOf(r) == .none) {

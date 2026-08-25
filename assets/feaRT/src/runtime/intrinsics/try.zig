@@ -76,7 +76,7 @@ pub fn runInChildFiber(f: FatPtr, data: ?FatPtr) FatPtr {
     var ctx = ChildCtx{ .f = f, .data = data };
     const child = Fiber.create(&childEntry, &ctx) catch @panic("OOM creating Try fiber");
     child.root_obligation = obl;
-    child.saved_scope = scope_mod.active_scope;
+    child.saved_scope = scope_mod.activeScope();
     child.parent_tokens_ptr = &parent_fiber.tokens;
     if (build_options.trace_frames) {
         trace.inheritStackTrace(child, &parent_fiber.trace_frames, parent_fiber.trace_top);

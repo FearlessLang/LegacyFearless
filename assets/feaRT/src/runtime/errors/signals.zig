@@ -18,22 +18,25 @@ const std = @import("std");
 const builtin = @import("builtin");
 const worker_mod = @import("../worker.zig");
 const gc = @import("../gc.zig");
-const heartbeat = @import("../heartbeat.zig");
 const error_rt = @import("../error.zig");
 const unwind = @import("unwind.zig");
+const fiber_mod = @import("../fiber.zig");
+const Fiber = fiber_mod.Fiber;
 
 const ALT_STACK_SIZE = 64 * 1024;
-const RECOVERY_STACK_SIZE = 512 * 1024;
 
-/// Per-thread alternate stack the kernel switches to when delivering a fault
-/// signal (the faulting fiber's own stack is exhausted).
-threadlocal var alt_stack_buf: [ALT_STACK_SIZE]u8 align(16) = undefined;
-
-/// Per-thread recovery stack the rewritten signal context resumes onto. Zeroed
-/// so it carries no stale conservative-GC roots, and registered as a GC root
-/// range (see `initThreadSignalStacks`) so the ND `Info` the trampoline builds
-/// can't be swept by a cycle collection mid-construction.
-threadlocal var recovery_stack_buf: [RECOVERY_STACK_SIZE]u8 align(16) = [_]u8{0} ** RECOVERY_STACK_SIZE;
+/// Per-thread block holding the signal alt stack and the recovery stack, laid
+/// out base-upwards as a pseudo-`Fiber`, the alt stack, then the recovery stack
+/// to the top.
+///
+/// It is a fiber-shaped mapping because `ndRecoveryTrampoline` runs generated
+/// code, and generated code masks its stack pointer to find a `Fiber`. The
+/// header's `vpf_enabled` is false, which is what suppresses promotion while the
+/// faulting fiber is being unwound.
+///
+/// Whole-block GC roots, so the ND `Info` the trampoline builds cannot be swept
+/// by a cycle collection mid-construction.
+threadlocal var signal_block: usize = 0;
 threadlocal var recovery_stack_top: usize = 0;
 
 /// Message handed from the signal handler to the recovery trampoline.
@@ -200,11 +203,10 @@ fn resetToDefault(sig: std.posix.SIG) void {
 
 /// Resumed (via sigreturn) on the recovery stack after a stack-overflow fault.
 /// Runs on a clean stack with signals unmasked, so building the ND `Info` and
-/// unwinding the faulting fiber is ordinary code. `tls_tokens_ptr` is cleared
-/// first: the shadow-stack/scope TLS still point at the dying fiber, so building
-/// the `Info` (which runs generated code) must not let the heartbeat promote it.
+/// unwinding the faulting fiber is ordinary code. Building the `Info` runs
+/// generated code, which finds the pseudo-fiber at the base of the signal block
+/// and so leaves the dying fiber alone.
 fn ndRecoveryTrampoline() callconv(.c) noreturn {
-    heartbeat.tls_tokens_ptr = null;
     unwind.feart_unwind(error_rt.makeNd(unwind.buildInfo(pending_nd_msg)));
 }
 
@@ -227,21 +229,44 @@ pub fn installNdHandlers() void {
 /// registered as a GC root range so an `Info` built on it during recovery isn't
 /// swept by a concurrent cycle collection.
 pub fn initThreadSignalStacks() void {
+    if (signal_block != 0) return;
+
+    const base = fiber_mod.mapAlignedBlock() catch @panic("OOM mapping signal stacks");
+    signal_block = base;
+
+    const header: *Fiber = @ptrFromInt(base);
+    const alt_bottom = base + fiber_mod.FIBER_REGION;
+    const recovery_bottom = alt_bottom + ALT_STACK_SIZE;
+    // Short of the very top, so a live stack pointer never masks to the block
+    // that follows this one.
+    recovery_stack_top = base + fiber_mod.STACK_SIZE - 64;
+
+    header.* = .{
+        .sp = 0,
+        .stack_bottom = @ptrFromInt(recovery_bottom),
+        .stack_size = recovery_stack_top - recovery_bottom,
+        .entry_fn = null,
+        .context = null,
+        .state = .Running,
+    };
+
     var ss = std.posix.stack_t{
-        .sp = @ptrCast(&alt_stack_buf),
+        .sp = @ptrFromInt(alt_bottom),
         .flags = 0,
         .size = ALT_STACK_SIZE,
     };
     std.posix.sigaltstack(&ss, null) catch {};
 
-    const base: [*]u8 = @ptrCast(&recovery_stack_buf);
-    recovery_stack_top = @intFromPtr(base) + RECOVERY_STACK_SIZE;
-    gc.addRoots(@ptrCast(base), @ptrCast(base + RECOVERY_STACK_SIZE));
+    gc.addRoots(@ptrFromInt(base), @ptrFromInt(base + fiber_mod.STACK_SIZE));
 }
 
-/// Undo `initThreadSignalStacks`' root registration before a worker thread's
-/// TLS is torn down, so a later collection never scans freed memory.
+/// Undo `initThreadSignalStacks` before a worker thread's TLS is torn down, so a
+/// later collection never scans freed memory.
 pub fn deinitThreadSignalStacks() void {
-    const base: [*]u8 = @ptrCast(&recovery_stack_buf);
-    gc.removeRoots(@ptrCast(base), @ptrCast(base + RECOVERY_STACK_SIZE));
+    const base = signal_block;
+    if (base == 0) return;
+    signal_block = 0;
+    recovery_stack_top = 0;
+    gc.removeRoots(@ptrFromInt(base), @ptrFromInt(base + fiber_mod.STACK_SIZE));
+    fiber_mod.unmapAlignedBlock(base);
 }

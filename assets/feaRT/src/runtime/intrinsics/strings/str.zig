@@ -333,8 +333,10 @@ pub fn str_graphemes(self: FatPtr) callconv(.c) FatPtr {
 /// Join a `Flow[Str]` using the receiver as the separator. Materialises the flow
 /// into a List, then concatenates with the separator between elements.
 pub fn str_join(separator: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
+    // `separator` is the receiver, which this frame does not own. `flow` arrived
+    // as an owned argument and `list` is a fresh result, so both are released.
+    defer flow.rc_decrement();
     const list = objs.call(flow, comptime h("mut .list/0"), .{}, @src());
-    defer separator.rc_decrement();
     defer list.rc_decrement();
 
     const al = list_intrinsics.deref_list(list);

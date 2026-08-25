@@ -153,7 +153,7 @@ fn unordered_find_map_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
         return true;
     }
     ctx.found = exec.extract_some(result);
-    if (scope_mod.active_scope) |s| s.request();
+    if (scope_mod.activeScope()) |s| s.request();
     return false;
 }
 pub fn drive_unordered_find_map(flow: *types.FeartFlow, mapper: FatPtr) FatPtr {

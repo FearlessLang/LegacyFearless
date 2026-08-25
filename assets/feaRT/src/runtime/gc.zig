@@ -371,6 +371,13 @@ fn pushFiberStacks() callconv(.c) void {
 		for (&s.slots) |*slot| {
 			const raw = slot.load(.acquire) orelse continue;
 			const fiber: *Fiber = @ptrCast(@alignCast(raw));
+
+			// The struct sits at the base of its own mapping rather than in the
+			// GC heap, so nothing else traces the shadow frames, the scope or the
+			// obligation it holds.
+			const header = @intFromPtr(fiber);
+			libgc.GC_push_all_eager(@ptrFromInt(header), @ptrFromInt(header + @sizeOf(Fiber)));
+
 			const sp = fiber.sp;
 			const bottom = @intFromPtr(fiber.stack_bottom);
 			const top = bottom + fiber.stack_size;
