@@ -159,6 +159,7 @@ pub inline fn bitwise_or(a: FatPtr, b: FatPtr) FatPtr {
 /// `read .hash(hasher)` -- feed this Int into the hasher and hand the hasher
 /// back, so `Hasher.hash(x)`'s `x.hash(this)` body still yields a `mut Hasher`.
 pub fn hash(a: FatPtr, hasher: FatPtr) FatPtr {
+	defer hasher.rc_decrement();
 	return objs.call(hasher, comptime objs.hash_signature("mut .int/1"), .{a}, @src());
 }
 

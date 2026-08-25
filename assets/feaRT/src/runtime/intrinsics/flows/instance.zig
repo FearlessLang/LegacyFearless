@@ -68,7 +68,6 @@ fn make_ctx_cell(ctx: FatPtr) u64 {
 }
 
 fn flow_map(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
         .kind = .map,
         .closure = f,
@@ -77,7 +76,6 @@ fn flow_map(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     }));
 }
 fn flow_map2(self: FatPtr, ctx: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
         .kind = .map_ctx,
         .closure = f,
@@ -86,7 +84,6 @@ fn flow_map2(self: FatPtr, ctx: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     }));
 }
 fn flow_filter(self: FatPtr, pred: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
         .kind = .filter,
         .closure = pred,
@@ -95,7 +92,6 @@ fn flow_filter(self: FatPtr, pred: FatPtr) callconv(.c) FatPtr {
     }));
 }
 fn flow_flat_map(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
         .kind = .flat_map,
         .closure = f,
@@ -104,7 +100,6 @@ fn flow_flat_map(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     }));
 }
 fn flow_peek(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
         .kind = .peek,
         .closure = f,
@@ -113,7 +108,6 @@ fn flow_peek(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     }));
 }
 fn flow_peek2(self: FatPtr, ctx: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
         .kind = .peek_ctx,
         .closure = f,
@@ -122,7 +116,6 @@ fn flow_peek2(self: FatPtr, ctx: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     }));
 }
 fn flow_map_filter(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
         .kind = .map_filter,
         .closure = f,
@@ -131,7 +124,6 @@ fn flow_map_filter(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     }));
 }
 fn flow_scan(self: FatPtr, initial: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
         .kind = .scan,
         .closure = f,
@@ -140,7 +132,6 @@ fn flow_scan(self: FatPtr, initial: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     }));
 }
 fn flow_limit(self: FatPtr, n: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const new_flow = object.clone_with_op(object.deref_flow(self), .{
         .kind = .limit,
         .closure = undefined,
@@ -151,7 +142,6 @@ fn flow_limit(self: FatPtr, n: FatPtr) callconv(.c) FatPtr {
     return object.make_flow_fp(&VT_Flow, new_flow);
 }
 fn flow_actor(self: FatPtr, state_fp: FatPtr, callback: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
         .kind = .actor,
         .closure = undefined,
@@ -163,7 +153,6 @@ fn flow_actor_mut(self: FatPtr, state_fp: FatPtr, callback: FatPtr) callconv(.c)
     return flow_actor(self, state_fp, callback);
 }
 fn flow_assume_finite(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return object.make_flow_fp(&VT_Flow, object.clone_with_finiteness(object.deref_flow(self), true));
 }
 
@@ -177,41 +166,42 @@ fn flow_assume_finite(self: FatPtr) callconv(.c) FatPtr {
 fn flow_fold(self: FatPtr, initial: FatPtr, combine: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
+    defer initial.rc_decrement();
     const seed = objs.call(initial, h("mut #/0"), .{}, @src());
-    return pbf._FeartDriver_0__ZdotdriveReduce_3_mut_Zfun(self, seed, combine, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveReduce_3_mut_Zfun(self.share(), seed, combine, driver_singleton());
 }
 fn flow_first(self: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveFirst_1_mut_Zfun(self, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveFirst_1_mut_Zfun(self.share(), driver_singleton());
 }
 fn flow_last(self: FatPtr) callconv(.c) FatPtr {
     if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveLast_1_mut_Zfun(self, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveLast_1_mut_Zfun(self.share(), driver_singleton());
 }
 fn flow_count(self: FatPtr) callconv(.c) FatPtr {
     if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveCount_1_mut_Zfun(self, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveCount_1_mut_Zfun(self.share(), driver_singleton());
 }
 fn flow_list(self: FatPtr) callconv(.c) FatPtr {
     if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveCollect_1_mut_Zfun(self, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveCollect_1_mut_Zfun(self.share(), driver_singleton());
 }
 fn flow_for(self: FatPtr, callback: FatPtr) callconv(.c) FatPtr {
     if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveFor_2_mut_Zfun(self, callback, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveFor_2_mut_Zfun(self.share(), callback, driver_singleton());
 }
 fn flow_for_effect(self: FatPtr, callback: FatPtr) callconv(.c) FatPtr {
     const driver_obj = driver_singleton();
-    return objs.call(driver_obj, h("mut .runChunkFor/2"), .{ self, callback }, @src());
+    return objs.call(driver_obj, h("mut .runChunkFor/2"), .{ self.share(), callback }, @src());
 }
 // The predicated terminals delegate to the `_TerminalOps[E]` defaults. Those dispatch
 // `.findMap` and `.unorderedFindMap` back through this same VT_Flow, so the parallel and cancel
@@ -248,27 +238,25 @@ fn flow_first_pred(self: FatPtr, pred: FatPtr) callconv(.c) FatPtr {
 fn flow_find_map(self: FatPtr, mapper: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveFindMap_2_mut_Zfun(self, mapper, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveFindMap_2_mut_Zfun(self.share(), mapper, driver_singleton());
 }
 fn flow_unordered_find_map(self: FatPtr, mapper: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveUnorderedFindMap_2_mut_Zfun(self, mapper, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveUnorderedFindMap_2_mut_Zfun(self.share(), mapper, driver_singleton());
 }
 fn flow_max(self: FatPtr, comparator: FatPtr) callconv(.c) FatPtr {
     if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveMax_2_mut_Zfun(self, comparator, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveMax_2_mut_Zfun(self.share(), comparator, driver_singleton());
 }
 
 fn flow_self(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return self.share();
 }
 
 fn flow_size(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const flow = object.deref_flow(self);
     if (!flow.is_finite) return object.make_none();
     if (flow.ops.len != 0) return object.make_none();
@@ -302,12 +290,14 @@ fn T_flow_let(self: FatPtr, a: FatPtr, b: FatPtr) callconv(.c) FatPtr {
     return pbf.Flow_1__Zdotlet_2_mut_Zfun(a, b, self);
 }
 fn T_flow_join(self: FatPtr, joinable: FatPtr) callconv(.c) FatPtr {
-    return objs.call(joinable, h("imm .join/1"), .{self}, @src());
+    defer joinable.rc_decrement();
+    return objs.call(joinable, h("imm .join/1"), .{self.share()}, @src());
 }
 /// `Extensible[Flow[E]]#(ext)` at each receiver mdf. The Fearless body is `ext#(this.self)`, and
 /// `.self` on a flow is the identity. Thus all three mdfs pass the receiver to `mut #/1`.
 fn T_flow_hash1(self: FatPtr, ext: FatPtr) callconv(.c) FatPtr {
-    return objs.call(ext, h("mut #/1"), .{self}, @src());
+    defer ext.rc_decrement();
+    return objs.call(ext, h("mut #/1"), .{self.share()}, @src());
 }
 
 /// `.unwrapOp` gives the `FlowOp` of a flow to the Fearless flow operators in base. A
@@ -326,52 +316,52 @@ pub fn driver_singleton() FatPtr {
 }
 
 fn driver_run_chunk_reduce(self: FatPtr, flow: FatPtr, initial: FatPtr, combine: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer flow.rc_decrement();
     defer combine.rc_decrement();
     return terminals.drive_fold(object.deref_flow(flow), initial, combine);
 }
 
 fn driver_run_chunk_collect(self: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer flow.rc_decrement();
     return terminals.drive_list(object.deref_flow(flow));
 }
 
 fn driver_run_chunk_find_map(self: FatPtr, flow: FatPtr, mapper: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer flow.rc_decrement();
     defer mapper.rc_decrement();
     return terminals.drive_find_map(object.deref_flow(flow), mapper);
 }
 
 fn driver_run_chunk_for(self: FatPtr, flow: FatPtr, callback: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer flow.rc_decrement();
     defer callback.rc_decrement();
     return terminals.drive_for(object.deref_flow(flow), callback);
 }
 
 fn driver_run_chunk_first(self: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer flow.rc_decrement();
     return terminals.drive_first(object.deref_flow(flow));
 }
 
 fn driver_run_chunk_count(self: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer flow.rc_decrement();
     return terminals.drive_count(object.deref_flow(flow));
 }
 
 fn driver_run_chunk_last(self: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer flow.rc_decrement();
     return terminals.drive_last(object.deref_flow(flow));
 }
 
 fn driver_run_chunk_unordered_find_map(self: FatPtr, flow: FatPtr, mapper: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer flow.rc_decrement();
     defer mapper.rc_decrement();
     return terminals.drive_unordered_find_map(object.deref_flow(flow), mapper);
@@ -414,6 +404,7 @@ fn driver_merge(this: FatPtr, left: FatPtr, right: FatPtr) callconv(.c) FatPtr {
     return pbf._FeartDriver_0__Zdotmerge_2_imm_Zfun(left, right, this);
 }
 fn driver_merge3(_: FatPtr, left: FatPtr, right: FatPtr, combine: FatPtr) callconv(.c) FatPtr {
+    defer combine.rc_decrement();
     return objs.call(combine, h("read #/2"), .{ left, right }, @src());
 }
 
@@ -426,14 +417,15 @@ fn driver_merge_fold(_: FatPtr, acc: FatPtr, chunk: FatPtr, combine: FatPtr) cal
     var a = acc;
     const items = list_rt.deref_list(chunk);
     for (items.items) |elem| {
-        a = objs.call(combine.share(), h("read #/2"), .{ a, elem.share() }, @src());
+        a = objs.call(combine, h("read #/2"), .{ a, elem.share() }, @src());
     }
     return a;
 }
 
 fn driver_split_match(self: FatPtr, flow: FatPtr, cases: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer flow.rc_decrement();
+    defer cases.rc_decrement();
 
     const parts = object.split_flow(object.deref_flow(flow)) orelse
         return objs.call(cases, h("mut .empty/0"), .{}, @src());

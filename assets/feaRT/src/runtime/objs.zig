@@ -181,7 +181,7 @@ pub const FatPtr = extern struct {
 	noinline fn rc_decrement_slow(ptr: *const FatPtr) void {
 		op_counters.bump(.rc_decrement);
 		const obj = ptr.boxed_value();
-		const me = worker_mod.currentWorkerIdPlusOne();
+		const me = worker_mod.currentReferenceCountOwnerId();
 		if (me != 0 and obj.owner.load(.monotonic) == me) {
 			ownerDecRef(obj);
 			return;
@@ -207,7 +207,7 @@ pub const FatPtr = extern struct {
 
 /// The owner takes the plain path; anyone else pays for an atomic.
 inline fn incRef(obj: *ObjectHeader) void {
-	const me = worker_mod.currentWorkerIdPlusOne();
+	const me = worker_mod.currentReferenceCountOwnerId();
 	if (me != 0 and obj.owner.load(.monotonic) == me) {
 		const biased = obj.biased;
 		if (biased >= BIASED_LIMIT) {
@@ -384,9 +384,33 @@ inline fn containerRetain(cell: *RcCellHeader) void {
 /// Methods cached per call site, to avoid a vtable lookup.
 const POLYMORPHIC_INLINE_CACHE_SIZE = 4;
 
+/// One cache entry. It holds the target, and the key mixed with the target rather than the key
+/// as it stands.
+///
+/// A reader gets the key back with one exclusive-or. If a write of one thread ever interleaves
+/// with a write of another, the key a reader computes belongs to neither write and does not
+/// match its receiver, so the entry reads as a miss. This is what lets the two words stay
+/// correct if the cache becomes shared between threads: no reader can pair the key of one
+/// target with a different target.
 const MethodCacheEntry = struct {
-	key: ?*const VTable = null,
-	target: ?*const anyopaque = null,
+	target: usize = 0,
+	key_mix: usize = 0,
+
+	/// A target address is never zero, so zero marks an entry no write has filled.
+	inline fn isEmpty(self: MethodCacheEntry) bool {
+		return self.target == 0;
+	}
+
+	inline fn targetFor(self: MethodCacheEntry, vt: *const VTable) ?*const anyopaque {
+		if (self.target == 0) { return null; }
+		if ((self.key_mix ^ self.target) != @intFromPtr(vt)) { return null; }
+		return @ptrFromInt(self.target);
+	}
+
+	inline fn make(vt: *const VTable, target: *const anyopaque) MethodCacheEntry {
+		const t = @intFromPtr(target);
+		return .{ .target = t, .key_mix = @intFromPtr(vt) ^ t };
+	}
 };
 
 const InlineCache = struct {
@@ -408,10 +432,8 @@ fn lookup_method(vt: *const VTable, target_hash: u64) ?*const anyopaque {
 /// Fast path: the cache, then `resolve_method_slow`.
 inline fn resolve_method(receiver: FatPtr, hash: u64, ic: *InlineCache) *const anyopaque {
 	// Monomorphic entry, which takes most hot calls.
-	if (ic.entries[0].target) |target| {
-		if (ic.entries[0].key == receiver.vt) {
-			return target;
-		}
+	if (ic.entries[0].targetFor(receiver.vt)) |target| {
+		return target;
 	}
 	op_counters.bump(.ic_slow_probe);
 	return resolve_method_slow(receiver, hash, ic);
@@ -420,13 +442,10 @@ inline fn resolve_method(receiver: FatPtr, hash: u64, ic: *InlineCache) *const a
 fn resolve_method_slow(receiver: FatPtr, hash: u64, ic: *InlineCache) *const anyopaque {
 	// Polymorphic entries, for a hot call on dynamic input.
 	for (1..POLYMORPHIC_INLINE_CACHE_SIZE) |i| {
-		if (ic.entries[i].target) |target| {
-			if (ic.entries[i].key == receiver.vt) {
-				return target;
-			}
-		} else {
-			// Entries fill from 0 up, so an empty one ends the search.
-			break;
+		// Entries fill from 0 up, so an empty one ends the search.
+		if (ic.entries[i].isEmpty()) { break; }
+		if (ic.entries[i].targetFor(receiver.vt)) |target| {
+			return target;
 		}
 	}
 
@@ -437,7 +456,7 @@ fn resolve_method_slow(receiver: FatPtr, hash: u64, ic: *InlineCache) *const any
 	while (i > 0) : (i -= 1) {
 		ic.entries[i] = ic.entries[i - 1];
 	}
-	ic.entries[0] = .{ .key = receiver.vt, .target = target };
+	ic.entries[0] = MethodCacheEntry.make(receiver.vt, target);
 
 	return target;
 }
@@ -580,7 +599,7 @@ pub fn obj_k(
 	// The building worker owns the object and holds its first reference in the
 	// biased half. An object built before the pool starts has no owner, so it is
 	// born merged and every operation on it takes the shared path.
-	const me = worker_mod.currentWorkerIdPlusOne();
+	const me = worker_mod.currentReferenceCountOwnerId();
 	memory_slot.ptr.* = .{
 			.header = .{
 				.shared = std.atomic.Value(u32).init(if (me == 0) UNIT | MERGED else 0),
@@ -666,10 +685,26 @@ fn captureDropFn(comptime Captures: type) ?DropFn {
 	}.drop;
 }
 
+/// True when reference counting `field` of `Captures` can change a count.
+///
+/// A capture struct may declare `rc_free_fields`, the names of the fields whose static type
+/// gives them a storage mode with no reference count. Those fields are copied and discarded
+/// as plain bytes, so retain and release skip them and the storage-mode test they carry.
+/// A struct that declares nothing counts every `FatPtr` field, which is what the runtime's
+/// own hand-written capture structs rely on.
+fn isCountedField(comptime Captures: type, comptime field: std.builtin.Type.StructField) bool {
+	if (field.type != FatPtr) return false;
+	if (!@hasDecl(Captures, "rc_free_fields")) return true;
+	for (Captures.rc_free_fields) |name| {
+		if (std.mem.eql(u8, name, field.name)) return false;
+	}
+	return true;
+}
+
 fn capturesContainFatPtr(comptime Captures: type) bool {
 	return switch (@typeInfo(Captures)) {
 		.@"struct" => |info| inline for (info.fields) |field| {
-			if (field.type == FatPtr) break true;
+			if (comptime isCountedField(Captures, field)) break true;
 		} else false,
 		else => false,
 	};
@@ -679,7 +714,7 @@ fn shareCaptureFields(comptime Captures: type, captures: Captures) Captures {
 	var copy = captures;
 	switch (@typeInfo(Captures)) {
 		.@"struct" => |info| inline for (info.fields) |field| {
-			if (field.type == FatPtr) {
+			if (comptime isCountedField(Captures, field)) {
 				@field(copy, field.name) = @field(captures, field.name).share();
 			}
 		},
@@ -691,7 +726,7 @@ fn shareCaptureFields(comptime Captures: type, captures: Captures) Captures {
 fn dropCaptureFields(comptime Captures: type, captures: *const Captures) void {
 	switch (@typeInfo(Captures)) {
 		.@"struct" => |info| inline for (info.fields) |field| {
-			if (field.type == FatPtr) {
+			if (comptime isCountedField(Captures, field)) {
 				@field(captures.*, field.name).rc_decrement();
 			}
 		},

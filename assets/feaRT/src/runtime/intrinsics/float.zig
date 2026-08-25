@@ -153,6 +153,7 @@ pub fn to_float(a: FatPtr) FatPtr {
 }
 
 pub fn hash(a: FatPtr, hasher: FatPtr) FatPtr {
+	defer hasher.rc_decrement();
     return objs.call(hasher, comptime objs.hash_signature("mut .float/1"), .{a}, @src());
 }
 

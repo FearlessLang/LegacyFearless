@@ -17,7 +17,7 @@ import java.util.stream.Collectors;
 ///
 /// Correct because the `ThenElse` is a `CreateObj` written at the call site, so the arm's
 /// capture names are the same `MIR.X` objects as in the enclosing scope and an inlined arm
-/// body reads bindings that exist. {@link DevirtualiseByRTA} is the general case.
+/// body reads bindings that exist. {@link DevirtualiseGuarded} is the general case.
 public class BoolIfOptimisation implements MIRCloneVisitor {
   private final MagicImpls<?> magic;
   private Map<MIR.FName, MIR.Fun> funs;

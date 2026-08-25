@@ -61,13 +61,12 @@ pub noinline fn release(cell: *IsoCell) void {
 }
 
 fn is_alive(self: FatPtr) FatPtr {
-    defer self.rc_decrement();
     const val = self.data.iso_cell.value.load(.monotonic);
     return bool_intrinsics.to_bool(val != null);
 }
 
 fn peek(self: FatPtr, viewer: FatPtr) FatPtr {
-    defer self.rc_decrement();
+    defer viewer.rc_decrement();
     const val = self.data.iso_cell.value.load(.monotonic);
     if (val) |ptr| {
         return objs.call(viewer, h("mut .some/1"), .{ptr.*.share()}, @src());
@@ -76,7 +75,6 @@ fn peek(self: FatPtr, viewer: FatPtr) FatPtr {
 }
 
 fn consume(self: FatPtr) FatPtr {
-    defer self.rc_decrement();
     const cell = self.data.iso_cell;
     const old_ptr = cell.value.swap(null, .monotonic);
     if (old_ptr) |ptr| {
@@ -98,7 +96,6 @@ fn consume(self: FatPtr) FatPtr {
 }
 
 fn next(self: FatPtr, new_value: FatPtr) FatPtr {
-    defer self.rc_decrement();
     const cell = self.data.iso_cell;
     const new_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
     new_ptr.* = new_value;
@@ -187,7 +184,6 @@ test "IsoPod consume transfers exactly once and next releases overwritten value"
 const PeekViewerCaptures = extern struct { result_ptr: usize };
 
 fn peek_viewer_some(self: FatPtr, value: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const caps = objs.deref(PeekViewerCaptures, self);
     const result: *FatPtr = @ptrFromInt(caps.result_ptr);
     result.* = value;
@@ -195,7 +191,7 @@ fn peek_viewer_some(self: FatPtr, value: FatPtr) callconv(.c) FatPtr {
 }
 
 fn peek_viewer_empty(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     return make_void();
 }
 

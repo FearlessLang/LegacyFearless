@@ -3,18 +3,20 @@ package main.zig;
 import ast.Program;
 import codegen.MIR;
 import codegen.MIRInjectionVisitor;
-import codegen.optimisations.DevirtualiseByRTA;
 import codegen.optimisations.OptimisationBuilder;
 import codegen.zig.ZigBuildOpts;
 import codegen.zig.ZigCompiler;
 import codegen.zig.ZigMagicImpls;
 import codegen.zig.ZigProgram;
+import main.CompilationUnit;
 import main.CompilerFrontEnd.Verbosity;
 import main.FullLogicMain;
 import main.InputOutput;
+import main.Main;
 import program.typesystem.TsT;
 
 import main.java.HDCache;
+import main.java.ImplInfo;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -29,9 +31,15 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   /// VPF-parallelisable calls and so generates different Zig with and without VPF, and each
   /// configuration needs its own name: otherwise a `--no-vpf` build finds the type info of a
   /// VPF build, skips base, and has no Zig for it.
-  @Override default String backendName() { return buildOpts().vpfEnabled() ? "zig" : "zig-novpf"; }
+  @Override default String backendName() { return backendName(buildOpts()); }
+  static String backendName(ZigBuildOpts opts) { return opts.vpfEnabled() ? "zig" : "zig-novpf"; }
   Path executablePath();
   void setExecutablePath(Path path);
+
+  /// The lowered program, kept because {@link ImplInfo} reads the values it makes and the cache
+  /// step runs after the backend has compiled.
+  MIR.Program loweredProgram();
+  void setLoweredProgram(MIR.Program mir);
 
   /// Optimisation mode, VPF, stack traces and more. No cross-backend interface shows it.
   default ZigBuildOpts buildOpts() { return ZigBuildOpts.DEFAULT; }
@@ -39,25 +47,44 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
   @Override default void cachePackageTypes(Program program) {
     var versionedDir = new ZigCompiler(verbosity(), io(), buildOpts()).versionedCacheDir();
     var baseDecs = program.ds().values().stream()
-      .filter(d -> ZigCompiler.isCacheablePackage(d.name().pkg()))
+      .filter(d -> CompilationUnit.isCached(d.name().pkg()))
       .collect(Collectors.groupingBy(d -> d.name().pkg()));
-    baseDecs.forEach((pkg, decs) ->
-      new HDCache(versionedDir, program, backendName()).cacheTypeInfo(pkg, decs));
+    baseDecs.forEach((pkg, decs) -> {
+      var cache = new HDCache(versionedDir, program, backendName());
+      cache.cacheTypeInfo(pkg, decs);
+      // Only a package lowered from source has bodies to count. One loaded from the cache
+      // holds `pkgInfo` bodies, which are all `base.Abort!`, and a count taken from those is
+      // wrong rather than merely low. Its file is already on disk from the run that built it.
+      if (!cachedPkg().contains(pkg)) { cache.cacheImplInfo(pkg, loweredProgram()); }
+    });
     ZigCompiler.cleanOldVersions(versionedDir.getParent());
+  }
+
+  /// The implementation counts of every cached package, as {@link ImplInfo} wrote them when
+  /// that package was lowered from source. A package with no such file beside its type
+  /// information contributes nothing and stays behind a guard.
+  default ImplInfo cachedImplInfo() {
+    var versionedDir = new ZigCompiler(verbosity(), io(), buildOpts()).versionedCacheDir();
+    return ImplInfo.readAll(versionedDir, cachedPkg(), backendName());
   }
 
   @Override default MIR.Program lower(Program program, ConcurrentHashMap<Long, TsT> resolvedCalls) {
     var mir = new MIRInjectionVisitor(cachedPkg(), program, resolvedCalls).visitProgram();
     var magic = new ZigMagicImpls(null, null, mir.p());
-    var devirtualise = new DevirtualiseByRTA(magic, ZigCompiler::isCacheablePackage);
+    var guarded = new codegen.optimisations.DevirtualiseGuarded(
+      magic, cachedImplInfo(), cachedPkg());
+    var selfRec = new codegen.optimisations.DirectSelfRecursion();
     var res = new OptimisationBuilder(magic)
       .withBoolIfOptimisation()
       .withBoxingOptimisation()
-      .withOptimisation(devirtualise)
+      .withOptimisation(selfRec)
+      .withOptimisation(guarded)
       .run(mir);
+    setLoweredProgram(res);
     if (verbosity().printCodegen()) {
-      System.err.println("[devirtualise] " + devirtualise.rewrittenCalls()
-        + " call sites, over " + devirtualise.targets().size() + " concrete types");
+      System.err.println("[selfrec] " + selfRec.rewrittenCalls() + " recursive call sites");
+      System.err.println("[guarded] " + guarded.guardedCalls()
+        + " call sites, over " + guarded.targets().size() + " concrete types");
     }
     return res;
   }
@@ -66,7 +93,37 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
     var compiler = new ZigCompiler(verbosity(), io(), buildOpts());
     var cachedContent = compiler.loadCachedPackages(mir);
     cachedPkg().addAll(cachedContent.keySet());
+    if (io().entry() == null) {
+      return ZigProgram.ofUnit(mir, cachedPkg(), cachedContent, buildOpts().vpfEnabled());
+    }
     return ZigProgram.of(io().entry(), mir, cachedPkg(), cachedContent, buildOpts().vpfEnabled());
+  }
+
+  @Override default void cacheCodeGeneration(ZigProgram src) {
+    new ZigCompiler(verbosity(), io(), buildOpts()).saveCachedPackages(src);
+  }
+
+  /// Builds every {@link CompilationUnit} whose artefacts are not already in the cache, one at
+  /// a time and in order, so that a unit reads the units before it.
+  ///
+  /// A unit is built before the application's {@link InputOutput} exists. That order is what
+  /// makes the artefacts visible: `cachedFiles` is read when an `InputOutput` is made, so a
+  /// `pkgInfo` written after that point is missed by the compilation that needs it.
+  static void buildMissingUnits(Verbosity verbosity, ZigBuildOpts buildOpts, boolean isImm) {
+    var versionedDir = ZigCompiler.versionedCacheDir(InputOutput.feartCachedBase(isImm), buildOpts);
+    for (var unit : CompilationUnit.all()) {
+      if (isUnitCached(versionedDir, unit, backendName(buildOpts))) { continue; }
+      LogicMainZig.of(InputOutput.unitZig(unit, versionedDir, isImm), verbosity, buildOpts).buildUnit();
+      Main.resetAll();
+    }
+  }
+
+  /// Whether `unit` already wrote its type information. The unit is named by its root package,
+  /// which is where that file sits.
+  private static boolean isUnitCached(Path versionedDir, CompilationUnit unit, String backend) {
+    return java.nio.file.Files.isRegularFile(versionedDir
+      .resolve(unit.name().replace(".", "/"))
+      .resolve("pkgInfo." + backend + ".txt"));
   }
 
   @Override default void compileBackEnd(ZigProgram src) {
@@ -95,11 +152,14 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
     var cachedPkg = new HashSet<String>();
     return new LogicMainZig() {
       private Path exePath;
+      private MIR.Program lowered;
       public InputOutput io() { return io; }
       public HashSet<String> cachedPkg() { return cachedPkg; }
       public Verbosity verbosity() { return verbosity; }
       public Path executablePath() { return exePath; }
       public void setExecutablePath(Path path) { exePath = path; }
+      public MIR.Program loweredProgram() { return lowered; }
+      public void setLoweredProgram(MIR.Program mir) { lowered = mir; }
       public ZigBuildOpts buildOpts() { return buildOpts; }
     };
   }

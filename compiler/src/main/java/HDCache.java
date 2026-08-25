@@ -18,7 +18,10 @@ public record HDCache(Path code, ast.Program program, String backend) {
     Map<String,List<T.Dec>> mapped= program.ds().values().stream()
      .filter(d->!main.cachedPkg().contains(d.name().pkg()))
      .collect(Collectors.groupingBy(d->d.name().pkg()));
-    mapped.forEach((key, value)->new HDCache(main.io().output(), program, main.backendName()).cacheTypeInfo(key, value));
+    mapped.forEach((key, value)->{
+      var cache = new HDCache(main.io().output(), program, main.backendName());
+      cache.cacheTypeInfo(key, value);
+    });
     new HDCache(main.io().output(), program, main.backendName()).cacheBase(main.io().cachedBase());
   }
   
@@ -42,6 +45,16 @@ public record HDCache(Path code, ast.Program program, String backend) {
     var file=decs.stream().map(d->new DecTypeInfo().visitDec(d)).toList();
     String tot="package "+pkgName+"\n"+String.join("", file);
     IoErr.of(()->Files.writeString(pkg.resolve("pkgInfo." + backend + ".txt"),tot));
+  }
+
+  /// What every type this package declares is implemented by, beside its type information. See
+  /// {@link ImplInfo} for why `pkgInfo` cannot hold it. Written from the lowered program, so a
+  /// caller holds one.
+  public void cacheImplInfo(String pkgName, MIR.Program mir) {
+    var pkg = code.resolve(pkgName.replace(".","/"));
+    IoErr.of(() -> Files.createDirectories(pkg));
+    var text = ImplInfo.of(pkgName, program, mir).write();
+    IoErr.of(()->Files.writeString(pkg.resolve(ImplInfo.fileName(backend)),text));
   }
 }
 

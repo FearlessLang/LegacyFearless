@@ -12,15 +12,29 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-/// Whole-program rapid type analysis over a {@link MIR.Program}.
+/// Rapid type analysis over a {@link MIR.Program}.
 ///
 /// The table maps a declared type to every concrete type that can flow into a receiver of
 /// it. A concrete type enters from an object literal ({@link MIR.CreateObj}) or from the
 /// fixed set the runtime provides ({@link Magic}). One entry with an object literal behind
 /// it means a monomorphic receiver.
 ///
-/// {@link MIR.Program} holds every package of the final binary, cached ones included: the
-/// Zig backend caches generated text, never the IR. So the table is whole-program.
+/// The table covers the whole compilation only for a package the compiler parsed in full. A
+/// package the front end reads back from its `pkgInfo` cache contributes declarations whose
+/// method bodies are all `base.Abort!`, so its object literals are absent and every impl set
+/// it would have filled is partial. A receiver such a package declares can therefore look
+/// monomorphic here while the real program has many implementations of it, which makes an
+/// answer about one unsound to act on. It is also where a runtime-backed type is declared,
+/// and one of those has no object literal for the table to record at all.
+///
+/// A caller must refuse those packages itself, by declaring package, which is enough because a
+/// literal such a package owns can only register against a supertype that same package owns.
+/// {@link RcFreeTypes} takes the set of them for exactly this.
+///
+/// Covering the compilation is not the same as covering every compilation. Text a
+/// {@link main.CompilationUnit} writes is read back by later ones, which hold packages this
+/// table never saw, so an answer written into such text needs a guarantee from the declaration
+/// on top of this table.
 public final class RapidTypeAnalysis {
   private final Map<Id.DecId, Set<Id.DecId>> impls = new HashMap<>();
   private final Map<Id.DecId, MIR.CreateObj> literals = new HashMap<>();
@@ -53,6 +67,17 @@ public final class RapidTypeAnalysis {
     return Optional.ofNullable(literals.get(candidates.iterator().next()));
   }
 
+  /// Every concrete type that can flow into a receiver declared `declared`, empty when
+  /// nothing was seen creating one.
+  public Set<Id.DecId> implsOf(Id.DecId declared) {
+    return impls.getOrDefault(declared, Set.of());
+  }
+
+  /// The object literal behind a concrete type, empty for one the runtime provides itself.
+  public Optional<MIR.CreateObj> literalOf(Id.DecId concrete) {
+    return Optional.ofNullable(literals.get(concrete));
+  }
+
   private void record(MIR.Program p, Id.DecId concrete) {
     for (var sup : p.p().superDecIds(concrete)) {
       impls.computeIfAbsent(sup, ignored -> new HashSet<>()).add(concrete);
@@ -79,6 +104,12 @@ public final class RapidTypeAnalysis {
           work.addAll(call.args());
         }
         case MIR.DirectCall call -> {
+          directCallTargets.add(call.concreteType());
+          work.add(call.original());
+        }
+        // A guarded call names the wrapper of its guess, so that type needs its wrapper for
+        // the same reason a direct call does.
+        case MIR.GuardedCall call -> {
           directCallTargets.add(call.concreteType());
           work.add(call.original());
         }

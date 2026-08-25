@@ -20,12 +20,12 @@ fn encode_scalar(cp: u32) FatPtr {
 }
 
 fn utf16_from_code_point(self: FatPtr, cp_fp: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     return encode_scalar(@intCast(nat_intrinsics.deref(cp_fp)));
 }
 
 fn utf16_from_surrogate_pair(self: FatPtr, high_fp: FatPtr, low_fp: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     const high = nat_intrinsics.deref(high_fp);
     const low = nat_intrinsics.deref(low_fp);
     // const cp: u32 = @intCast(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00));
@@ -37,7 +37,7 @@ fn utf16_from_surrogate_pair(self: FatPtr, high_fp: FatPtr, low_fp: FatPtr) call
 }
 
 fn utf16_is_surrogate(self: FatPtr, cp_fp: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     const cp = nat_intrinsics.deref(cp_fp);
     return bool_intrinsics.to_bool(cp >= 0xD800 and cp < 0xE000);
 }
@@ -64,7 +64,7 @@ pub const VT_UTF16: objs.VTable = .{
 
 /// `UTF8.fromBytes(list): Action[Str]` -- validate the bytes as UTF-8.
 fn utf8_from_bytes(self: FatPtr, list_fp: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer list_fp.rc_decrement();
     const al = list_intrinsics.deref_list(list_fp);
     if (al.items.len == 0) return str.make_action_ok(str.make_str("".ptr, 0));

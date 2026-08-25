@@ -37,33 +37,32 @@ fn long_hash(x: u64) i32 {
 }
 
 fn cheap_compute(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return nat_rt.make(@bitCast(@as(i64, deref_caps(self).result)));
 }
 
 fn cheap_nat(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
     const caps = deref_caps(self);
     caps.result = combine(caps.result, long_hash(nat_rt.deref(x)));
-    return self;
+    return self.share();
 }
 
 fn cheap_int(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
     const caps = deref_caps(self);
     caps.result = combine(caps.result, long_hash(@bitCast(int_rt.deref(x))));
-    return self;
+    return self.share();
 }
 
 fn cheap_float(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
     const caps = deref_caps(self);
     caps.result = combine(caps.result, long_hash(@bitCast(float_rt.deref(x))));
-    return self;
+    return self.share();
 }
 
 fn cheap_byte(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
     const caps = deref_caps(self);
     // Java `Byte.hashCode` sign-extends the signed byte value.
     caps.result = combine(caps.result, @as(i8, @bitCast(byte_rt.deref(x))));
-    return self;
+    return self.share();
 }
 
 fn cheap_str(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
@@ -72,12 +71,14 @@ fn cheap_str(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
     var hv: i32 = 1;
     for (str_rt.deref_str(x)) |b| hv = (hv *% 31) +% @as(i32, b);
     caps.result = combine(caps.result, hv);
-    return self;
+    return self.share();
 }
 
 fn cheap_hash(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
-    // Default `Hasher.hash(x)` body: `x.hash(this)`.
-    return objs.call(x, comptime h("read .hash/1"), .{self}, @src());
+    // Default `Hasher.hash(x)` body: `x.hash(this)`. `x` is lent to the call, so this frame
+    // still owns the reference the caller gave it.
+    defer x.rc_decrement();
+    return objs.call(x, comptime h("read .hash/1"), .{self.share()}, @src());
 }
 
 pub const VT_CheapHash: objs.VTable = .{

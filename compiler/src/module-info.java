@@ -11,5 +11,8 @@ module FearlessCompiler {
   requires org.apache.commons.text;
   requires org.apache.commons.lang3;
   requires commons.cli;
+  requires com.fasterxml.jackson.databind;
+  requires com.fasterxml.jackson.core;
+  opens main.java to com.fasterxml.jackson.databind;
   opens program.typesystem to net.jqwik.engine, org.junit.platform.commons;
 }

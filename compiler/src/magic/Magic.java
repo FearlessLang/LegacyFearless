@@ -67,6 +67,30 @@ public class Magic {
 
   public static final Id.DecId MapK = new Id.DecId("base.Maps", 0);
 
+  /// Whether `e` is the body a magic method lowers to: a call on the `base.Magic` stub.
+  ///
+  /// Such a method has no generated implementation. The runtime provides the value that answers
+  /// it, with a vtable of its own, so the wrapper generated beside the declaration aborts and a
+  /// type that writes only these is no implementation of anything.
+  public static boolean isMagicStub(codegen.MIR.E e) {
+    return switch (e) {
+      case codegen.MIR.MCall call -> isMagicAbortValue(call.recv());
+      case codegen.MIR.DirectCall call -> isMagicStub(call.original());
+      case codegen.MIR.GuardedCall call -> isMagicStub(call.original());
+      case codegen.MIR.StaticCall call -> isMagicStub(call.original());
+      case codegen.MIR.Block block -> isMagicStub(block.original());
+      case codegen.MIR.BoolExpr expr -> isMagicStub(expr.original());
+      case codegen.MIR.Box box -> isMagicStub(box.inner());
+      default -> false;
+    };
+  }
+
+  private static boolean isMagicAbortValue(codegen.MIR.E recv) {
+    if (!(recv instanceof codegen.MIR.CreateObj k)) { return false; }
+    return MagicAbort.equals(k.concreteT().id())
+      || k.t().name().map(MagicAbort::equals).orElse(false);
+  }
+
   /// Every `DecId` this class names. A whole-program analysis over the MIR misses these:
   /// some have no object literal at all, because the runtime provides the instance and its
   /// vtable. Built from the fields of this class, so a new magic type needs no upkeep, and

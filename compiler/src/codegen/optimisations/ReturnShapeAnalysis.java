@@ -59,28 +59,38 @@ public final class ReturnShapeAnalysis {
   /// codegen binds it: the concrete literal first, then up the inheritance chain. A miss
   /// returns empty, which every caller reads as "assume the worst".
   public Optional<MIR.Fun> calleeOf(MIR.DirectCall d) {
-    var key = new MIR.FName(d.concreteType(), d.original().name(), false, d.original().mdf());
+    return calleeOf(d.concreteType(), d.original());
+  }
+
+  /// As for a `DirectCall`, for the type a `GuardedCall` tests: the arm the test takes calls
+  /// the same wrapper.
+  public Optional<MIR.Fun> calleeOf(MIR.GuardedCall g) {
+    return calleeOf(g.concreteType(), g.original());
+  }
+
+  private Optional<MIR.Fun> calleeOf(id.Id.DecId concreteType, MIR.MCall original) {
+    var key = new MIR.FName(concreteType, original.name(), false, original.mdf());
     var cached = calleeCache.get(key);
     if (cached != null) { return cached; }
-    var res = resolveCallee(d);
+    var res = resolveCallee(concreteType, original);
     calleeCache.put(key, res);
     return res;
   }
 
   private final Map<MIR.FName, Optional<MIR.Fun>> calleeCache = new HashMap<>();
 
-  private Optional<MIR.Fun> resolveCallee(MIR.DirectCall d) {
-    var direct = funOn(d.concreteType(), d);
+  private Optional<MIR.Fun> resolveCallee(id.Id.DecId concreteType, MIR.MCall original) {
+    var direct = funOn(concreteType, original);
     if (direct.isPresent()) { return direct; }
     var typeDef = p.pkgs().stream()
-      .filter(pkg -> pkg.defs().containsKey(d.concreteType()))
-      .map(pkg -> pkg.defs().get(d.concreteType()))
+      .filter(pkg -> pkg.defs().containsKey(concreteType))
+      .map(pkg -> pkg.defs().get(concreteType))
       .findFirst()
       .orElse(null);
     if (typeDef == null) { return Optional.empty(); }
     try {
       return codegen.ParentWalker.of(p, typeDef).skip(1)
-        .map(parent -> funOn(parent.name(), d))
+        .map(parent -> funOn(parent.name(), original))
         .filter(Optional::isPresent)
         .findFirst()
         .orElse(Optional.empty());
@@ -90,9 +100,9 @@ public final class ReturnShapeAnalysis {
     }
   }
 
-  private Optional<MIR.Fun> funOn(id.Id.DecId owner, MIR.DirectCall d) {
+  private Optional<MIR.Fun> funOn(id.Id.DecId owner, MIR.MCall original) {
     for (var capturesSelf : new boolean[]{ false, true }) {
-      var fName = new MIR.FName(owner, d.original().name(), capturesSelf, d.original().mdf());
+      var fName = new MIR.FName(owner, original.name(), capturesSelf, original.mdf());
       var fun = funMap.get(fName);
       if (fun != null) { return Optional.of(fun); }
     }
@@ -165,6 +175,9 @@ public final class ReturnShapeAnalysis {
         for (var x : k.captures()) { escaped.add(x.name()); }
       }
       case MIR.MCall call -> walkUnknownCall(call.recv(), call.args(), escaped);
+      // One arm of a guarded call is the virtual call, so the callee is not known and the
+      // operands take the same treatment as those of a virtual call.
+      case MIR.GuardedCall g -> walkUnknownCall(g.original().recv(), g.original().args(), escaped);
       case MIR.UpdatableListAsIdFnCall u -> walkUnknownCall(u.e().recv(), u.e().args(), escaped);
       case MIR.DirectCall d -> {
         var callee = calleeOf(d);
@@ -248,6 +261,15 @@ public final class ReturnShapeAnalysis {
       case MIR.MCall call -> {
         collectWanted(call.recv());
         call.args().forEach(this::collectWanted);
+      }
+      case MIR.GuardedCall g -> {
+        // The arm the test takes calls the wrapper, which can fill a caller slot as a direct
+        // call does, so the callee needs its `_transient` variant.
+        calleeOf(g).ifPresent(f -> {
+          if (freshObjs.get(f.name()).isPresent()) { wantedFuns.add(f.name()); }
+        });
+        collectWanted(g.original().recv());
+        g.original().args().forEach(this::collectWanted);
       }
       case MIR.UpdatableListAsIdFnCall u -> collectWanted(u.e());
       case MIR.DirectCall d -> {

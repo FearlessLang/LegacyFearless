@@ -122,33 +122,29 @@ pub fn write_from_cwd(segments: FatPtr) FatPtr {
 }
 
 fn path_accessRW(self: FatPtr, segments: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     defer segments.rc_decrement();
     return make_path(scoped_resolve(self, segments), &VT_ReadWritePath);
 }
 fn path_accessR(self: FatPtr, segments: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     defer segments.rc_decrement();
     return make_path(scoped_resolve(self, segments), &VT_ReadPath);
 }
 fn path_accessW(self: FatPtr, segments: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     defer segments.rc_decrement();
     return make_path(scoped_resolve(self, segments), &VT_WritePath);
 }
 
 fn path_readStr(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return readstr_rt.make_action(path_inner(self));
 }
 
-/// `ToIso` for path handles. Heap objects, so `self`/`iso` transfer the receiver
-/// reference straight back to the caller (`return self`).
+/// `ToIso` for path handles. Heap objects, and the receiver is lent, so each of these
+/// answers with a share of it rather than with the loan itself.
 fn path_iso(self: FatPtr) callconv(.c) FatPtr {
-    return self;
+    return self.share();
 }
 fn path_self(self: FatPtr) callconv(.c) FatPtr {
-    return self;
+    return self.share();
 }
 
 pub const VT_ReadWritePath: objs.VTable = .{

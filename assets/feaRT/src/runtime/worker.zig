@@ -170,10 +170,21 @@ pub noinline fn getCurrentWorker() ?*Worker {
 }
 
 /// The biased-reference-counting identity of the running worker, `worker.id + 1`,
-/// or 0 when this thread runs no worker. Noinline for the same reason as
-/// `getCurrentWorker`: a cached read would let a reference-count operation take
-/// the biased path on the wrong thread.
-pub noinline fn currentWorkerIdPlusOne() u32 {
+/// or 0 when this thread runs no worker.
+///
+/// Every biased reference-count operation calls this, so it is inline. The
+/// barrier is what keeps it correct, and it does so without the call: a fiber
+/// can resume on a different OS thread, and the clobber stops the compiler from
+/// reusing a value it read before that point.
+///
+/// Inlining is safe only because the executable resolves this thread-local with
+/// the local-exec model, which the disassembly shows as a `%fs`-relative load at
+/// a fixed offset. The CPU applies the segment base at each access, so no
+/// register ever holds a thread-local address that a fiber switch could make
+/// stale. A build that puts the runtime in a shared library gets dynamic TLS,
+/// where an address comes from `__tls_get_addr` and a cached one does go stale.
+/// Such a build must make this `noinline` again.
+pub inline fn currentReferenceCountOwnerId() u32 {
 	const w = tls_current_worker;
 	asm volatile ("" ::: .{ .memory = true });
 	const worker = w orelse return 0;

@@ -87,28 +87,30 @@ fn apply_op(
     stopped: *bool,
 ) Applied {
     return switch (op.kind) {
-        .map => .{ .pass = objs.call(op.closure.share(), h("read #/1"), .{elem}, @src()) },
+        .map => .{ .pass = objs.call(op.closure, h("read #/1"), .{elem}, @src()) },
         .peek => blk: {
-            const result = objs.call(op.closure.share(), h("read #/1"), .{elem.share()}, @src());
+            const result = objs.call(op.closure, h("read #/1"), .{elem.share()}, @src());
             result.rc_decrement();
             break :blk .{ .pass = elem };
         },
         .map_ctx => blk: {
             const cell: *types.CtxCell = @ptrFromInt(op.state);
-            const iso_ctx = objs.call(cell.ctx.share(), h("mut .iso/0"), .{}, @src());
+            const iso_ctx = objs.call(cell.ctx, h("mut .iso/0"), .{}, @src());
+            defer iso_ctx.rc_decrement();
             const cval = objs.call(iso_ctx, h("mut .self/0"), .{}, @src());
-            break :blk .{ .pass = objs.call(op.closure.share(), h("read #/2"), .{ cval, elem }, @src()) };
+            break :blk .{ .pass = objs.call(op.closure, h("read #/2"), .{ cval, elem }, @src()) };
         },
         .peek_ctx => blk: {
             const cell: *types.CtxCell = @ptrFromInt(op.state);
-            const iso_ctx = objs.call(cell.ctx.share(), h("mut .iso/0"), .{}, @src());
+            const iso_ctx = objs.call(cell.ctx, h("mut .iso/0"), .{}, @src());
+            defer iso_ctx.rc_decrement();
             const cval = objs.call(iso_ctx, h("mut .self/0"), .{}, @src());
-            const result = objs.call(op.closure.share(), h("read #/2"), .{ cval, elem.share() }, @src());
+            const result = objs.call(op.closure, h("read #/2"), .{ cval, elem.share() }, @src());
             result.rc_decrement();
             break :blk .{ .pass = elem };
         },
         .filter => blk: {
-            const ok = objs.call(op.closure.share(), h("read #/1"), .{elem.share()}, @src());
+            const ok = objs.call(op.closure, h("read #/1"), .{elem.share()}, @src());
             const passed = ok.vt == &pb.VT_True_0;
             ok.rc_decrement();
             if (passed) break :blk .{ .pass = elem };
@@ -116,7 +118,7 @@ fn apply_op(
             break :blk .skip;
         },
         .map_filter => blk: {
-            const opt = objs.call(op.closure.share(), h("read #/1"), .{elem}, @src());
+            const opt = objs.call(op.closure, h("read #/1"), .{elem}, @src());
             if (opt.vt == &pb.VT_Opt_1) {
                 opt.rc_decrement();
                 break :blk .skip;
@@ -126,7 +128,7 @@ fn apply_op(
         .scan => blk: {
             const cell: *types.ScanCell = @ptrFromInt(op.state);
             const old_acc = cell.acc;
-            cell.acc = objs.call(op.closure.share(), h("read #/2"), .{ old_acc.share(), elem }, @src());
+            cell.acc = objs.call(op.closure, h("read #/2"), .{ old_acc.share(), elem }, @src());
             old_acc.rc_decrement();
             break :blk .{ .pass = cell.acc.share() };
         },
@@ -144,7 +146,7 @@ fn apply_op(
             break :blk .{ .pass = elem };
         },
         .flat_map => blk: {
-            const inner_fp = objs.call(op.closure.share(), h("read #/1"), .{elem}, @src());
+            const inner_fp = objs.call(op.closure, h("read #/1"), .{elem}, @src());
             const inner = object.deref_flow(inner_fp);
             while (!stopped.* and types.source_has_next(&inner.source)) {
                 const inner_elem = types.source_next(&inner.source);
@@ -162,7 +164,8 @@ fn apply_op(
                 .accept_ptr = @intFromPtr(accept),
                 .stopped_ptr = @intFromPtr(stopped),
             });
-            const res = objs.call(state.callback.share(), h("read #/3"), .{ sink, state.state_fp.share(), elem }, @src());
+            const res = objs.call(state.callback, h("read #/3"), .{ sink, state.state_fp.share(), elem }, @src());
+            defer res.rc_decrement();
             const is_stopped = objs.call(res, h("imm .match/1"), .{objs.obj_k_singleton(&VT_ActorResMatch)}, @src());
             if (is_stopped.vt == &pb.VT_True_0) stopped.* = true;
             is_stopped.rc_decrement();
@@ -210,7 +213,6 @@ fn process_through(
 const OptExtractCaptures = extern struct { result_ptr: usize };
 
 fn opt_extract_some(self: FatPtr, val: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const caps = objs.deref(OptExtractCaptures, self);
     const ptr: *FatPtr = @ptrFromInt(caps.result_ptr);
     ptr.* = val;
@@ -250,6 +252,7 @@ pub const VT_OptExtract: objs.VTable = .{
 pub fn extract_some(opt: FatPtr) FatPtr {
     var extracted: FatPtr = undefined;
     const extractor = objs.obj_k(OptExtractCaptures, &VT_OptExtract, .{ .result_ptr = @intFromPtr(&extracted) });
+    defer opt.rc_decrement();
     const matched = objs.call(opt, h("imm .match/1"), .{extractor}, @src());
     matched.rc_decrement();
     return extracted;
@@ -268,7 +271,6 @@ const ActorSinkCaptures = extern struct {
 };
 
 fn actor_sink_accept(self: FatPtr, element: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const caps = objs.deref(ActorSinkCaptures, self);
     const remaining: []types.OpDesc = @as([*]types.OpDesc, @ptrFromInt(caps.remaining_ptr))[0..caps.remaining_len];
     const ctx: *anyopaque = @ptrFromInt(caps.ctx_ptr);
@@ -279,7 +281,6 @@ fn actor_sink_accept(self: FatPtr, element: FatPtr) callconv(.c) FatPtr {
 }
 
 fn actor_sink_push_error(self: FatPtr, info: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const caps = objs.deref(ActorSinkCaptures, self);
     const stopped: *bool = @ptrFromInt(caps.stopped_ptr);
     if (stopped.*) {
@@ -300,12 +301,12 @@ const VT_ActorSink: objs.VTable = .{
 };
 
 fn actor_match_continue(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     return objs.obj_k_singleton(&pb.VT_False_0);
 }
 
 fn actor_match_stop(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     return objs.obj_k_singleton(&pb.VT_True_0);
 }
 

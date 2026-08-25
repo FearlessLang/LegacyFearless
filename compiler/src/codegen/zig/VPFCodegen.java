@@ -29,7 +29,11 @@ class VPFCodegen {
     /// The one concrete receiver type, when devirtualisation resolved the combining call, so
     /// the combiner calls the wrapper directly. The hash stays necessary: `pushFrame` reports
     /// it as the target method.
-    Optional<DecId> directTarget
+    Optional<DecId> directTarget,
+    /// The one implementation the receiver type's own package writes, when the combining call
+    /// was guarded. The combiner tests the receiver vtable and calls that wrapper, and keeps
+    /// the virtual call for any other implementation.
+    Optional<DecId> guardTarget
   ) {}
 
   record SubExprInfo(MIR.E expr, boolean isFrameAdding, int index) {}
@@ -45,13 +49,15 @@ class VPFCodegen {
       }
       case MIR.DirectCall dc when dc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable) ->
         buildVPFInfo(dc.original(), Optional.of(dc.concreteType()));
+      case MIR.GuardedCall gc when gc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable) ->
+        buildGuardedVPFInfo(gc);
       case MIR.BoolExpr boolExpr -> {
         // The recursive case, and so the VPF call, is usually the else-branch.
         var elseFun = parent.funMap.get(boolExpr.else_());
         if (elseFun != null) {
           var inner = findVPFCallInner(elseFun.body());
           if (inner != null) {
-            yield new VPFCallInfo(inner.vpfCall, boolExpr, inner.subExprs, inner.plainExprs, inner.hashName, inner.directTarget);
+            yield new VPFCallInfo(inner.vpfCall, boolExpr, inner.subExprs, inner.plainExprs, inner.hashName, inner.directTarget, inner.guardTarget);
           }
         }
         yield null;
@@ -84,13 +90,15 @@ class VPFCodegen {
       case MIR.Block block -> containsVPFCall(block.original(), visited);
       case MIR.MCall call -> call.variant().contains(MIR.MCall.CallVariant.VPFParallelisable);
       case MIR.DirectCall dc -> dc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable);
+      case MIR.GuardedCall gc -> gc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable);
       case MIR.BoolExpr boolExpr ->
         containsVPFCall(boolExpr.then(), visited) || containsVPFCall(boolExpr.else_(), visited);
       default -> false;
     };
   }
 
-  void emitVPFFun(MIR.Fun fun, String name, List<String> paramNames, String params, VPFCallInfo vpf) {
+  void emitVPFFun(MIR.Fun fun, String name, List<String> paramNames, List<String> dropNames,
+                  String params, VPFCallInfo vpf) {
     int vpfId = vpfCounter++;
     var localsName = name + "_" + vpfId + "_Locals";
     var thiefName = name + "_" + vpfId + "_thief";
@@ -110,7 +118,7 @@ class VPFCodegen {
       new DecId(localsName, 0),
       "const " + localsName + " = extern struct {\n" + localsFields + "};"
     );
-    emitLocalsHooks(localsName, fun.args().stream().map(a -> parent.id.varName(a.name())).toList());
+    emitLocalsHooks(localsName, fun.args());
 
     var remaining = frameAddingExprs.subList(1, frameAddingExprs.size());
     if (remaining.size() >= 2 && canDeepenVPF(fun, 1)) {
@@ -131,8 +139,8 @@ class VPFCodegen {
 
     // Before the base-case check, so it always runs.
     sb.append("heartbeat.tryPromote();\n");
-    for (var paramName : paramNames) {
-      sb.append("defer ").append(paramName).append(".rc_decrement();\n");
+    for (var dropName : dropNames) {
+      sb.append("defer ").append(dropName).append(".rc_decrement();\n");
     }
 
     if (vpf.boolExpr != null) {
@@ -204,7 +212,10 @@ class VPFCodegen {
       resultMap.put(frameAddingExprs.get(i).index, i == 0 ? "locals.r1" : "r" + (i + 1));
     }
     for (var sub : vpf.plainExprs) {
-      resultMap.put(sub.index, parent.ownedExpr(sub.expr, true));
+      // Index 0 is the combining call's receiver, which that call lends.
+      resultMap.put(sub.index, sub.index == 0
+        ? sub.expr.accept(parent, true)
+        : parent.ownedExpr(sub.expr, true));
     }
     sb.append("return ").append(emitCombinerFromMap(vpf, resultMap, parent)).append(";\n");
 
@@ -225,7 +236,17 @@ class VPFCodegen {
         dc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
       return buildVPFInfo(dc.original(), Optional.of(dc.concreteType()));
     }
+    if (body instanceof MIR.GuardedCall gc &&
+        gc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
+      return buildGuardedVPFInfo(gc);
+    }
     return null;
+  }
+
+  private VPFCallInfo buildGuardedVPFInfo(MIR.GuardedCall call) {
+    var info = buildVPFInfo(call.original(), Optional.empty());
+    return new VPFCallInfo(info.vpfCall(), info.boolExpr(), info.subExprs(), info.plainExprs(),
+      info.hashName(), info.directTarget(), Optional.of(call.concreteType()));
   }
 
   private VPFCallInfo buildVPFInfo(MIR.MCall call, Optional<DecId> directTarget) {
@@ -242,17 +263,18 @@ class VPFCodegen {
     var hashExpr = parent.sigBuilder.inlineHash(sig);
 
     var plainExprs = subExprs.stream().filter(s -> !s.isFrameAdding).toList();
-    return new VPFCallInfo(call, null, subExprs, plainExprs, hashExpr, directTarget);
+    return new VPFCallInfo(call, null, subExprs, plainExprs, hashExpr, directTarget, Optional.empty());
   }
 
-  /// Only a call and a BoolExpr add a stack frame; a Box is transparent. A `DirectCall`
-  /// counts, being the devirtualised form of an `MCall`: leaving it out would drop the shadow
-  /// frame that lets a thief steal it.
+  /// Only a call and a BoolExpr add a stack frame; a Box is transparent. A `DirectCall` and a
+  /// `GuardedCall` count, being the devirtualised forms of an `MCall`: leaving one out would drop
+  /// the shadow frame that lets a thief steal it.
   private boolean isFrameAddingExpr(MIR.E expr) {
     if (expr instanceof MIR.Box box) {
       return isFrameAddingExpr(box.inner());
     }
-    return expr instanceof MIR.MCall || expr instanceof MIR.DirectCall || expr instanceof MIR.BoolExpr;
+    return expr instanceof MIR.MCall || expr instanceof MIR.DirectCall
+      || expr instanceof MIR.GuardedCall || expr instanceof MIR.BoolExpr;
   }
 
   /// An instrumented thief: computes one sub-expr, then pushes a shadow frame for the inner
@@ -289,7 +311,7 @@ class VPFCodegen {
       new DecId(innerLocalsName, 0),
       "const " + innerLocalsName + " = extern struct {\n" + innerFields + "};"
     );
-    emitLocalsHooks(innerLocalsName, fun.args().stream().map(a -> parent.id.varName(a.name())).toList());
+    emitLocalsHooks(innerLocalsName, fun.args());
 
     var innerRemaining = remainingFrameAdding.subList(1, remainingFrameAdding.size());
     if (innerRemaining.size() >= 2 && canDeepenVPF(fun, newForwardedFields.size())) {
@@ -343,7 +365,14 @@ class VPFCodegen {
     parent.currentState().functions.add(sb.toString());
   }
 
-  private void emitLocalsHooks(String localsName, List<String> fatPtrFields) {
+  /// The retain and drop hooks a thief runs over a stolen frame's locals. A field whose
+  /// static type carries no reference count is left out of both: it can be neither transient
+  /// nor counted, so the plain struct copy already transfers it correctly.
+  private void emitLocalsHooks(String localsName, List<MIR.X> args) {
+    var fatPtrFields = args.stream()
+      .filter(x -> !parent.isRcFree(x))
+      .map(x -> parent.id.varName(x.name()))
+      .toList();
     var retain = new StringBuilder();
     retain.append("fn ").append(localsName).append("_retain(copy_ptr: *anyopaque, parent_ptr: *anyopaque) void {\n");
     retain.append("const copy: *").append(localsName).append(" = @ptrCast(@alignCast(copy_ptr));\n");
@@ -479,8 +508,11 @@ class VPFCodegen {
       if (resultMap.containsKey(sub.index)) {
         allArgs[sub.index] = resultMap.get(sub.index);
       } else {
+        // The combiner lends its receiver and owns its arguments, so index 0 passes the
+        // locals field as it stands and only an argument shares.
         allArgs[sub.index] = (sub.expr instanceof MIR.X x)
-          ? "locals." + parent.id.varName(x.name()) + ".share()"
+          ? "locals." + parent.id.varName(x.name())
+            + (sub.index == 0 || parent.isRcFree(x) ? "" : ".share()")
           : sub.expr.accept(codegen, true);
       }
     }
@@ -498,8 +530,38 @@ class VPFCodegen {
       all.addAll(argStrs);
       return parent.methWrapperRef(target, methName) + "(" + String.join(", ", all) + ")";
     }
+    if (vpf.guardTarget.isPresent()) {
+      return emitGuardedCombiner(vpf, recvStr, argStrs);
+    }
     var argsTuple = argStrs.isEmpty() ? ".{}" : ".{ " + String.join(", ", argStrs) + " }";
     return "rt.call(" + recvStr + ", " + vpf.hashName + ", " + argsTuple + ", @src())";
+  }
+
+  /// The combining call of a guarded VPF site. Every operand binds to a name first, because
+  /// both arms read them and an operand that shares a reference must run once.
+  private String emitGuardedCombiner(VPFCallInfo vpf, String recvStr, List<String> argStrs) {
+    var target = vpf.guardTarget.get();
+    var block = parent.freshName("fear_blk_");
+    var names = new ArrayList<String>();
+    var sb = new StringBuilder(block + ": {\n");
+    var recvName = parent.freshName("fear_guard_");
+    names.add(recvName);
+    sb.append("const ").append(recvName).append(" = ").append(recvStr).append(";\n");
+    for (var arg : argStrs) {
+      var argName = parent.freshName("fear_guard_");
+      names.add(argName);
+      sb.append("const ").append(argName).append(" = ").append(arg).append(";\n");
+    }
+    var argNames = names.subList(1, names.size());
+    var argsTuple = argNames.isEmpty() ? ".{}" : ".{ " + String.join(", ", argNames) + " }";
+    var methName = parent.id.getMName(vpf.vpfCall.mdf(), vpf.vpfCall.name());
+    sb.append("break :").append(block)
+      .append(" if (").append(parent.guardTest(recvName, target)).append(") ")
+      .append(parent.methWrapperRef(target, methName))
+      .append("(").append(String.join(", ", names)).append(")")
+      .append(" else rt.call(").append(recvName).append(", ").append(vpf.hashName).append(", ")
+      .append(argsTuple).append(", @src());\n}");
+    return sb.toString();
   }
 
   /// True when one more thief level keeps the locals inside the runtime buffer.
@@ -532,6 +594,9 @@ class VPFCodegen {
     }
     @Override public String visitDirectCall(MIR.DirectCall call, boolean checkMagic) {
       return delegate.emitDirectCall(call, this, checkMagic);
+    }
+    @Override public String visitGuardedCall(MIR.GuardedCall call, boolean checkMagic) {
+      return delegate.emitGuardedCall(call, this, checkMagic);
     }
     @Override public String visitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
       // The parent emits the type, the vtable and the magic.

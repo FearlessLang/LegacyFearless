@@ -138,6 +138,7 @@ public class BlockOptimisation implements
       case MIR.CreateObj ignored -> FlattenStatus.INVALID;
       case MIR.StaticCall ignored -> throw Bug.unreachable();
       case MIR.DirectCall ignored -> throw Bug.unreachable();
+      case MIR.GuardedCall ignored -> throw Bug.unreachable();
       case MIR.Block ignored -> throw Bug.unreachable();
       case MIR.UpdatableListAsIdFnCall ignored -> throw Bug.unreachable();
       case MIR.Box box -> flatten(box.inner(), stmts, eagerStmts, self);

@@ -3,6 +3,8 @@ package main;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 import java.util.stream.IntStream;
 
 import codegen.java.JavaFile;
@@ -98,7 +100,7 @@ public interface InputOutput{
   /// (per cache version: bumping ZigCompiler.ZIG_CACHE_VERSION discards it).
   static InputOutput userFolderZig(String entry, List<String> commandLineArguments, Path userFolder, boolean isImm) {
     Path output= userFolder.resolve("out");
-    Path cachedBase= OsCache.root().resolve("feart").resolve(isImm ? "immBase" : "base");
+    Path cachedBase= feartCachedBase(isImm);
     List<Parser> inputFiles= InputOutputHelper.loadInputFiles(userFolder);
     List<Parser> cachedFiles= InputOutputHelper.loadCachedFiles(cachedBase);
     return new FieldsInputOutput(
@@ -108,6 +110,37 @@ public interface InputOutput{
       ResolveResource.asset(isImm ? "/immRt" : "/rt"),
       inputFiles,
       output,
+      cachedBase,
+      cachedFiles,
+      ResolveResource.asset(isImm ? "/default-imm-aliases.fear" : "/default-aliases.fear")
+    );
+  }
+  /// Where the FeaRT backend keeps everything a {@link CompilationUnit} writes, one directory
+  /// per library variant, shared by every project on the machine.
+  static Path feartCachedBase(boolean isImm) {
+    return OsCache.root().resolve("feart").resolve(isImm ? "immBase" : "base");
+  }
+
+  /// IO for a {@link CompilationUnit} build. It has no project: `inputFiles` is empty, so
+  /// {@link LogicMain#parse} reads the unit's own sources through {@link #baseFiles}, and the
+  /// cached files are those of the units before it alone, so nothing of this unit is read back
+  /// from an earlier build of it.
+  ///
+  /// `versionedCacheDir` is where a cached package writes its type information, and its position
+  /// under `cachedBase` is what names the package a `pkgInfo` file belongs to.
+  static InputOutput unitZig(CompilationUnit unit, Path versionedCacheDir, boolean isImm) {
+    Path cachedBase= feartCachedBase(isImm);
+    List<Parser> cachedFiles= InputOutputHelper.loadCachedFiles(cachedBase).stream()
+      .filter(p->CompilationUnit.anyContains(
+        unit.dependencies(), InputOutputHelper.pkgOf(versionedCacheDir, p.fileName())))
+      .toList();
+    return new FieldsInputOutput(
+      null,
+      List.of(),
+      ResolveResource.asset(isImm ? "/immBase" : "/base"),
+      ResolveResource.asset(isImm ? "/immRt" : "/rt"),
+      List.of(),
+      cachedBase,
       cachedBase,
       cachedFiles,
       ResolveResource.asset(isImm ? "/default-imm-aliases.fear" : "/default-aliases.fear")
@@ -179,6 +212,17 @@ public interface InputOutput{
   }
 }
 class InputOutputHelper{
+  /// The package a cached file belongs to, read from where it sits under `cacheDir`: the
+  /// directories between the two are the parts of the package name. Empty for a file that is
+  /// not under `cacheDir`, which no package pattern matches.
+  static String pkgOf(Path cacheDir, Path file) {
+    if (!file.startsWith(cacheDir)) { return ""; }
+    var rel = cacheDir.relativize(file).getParent();
+    if (rel == null) { return ""; }
+    return StreamSupport.stream(rel.spliterator(), false)
+      .map(Path::toString)
+      .collect(Collectors.joining("."));
+  }
   static List<Parser> loadInputFiles(Path root) {
     return loadFiles(root,".fear");
   }

@@ -212,6 +212,20 @@ public sealed interface MIR {
     }
   }
 
+  /// A call that tests the receiver vtable against one concrete type and calls that type's
+  /// wrapper directly, or falls back to the virtual call.
+  ///
+  /// Unlike a {@link DirectCall}, the target is a guess. The guess comes from the packages the
+  /// compiler read, so a package it did not read can hold another implementation and the test
+  /// fails for it. The fallback makes that correct, and no whole program analysis is needed.
+  record GuardedCall(MCall original, Id.DecId concreteType) implements E {
+    @Override public MT t() { return original.t(); }
+
+    @Override public <R> R accept(MIRVisitor<R> v, boolean checkMagic) {
+      return v.visitGuardedCall(this, checkMagic);
+    }
+  }
+
   record UpdatableListAsIdFnCall(MIR.MCall e) implements E {
     @Override public MT t() {return e.t();}
     @Override public <R> R accept(MIRVisitor<R> v, boolean checkMagic) {

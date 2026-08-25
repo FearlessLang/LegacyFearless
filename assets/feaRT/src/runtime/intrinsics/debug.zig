@@ -18,7 +18,9 @@ fn value_str(x: FatPtr) FatPtr {
         .primitiveContainer => return type_name_str(x),
         .heap, .singleton, .transient => {
             if (x.vt.method_name(str_sig) != null) {
-                return objs.call(x, str_sig, .{}, @src());
+                const result = objs.call(x, str_sig, .{}, @src());
+                x.rc_decrement();
+                return result;
             }
             return type_name_str(x);
         },

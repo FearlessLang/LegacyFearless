@@ -93,6 +93,7 @@ pub inline fn offset(a: FatPtr, delta: FatPtr) FatPtr {
 }
 
 pub fn hash(a: FatPtr, hasher: FatPtr) FatPtr {
+	defer hasher.rc_decrement();
 	return objs.call(hasher, comptime objs.hash_signature("mut .int/1"), .{to_int(a)}, @src());
 }
 

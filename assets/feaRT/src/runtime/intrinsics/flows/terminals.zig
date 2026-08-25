@@ -43,7 +43,7 @@ const FoldCtx = struct { acc: FatPtr, combine: FatPtr };
 fn fold_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *FoldCtx = @ptrCast(@alignCast(ctx_ptr));
     const old_acc = ctx.acc;
-    ctx.acc = objs.call(ctx.combine.share(), h("read #/2"), .{ old_acc.share(), elem }, @src());
+    ctx.acc = objs.call(ctx.combine, h("read #/2"), .{ old_acc.share(), elem }, @src());
     old_acc.rc_decrement();
     return true;
 }
@@ -109,7 +109,7 @@ pub fn drive_list(flow: *types.FeartFlow) FatPtr {
 const ForCtx = struct { callback: FatPtr };
 fn for_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *ForCtx = @ptrCast(@alignCast(ctx_ptr));
-    const result = objs.call(ctx.callback.share(), h("mut #/1"), .{elem}, @src());
+    const result = objs.call(ctx.callback, h("mut #/1"), .{elem}, @src());
     result.rc_decrement();
     return true;
 }
@@ -126,7 +126,7 @@ pub fn drive_for(flow: *types.FeartFlow, callback: FatPtr) FatPtr {
 const FindCtx = struct { predicate: FatPtr, found: ?FatPtr };
 fn find_map_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *FindCtx = @ptrCast(@alignCast(ctx_ptr));
-    const result = objs.call(ctx.predicate.share(), h("read #/1"), .{elem}, @src());
+    const result = objs.call(ctx.predicate, h("read #/1"), .{elem}, @src());
     if (result.vt == &pb.VT_Opt_1) {
         result.rc_decrement();
         return true;
@@ -147,7 +147,7 @@ pub fn drive_find_map(flow: *types.FeartFlow, mapper: FatPtr) FatPtr {
 // thief fibers observe the cancel at their next per-iteration scope poll.
 fn unordered_find_map_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *FindCtx = @ptrCast(@alignCast(ctx_ptr));
-    const result = objs.call(ctx.predicate.share(), h("read #/1"), .{elem}, @src());
+    const result = objs.call(ctx.predicate, h("read #/1"), .{elem}, @src());
     if (result.vt == &pb.VT_Opt_1) {
         result.rc_decrement();
         return true;

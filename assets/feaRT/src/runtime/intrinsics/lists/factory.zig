@@ -122,31 +122,37 @@ fn ulist_factory_16(_: FatPtr, a0: FatPtr, a1: FatPtr, a2: FatPtr, a3: FatPtr, a
 fn fromLList_into(llist: FatPtr, al: *ArrayList) void {
     // Walk the LList via .head/.tail. .size bounds the walk, so every .head
     // is a Some and the extractor's empty case is unreachable.
-    const size = nat_rt.deref(objs.call(llist.share(), h("imm .size/0"), .{}, @src()));
+    const size = nat_rt.deref(objs.call(llist, h("imm .size/0"), .{}, @src()));
     var i: u64 = 0;
-    var current = llist;
+    // The cursor is owned, because the loop drops each step. `llist` itself is lent by the
+    // caller, so the walk starts from a share of it rather than from the loan.
+    var current = llist.share();
     while (i < size) : (i += 1) {
-        const opt = objs.call(current.share(), h("imm .head/0"), .{}, @src());
+        const opt = objs.call(current, h("imm .head/0"), .{}, @src());
         const handler = objs.obj_k(OptExtractorCaptures, &VT_OptExtractor, .{
             .result_ptr = @intFromPtr(&al.items.ptr[al.items.len]),
         });
         _ = objs.call(opt, h("imm .match/1"), .{handler}, @src());
+        opt.rc_decrement();
         al.items.len += 1;
         const next = objs.call(current, h("imm .tail/0"), .{}, @src());
+        current.rc_decrement();
         current = next;
     }
     current.rc_decrement();
 }
 
 fn list_fromLList(_: FatPtr, llist: FatPtr) callconv(.c) FatPtr {
-    const size = nat_rt.deref(objs.call(llist.share(), h("imm .size/0"), .{}, @src()));
+    defer llist.rc_decrement();
+    const size = nat_rt.deref(objs.call(llist, h("imm .size/0"), .{}, @src()));
     const storage = storage_mod.make_storage(@intCast(size));
     fromLList_into(llist, &storage.al);
     return instance.wrap_list_storage(storage);
 }
 
 fn ulist_fromLList(_: FatPtr, llist: FatPtr) callconv(.c) FatPtr {
-    const size = nat_rt.deref(objs.call(llist.share(), h("imm .size/0"), .{}, @src()));
+    defer llist.rc_decrement();
+    const size = nat_rt.deref(objs.call(llist, h("imm .size/0"), .{}, @src()));
     const storage = storage_mod.make_storage(@intCast(size));
     fromLList_into(llist, &storage.al);
     return instance.wrap_ulist_storage(storage);

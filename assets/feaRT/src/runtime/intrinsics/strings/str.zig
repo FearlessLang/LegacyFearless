@@ -171,7 +171,7 @@ fn codepoint_byte_offset(data: []const u8, cp: u64) usize {
 /// `+(other: read Stringable): Str` -- coerce `other` via `.str`, then build a
 /// fresh owned immutable string. Always immutable, even on a mutable receiver.
 pub fn str_concat(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    defer other.rc_decrement();
     const other_str = objs.call(other, comptime h("read .str/0"), .{}, @src());
     defer other_str.rc_decrement();
     const sa = deref_str(self);
@@ -184,29 +184,24 @@ pub fn str_concat(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
 }
 
 pub fn str_eq(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     defer other.rc_decrement();
     return bool_intrinsics.to_bool(std.mem.eql(u8, deref_str(self), deref_str(other)));
 }
 
 pub fn str_neq(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     defer other.rc_decrement();
     return bool_intrinsics.to_bool(!std.mem.eql(u8, deref_str(self), deref_str(other)));
 }
 
 pub fn str_size(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return nat_intrinsics.make(codepoint_count(deref_str(self)));
 }
 
 pub fn str_is_empty(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return bool_intrinsics.to_bool(deref_str(self).len == 0);
 }
 
 pub fn str_starts_with(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     defer other.rc_decrement();
     const a = deref_str(self);
     const b = deref_str(other);
@@ -216,7 +211,6 @@ pub fn str_starts_with(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
 /// `.substring(start, end)` -- codepoint-indexed. Immutable receivers yield a
 /// zero-copy shared slice that keeps the receiver alive; see `slice_of`.
 pub fn str_substring(self: FatPtr, start_fp: FatPtr, end_fp: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const data = deref_str(self);
     const start = nat_intrinsics.deref(start_fp);
     const end = nat_intrinsics.deref(end_fp);
@@ -244,7 +238,6 @@ pub fn str_char_at(self: FatPtr, index_fp: FatPtr) callconv(.c) FatPtr {
 
 /// `.normalise` -- NFC. Reuses the input when already normalised.
 pub fn str_normalise(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const native = @import("root").native;
     const data = deref_str(self);
     var out: native.frt_buf = undefined;
@@ -267,7 +260,6 @@ pub fn str_normalise(self: FatPtr) callconv(.c) FatPtr {
 /// there (it is unreachable in such a build -- nothing can produce a `List`).
 pub fn str_utf8(self: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(pb, "List_1__Zdotiter_0_mut_Zfun")) {
-        defer self.rc_decrement();
         const data = deref_str(self);
         const storage = list_intrinsics.make_storage(data.len);
         for (data) |b| storage.al.appendAssumeCapacity(byte_intrinsics.make(b));
@@ -278,7 +270,7 @@ pub fn str_utf8(self: FatPtr) callconv(.c) FatPtr {
 
 /// `.hash(hasher)` -- feed this string into the hasher, return the hasher.
 pub fn str_hash(self: FatPtr, hasher: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    defer hasher.rc_decrement();
     return objs.call(hasher, comptime h("mut .str/1"), .{self.share()}, @src());
 }
 
@@ -291,7 +283,6 @@ pub fn str_hash(self: FatPtr, hasher: FatPtr) callconv(.c) FatPtr {
 /// nothing there can produce the `Action[Float]` this returns.
 pub fn str_float(self: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(pb, "VT_Actions_0")) {
-        defer self.rc_decrement();
         const native = @import("root").native;
         const data = deref_str(self);
         var out: f64 = undefined;
@@ -326,7 +317,6 @@ fn float_make(v: f64) FatPtr {
 /// comptime-elided there.
 pub fn str_codepoints(self: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(root, "pkg_base_flows")) {
-        defer self.rc_decrement();
         const flow_rt = @import("root").flow_rt;
         return flow_rt.make_flow_from_str(self.share(), deref_str(self), .codepoint);
     }
@@ -334,7 +324,6 @@ pub fn str_codepoints(self: FatPtr) callconv(.c) FatPtr {
 }
 pub fn str_graphemes(self: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(root, "pkg_base_flows")) {
-        defer self.rc_decrement();
         const flow_rt = @import("root").flow_rt;
         return flow_rt.make_flow_from_str(self.share(), deref_str(self), .grapheme);
     }
@@ -374,20 +363,19 @@ pub fn str_join(separator: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
 }
 
 pub fn str_str_self(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return self.share();
 }
 
 pub fn str_assert_eq(self: FatPtr, actual: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(pb, "_StrHelpers_0__ZdotassertEq_2_imm_Zfun")) {
-        return pb._StrHelpers_0__ZdotassertEq_2_imm_Zfun(self, actual, helpers_singleton());
+        return pb._StrHelpers_0__ZdotassertEq_2_imm_Zfun(self.share(), actual, helpers_singleton());
     }
     @panic("This base has no _StrHelpers for Str.assertEq");
 }
 
 pub fn str_assert_eq_msg(self: FatPtr, actual: FatPtr, message: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(pb, "_StrHelpers_0__ZdotassertEq_3_imm_Zfun")) {
-        return pb._StrHelpers_0__ZdotassertEq_3_imm_Zfun(self, actual, message, helpers_singleton());
+        return pb._StrHelpers_0__ZdotassertEq_3_imm_Zfun(self.share(), actual, message, helpers_singleton());
     }
     @panic("This base has no _StrHelpers for Str.assertEq");
 }

@@ -6,7 +6,6 @@ import magic.MagicImpls;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Predicate;
 
 public class OptimisationBuilder {
   private final List<MIRCloneVisitor> passes = new ArrayList<>();
@@ -24,9 +23,6 @@ public class OptimisationBuilder {
   public OptimisationBuilder withBoolIfOptimisation() {
     passes.add(new BoolIfOptimisation(magic));
     return this;
-  }
-  public OptimisationBuilder withDevirtualiseByRTA(Predicate<String> cachedPackage) {
-    return withOptimisation(new DevirtualiseByRTA(magic, cachedPackage));
   }
   public OptimisationBuilder withBlockOptimisation() {
     passes.add(new BlockOptimisation(magic));

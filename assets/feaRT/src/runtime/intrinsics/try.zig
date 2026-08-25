@@ -89,9 +89,9 @@ pub fn runInChildFiber(f: FatPtr, data: ?FatPtr) FatPtr {
 }
 
 fn tryaction_run(self: FatPtr, m: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const caps = objs.deref(TryActionCaptures, self);
     const catch_nd = caps.catch_nd;
+    defer m.rc_decrement();
     const result = runInChildFiber(
         caps.f.share(),
         if (caps.has_data) caps.data.share() else null,
@@ -118,24 +118,24 @@ fn tryaction_run(self: FatPtr, m: FatPtr) callconv(.c) FatPtr {
 pub const VT_TryAction = actions.ActionVTable("<runtime try action>", &tryaction_run, null);
 
 fn try_make_1(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer f.rc_decrement();
     return make_try_action(f, objs.obj_k_singleton(&pb.VT_Void_0), false, false);
 }
 fn try_make_2(self: FatPtr, data: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer data.rc_decrement();
     defer f.rc_decrement();
     return make_try_action(f, data, true, false);
 }
 
 fn captry_make_1(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer f.rc_decrement();
     return make_try_action(f, objs.obj_k_singleton(&pb.VT_Void_0), false, true);
 }
 fn captry_make_2(self: FatPtr, data: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     defer data.rc_decrement();
     defer f.rc_decrement();
     return make_try_action(f, data, true, true);

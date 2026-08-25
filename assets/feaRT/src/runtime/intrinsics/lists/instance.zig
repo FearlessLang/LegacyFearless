@@ -59,7 +59,6 @@ pub fn make_void() FatPtr {
 // Shared instance methods (List + UList)
 
 fn list_get(self: FatPtr, index: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     defer index.rc_decrement();
     const al = deref_list(self);
     const i = nat_rt.deref(index);
@@ -67,7 +66,6 @@ fn list_get(self: FatPtr, index: FatPtr) callconv(.c) FatPtr {
 }
 
 fn list_tryGet(self: FatPtr, index: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     defer index.rc_decrement();
     const al = deref_list(self);
     const i = nat_rt.deref(index);
@@ -76,13 +74,11 @@ fn list_tryGet(self: FatPtr, index: FatPtr) callconv(.c) FatPtr {
 }
 
 fn list_size(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const al = deref_list(self);
     return nat_rt.make(al.items.len);
 }
 
 fn list_isEmpty(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const al = deref_list(self);
     return bool_intrinsics.to_bool(al.items.len == 0);
 }
@@ -90,7 +86,6 @@ fn list_isEmpty(self: FatPtr) callconv(.c) FatPtr {
 // List-specific methods
 
 fn list_uList(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const al = deref_list(self);
     const storage = storage_mod.make_storage(al.items.len);
     storage.al.appendSliceAssumeCapacity(al.items);
@@ -101,14 +96,12 @@ fn list_uList(self: FatPtr) callconv(.c) FatPtr {
 // UList-specific methods
 
 fn ulist_add(self: FatPtr, item: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const al = deref_list(self);
     al.append(gc.allocator, item) catch @panic("OOM");
     return make_void();
 }
 
 fn ulist_takeFirst(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const al = deref_list(self);
     if (al.items.len == 0) return make_none();
     const first = al.orderedRemove(0);
@@ -116,7 +109,6 @@ fn ulist_takeFirst(self: FatPtr) callconv(.c) FatPtr {
 }
 
 fn ulist_clear(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const al = deref_list(self);
     for (al.items) |item| item.rc_decrement();
     al.clearRetainingCapacity();
@@ -124,7 +116,6 @@ fn ulist_clear(self: FatPtr) callconv(.c) FatPtr {
 }
 
 fn ulist_to_list(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     // Zero-copy retag: share backing with a List wrapper
     const caps = objs.deref(ListCaptures, self);
     storage_mod.retain_storage(@ptrFromInt(caps.list_ptr));

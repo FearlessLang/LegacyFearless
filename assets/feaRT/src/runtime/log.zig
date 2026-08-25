@@ -108,9 +108,10 @@ pub const TraceBuffer = struct {
 	pub fn dump(self: *const TraceBuffer, worker_id: usize) void {
 		var buf: [256]u8 = undefined;
 		const h = self.head.load(.monotonic);
+		if (h == 0) { return; }
 
 		var n = bufPrintHeader(&buf, worker_id, h);
-		sysWrite(&buf, n);
+		dumpWrite(&buf, n);
 
 		// Oldest to newest.
 		const count = @min(h, TRACE_BUF_SIZE);
@@ -121,7 +122,7 @@ pub const TraceBuffer = struct {
 			const idx = (start +% i) & (TRACE_BUF_SIZE - 1);
 			const ev = &self.events[idx];
 			n = bufPrintEvent(&buf, ev);
-			sysWrite(&buf, n);
+			dumpWrite(&buf, n);
 		}
 	}
 };
@@ -189,18 +190,27 @@ pub fn dumpAllTraceBuffers() void {
 }
 
 fn crashHandler(sig: c_int) callconv(.c) void {
+	// `SA.RESETHAND` only covers the thread that faults first. Every other worker
+	// can fault on the same address, and the dump itself can fault as it reads a
+	// buffer that a live thread still writes. Each of those re-enters the handler.
+	if (crash_dumped.swap(true, .acq_rel)) {
+		std.posix.raise(@enumFromInt(sig)) catch {};
+		return;
+	}
+	dump_budget.store(MAX_CRASH_DUMP_BYTES, .monotonic);
+
 	const header = "\n=== CRASH TRACE DUMP (signal ";
-	sysWrite(header, header.len);
+	dumpWrite(header, header.len);
 	var decbuf: [20]u8 = undefined;
 	const n = fmtDec(sig, &decbuf);
-	sysWrite(&decbuf, n);
+	dumpWrite(&decbuf, n);
 	const trailer = ") ===\n";
-	sysWrite(trailer, trailer.len);
+	dumpWrite(trailer, trailer.len);
 
 	dumpAllTraceBuffers();
 
 	const footer = "=== END TRACE DUMP ===\n";
-	sysWrite(footer, footer.len);
+	dumpWrite(footer, footer.len);
 
 	// Re-raise for the default behaviour, such as a core dump.
 	std.posix.raise(@enumFromInt(sig)) catch {};
@@ -208,6 +218,25 @@ fn crashHandler(sig: c_int) callconv(.c) void {
 
 fn sysWrite(buf: [*]const u8, len: usize) void {
 	_ = std.posix.system.write(std.posix.STDERR_FILENO, buf, len);
+}
+
+var crash_dumped: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+/// Spends down over one dump. The exit path leaves it at the initial value, so
+/// only a crash dump has a cap.
+var dump_budget: std.atomic.Value(usize) = std.atomic.Value(usize).init(std.math.maxInt(usize));
+
+const MAX_CRASH_DUMP_BYTES: usize = 8 << 20;
+
+/// Drops the write, and every write after it, once the budget is out.
+fn dumpWrite(buf: [*]const u8, len: usize) void {
+	var budget = dump_budget.load(.monotonic);
+	while (budget >= len) {
+		budget = dump_budget.cmpxchgWeak(budget, budget - len, .monotonic, .monotonic) orelse {
+			sysWrite(buf, len);
+			return;
+		};
+	}
 }
 
 fn bufPrintHeader(buf: *[256]u8, worker_id: usize, head: usize) usize {

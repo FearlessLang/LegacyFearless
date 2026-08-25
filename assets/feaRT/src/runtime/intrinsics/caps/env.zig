@@ -17,7 +17,9 @@ fn env_launchArgs(self: FatPtr) callconv(.c) FatPtr {
         i -= 1;
         const arg = std.mem.span(argv[i]);
         const s = str_rt.make_str_copy(arg);
-        acc = objs.call(acc, comptime h("mut .pushFront/1"), .{s}, @src());
+        const next = objs.call(acc, comptime h("mut .pushFront/1"), .{s}, @src());
+        acc.rc_decrement();
+        acc = next;
     }
     return acc;
 }

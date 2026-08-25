@@ -29,6 +29,25 @@ public interface FullLogicMain<Exe> extends LogicMain {
     cachePackageTypes(program);
     return exe;
   }
+  /// Writes what a code generation leaves behind for a later compilation to read. Only a
+  /// backend that caches a {@link CompilationUnit} has such artefacts.
+  default void cacheCodeGeneration(Exe exe) {}
+
+  /// Builds one {@link CompilationUnit}: everything a later compilation reads back, and no
+  /// backend build product. A unit names no entry point, so {@link #compileBackEnd} never runs.
+  default void buildUnit() {
+    var fullProgram= parse();
+    wellFormednessFull(fullProgram);
+    var program = inference(fullProgram);
+    wellFormednessCore(program);
+    var resolvedCalls = typeSystem(program);
+    var timer = new Timer();
+    verbosity().progress().printTask("Running code generation 🏭");
+    var exe = codeGeneration(lower(program,resolvedCalls));
+    verbosity().progress().printTask("Code generated 🥳 ("+timer.duration()+"ms)");
+    cacheCodeGeneration(exe);
+    cachePackageTypes(program);
+  }
   default ProcessBuilder run(){
     var executable = buildAndCache();
     return execution(executable);

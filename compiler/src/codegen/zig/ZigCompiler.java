@@ -1,6 +1,7 @@
 package codegen.zig;
 
 import codegen.MIR;
+import main.CompilationUnit;
 import main.CompilerFrontEnd;
 import main.InputOutput;
 import utils.Bug;
@@ -26,14 +27,17 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     this(verbosity, io, ZigBuildOpts.DEFAULT);
   }
 
-  private Path cacheBaseDir() { return io.cachedBase().resolve("zig-cache"); }
   /// Base holds VPF-parallelisable calls, so its generated Zig differs between a VPF build
   /// and a `--no-vpf` one, and each configuration needs its own cache directory: a shared one
   /// gives a `--no-vpf` build VPF-shaped base code and loses the sequential baseline it must
   /// measure. The split is at directory level because {@link main.java.HDCache} also caches
   /// the package type info here, and that info decides whether a package is cached at all.
-  public Path versionedCacheDir() {
-    return cacheBaseDir().resolve(currentVersion() + (opts.vpfEnabled() ? "vpf" : "novpf"));
+  public Path versionedCacheDir() { return versionedCacheDir(io.cachedBase(), opts); }
+  /// The same directory, for a caller that holds the cache root and the options but no
+  /// {@link InputOutput}, such as the one that builds a {@link CompilationUnit}.
+  public static Path versionedCacheDir(Path cachedBase, ZigBuildOpts opts) {
+    return cachedBase.resolve("zig-cache")
+      .resolve(currentVersion() + (opts.vpfEnabled() ? "vpf" : "novpf"));
   }
   private static String currentVersion() { return "v" + ZIG_CACHE_VERSION + "-"; }
   /// Zig's content-addressed build cache (`--cache-dir`). Each test compiles into its own
@@ -64,20 +68,13 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
   }
   private Path zigOutDir(Path workDir) { return workDir.resolve("zig-out"); }
 
-  /// True when this package's generated Zig is cached and reused by later programs. Only base
-  /// qualifies, its source being the same in every program. A whole-program pass must not
-  /// change such a package: the text it writes outlives the program it came from.
-  public static boolean isCacheablePackage(String name) {
-    return name.equals("base") || name.startsWith("base.");
-  }
-
   public Map<String, String> loadCachedPackages(MIR.Program program) {
     var dir = versionedCacheDir();
     if (!Files.isDirectory(dir)) { return Map.of(); }
     var cached = new HashMap<String, String>();
     for (var pkg : program.pkgs()) {
       var name = pkg.name();
-      if (!isCacheablePackage(name)) { continue; }
+      if (!CompilationUnit.isCached(name)) { continue; }
       var file = dir.resolve(name.replace(".", "_") + ".zig");
       if (Files.exists(file)) {
         cached.put(name, IoErr.of(() -> Files.readString(file)));
@@ -148,11 +145,13 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     });
   }
 
-  private void saveCachedPackages(ZigProgram program) {
+  /// Writes the generated Zig of every package a {@link CompilationUnit} holds. A unit build
+  /// calls this on its own, having no backend build to follow.
+  public void saveCachedPackages(ZigProgram program) {
     var dir = versionedCacheDir();
     IoErr.of(() -> Files.createDirectories(dir));
     for (var entry : program.packageFiles().entrySet()) {
-      if (!isCacheablePackage(entry.getKey())) { continue; }
+      if (!CompilationUnit.isCached(entry.getKey())) { continue; }
       var fileName = entry.getKey().replace(".", "_") + ".zig";
       IoErr.of(() -> Files.writeString(dir.resolve(fileName), entry.getValue()));
     }

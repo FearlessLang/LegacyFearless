@@ -43,6 +43,7 @@ fn reply_info(m: FatPtr, prefix: []const u8, path: []const u8) FatPtr {
     @memcpy(buf[0..prefix.len], prefix);
     @memcpy(buf[prefix.len..], path);
     const msg = str_rt.make_owned_str(buf.ptr, buf.len);
+    defer m.rc_decrement();
     return objs.call(m, comptime h("mut .info/1"), .{str_rt.make_info_msg(msg)}, @src());
 }
 
@@ -53,7 +54,6 @@ fn reply_info(m: FatPtr, prefix: []const u8, path: []const u8) FatPtr {
 /// path is already absolute (from `scoped_resolve`), so `openat` from `AT.FDCWD`
 /// is CWD-independent.
 fn readstr_run(self: FatPtr, m: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     const caps = objs.deref(ReadStrCaptures, self);
     const p: [*]const u8 = @ptrFromInt(caps.ptr);
     const path = p[0..@intCast(caps.len)];
@@ -98,7 +98,9 @@ fn readstr_run(self: FatPtr, m: FatPtr) callconv(.c) FatPtr {
         gc.free(@ptrCast(buf.ptr));
         return reply_info(m, "Invalid UTF-8 in file: ", path);
     }
-    return objs.call(m, comptime h("mut .ok/1"), .{str_rt.make_owned_str(data.ptr, data.len)}, @src());
+    const ok = objs.call(m, comptime h("mut .ok/1"), .{str_rt.make_owned_str(data.ptr, data.len)}, @src());
+    m.rc_decrement();
+    return ok;
 }
 
 pub const VT_ReadStrAction = actions.ActionVTable("<runtime read-str action>", &readstr_run, &readstr_drop);

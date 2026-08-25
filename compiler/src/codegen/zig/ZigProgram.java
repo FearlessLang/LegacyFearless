@@ -6,6 +6,8 @@ import id.Id;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+/// `mainFile` is empty for a {@link main.CompilationUnit}, which names no entry point and is
+/// never handed to the backend compiler.
 public record ZigProgram(Map<String, String> packageFiles, String mainFile, String entryPoint) {
   ZigProgram(ZigProgramBuilder builder) {
     this(builder.packageFiles, builder.mainFile, builder.entryPoint);
@@ -13,6 +15,13 @@ public record ZigProgram(Map<String, String> packageFiles, String mainFile, Stri
 
   public static ZigProgram of(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent, boolean vpfEnabled) {
     return new ZigProgram(new ZigProgramBuilder(entryPoint, program, cachedPkg, cachedContent, vpfEnabled));
+  }
+
+  /// The generated packages of a {@link main.CompilationUnit}. A unit stops after code
+  /// generation, so it needs the package files alone: `main.zig` starts at an entry point and
+  /// a unit has none.
+  public static ZigProgram ofUnit(MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent, boolean vpfEnabled) {
+    return new ZigProgram(new ZigProgramBuilder(null, program, cachedPkg, cachedContent, vpfEnabled));
   }
 }
 
@@ -28,7 +37,8 @@ class ZigProgramBuilder {
     this.program = program;
     this.cachedPkg = cachedPkg;
 
-    var gen = new ZigSingleCodegen(program, vpfEnabled);
+    var rta = new codegen.optimisations.RapidTypeAnalysis(program);
+    var gen = new ZigSingleCodegen(program, vpfEnabled, rta, cachedPkg);
 
     for (MIR.Package pkg : program.pkgs()) {
       if (cachedPkg.contains(pkg.name())) { continue; }
@@ -39,12 +49,12 @@ class ZigProgramBuilder {
         gen.visitTypeDef(pkg.name(), def, funs);
       }
     }
-    forceDirectCallTargets(gen);
+    forceDirectCallTargets(gen, rta);
 
     this.packageFiles = buildPackageFiles(gen);
     this.packageFiles.putAll(cachedContent);
 
-    this.mainFile = buildMainFile(gen);
+    this.mainFile = entryPoint == null ? "" : buildMainFile(gen);
   }
 
   /// Emits the type of every {@link MIR.DirectCall} target the walk above did not reach. A
@@ -53,8 +63,8 @@ class ZigProgramBuilder {
   ///
   /// A target in a cached package needs nothing: that text was generated in full before it was
   /// cached, so it already holds the wrapper.
-  private void forceDirectCallTargets(ZigSingleCodegen gen) {
-    for (var target : new codegen.optimisations.RapidTypeAnalysis(program).directCallTargets()) {
+  private void forceDirectCallTargets(ZigSingleCodegen gen, codegen.optimisations.RapidTypeAnalysis rta) {
+    for (var target : rta.directCallTargets()) {
       if (gen.emittedTypes.containsKey(target.getKey())) { continue; }
       var owningPkg = gen.packageOf(target.getKey());
       if (owningPkg == null || cachedPkg.contains(owningPkg)) { continue; }

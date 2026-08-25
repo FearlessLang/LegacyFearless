@@ -85,6 +85,19 @@ public class Main {
         }
         var projectPath = Path.of(res.getArgList().getFirst());
         var extraArgs = res.getArgList().subList(1, res.getArgList().size());
+        var zigOpts = new ZigBuildOpts(
+          res.hasOption("vpf-threshold") ? Integer.parseInt(res.getOptionValue("vpf-threshold")) : null,
+          !res.hasOption("no-vpf"),
+          res.hasOption("stack-traces"),
+          res.hasOption("debug"),
+          false
+        );
+        // A compilation unit is built before the application's InputOutput exists, because that
+        // record reads the cached files when it is made and would miss anything written later.
+        if (res.hasOption("feart") && (res.hasOption("build") || res.hasOption("run"))) {
+          LogicMainZig.buildMissingUnits(verbosity.get(), zigOpts, res.hasOption("imm-base"));
+          resetAll();
+        }
         var io = res.hasOption("feart")
           ? InputOutput.userFolderZig(res.getOptionValue("entry-point"), extraArgs, projectPath, res.hasOption("imm-base"))
           : res.hasOption("imm-base")
@@ -99,13 +112,6 @@ public class Main {
         }
 
         if (res.hasOption("feart")) {
-          var zigOpts = new ZigBuildOpts(
-            res.hasOption("vpf-threshold") ? Integer.parseInt(res.getOptionValue("vpf-threshold")) : null,
-            !res.hasOption("no-vpf"),
-            res.hasOption("stack-traces"),
-            res.hasOption("debug"),
-            false
-          );
           var zigMain = LogicMainZig.of(io, verbosity.get(), zigOpts);
           if (res.hasOption("check")) {
             zigMain.check();

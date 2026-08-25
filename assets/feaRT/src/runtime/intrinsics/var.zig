@@ -60,12 +60,10 @@ pub noinline fn release(cell: *VarCell) void {
 }
 
 fn get(self: FatPtr) FatPtr {
-    defer self.rc_decrement();
     return self.data.cell.value.load(.monotonic).*.share();
 }
 
 fn swap(self: FatPtr, new_value: FatPtr) FatPtr {
-    defer self.rc_decrement();
     var cell = self.data.cell;
     const new_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
     new_ptr.* = new_value;
@@ -76,7 +74,6 @@ fn swap(self: FatPtr, new_value: FatPtr) FatPtr {
 }
 
 fn set(self: FatPtr, new_value: FatPtr) FatPtr {
-    defer self.rc_decrement();
     var cell = self.data.cell;
     const new_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
     new_ptr.* = new_value;
@@ -102,7 +99,7 @@ const VT_TestVoid: objs.VTable = .{
 };
 
 fn vars_create(self: FatPtr, value: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
+    _ = self;
     return make(value);
 }
 
@@ -125,6 +122,7 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
             // self is not decremented: it moves into the swap call.
             const current = self.data.cell.value.load(.monotonic).*.share();
             const new_val = objs.call(args[0], h("mut #/1"), .{current}, @src());
+            args[0].rc_decrement();
             return swap(self, new_val);
         },
         else => objs.primitive_dispatch_failed(VT_Var.type_name, target_method),

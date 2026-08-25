@@ -26,12 +26,10 @@ fn deref_regex(fp: FatPtr) *const RegexCaptures {
 }
 
 fn regex_str(self: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     return deref_regex(self).pattern.share();
 }
 
 fn regex_is_match(self: FatPtr, haystack: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement();
     defer haystack.rc_decrement();
     const hay = str_rt.deref_str(haystack);
     const handle: ?*const anyopaque = @ptrFromInt(deref_regex(self).handle);
@@ -60,7 +58,7 @@ pub const VT_Regex: objs.VTable = .{
 /// `Regexs#(pattern: Str): Regex` -- compile the pattern, raising a deterministic
 /// `FearlessError` carrying the native compiler's message on failure.
 fn regexs_compile(self: FatPtr, pattern_fp: FatPtr) callconv(.c) FatPtr {
-    defer self.rc_decrement(); // singleton: no-op
+    _ = self;
     const pat = str_rt.deref_str(pattern_fp);
     var err: native.frt_buf = undefined;
     const handle = native.frt_regex_compile(pat.ptr, pat.len, &err);
