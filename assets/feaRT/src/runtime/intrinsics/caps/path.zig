@@ -23,7 +23,7 @@ fn path_inner(self: FatPtr) []const u8 {
     return p[0..@intCast(caps.len)];
 }
 
-fn path_drop(header: *anyopaque) callconv(.c) void {
+fn path_drop(header: *anyopaque, _: u32) callconv(.c) void {
     const Layout = objs.GenObjectLayoutType(PathCaptures);
     const self: *const Layout = @ptrCast(@alignCast(header));
     gc.free(@ptrFromInt(self.captures.ptr));

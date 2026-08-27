@@ -386,14 +386,14 @@ fn helpers_singleton() FatPtr {
     return objs.obj_k_singleton(&pb.VT__StrHelpers_0);
 }
 
-fn str_drop(header: *anyopaque) callconv(.c) void {
+fn str_drop(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void {
     const Layout = objs.GenObjectLayoutType(StrCaptures);
     const self: *const Layout = @ptrCast(@alignCast(header));
     const caps = self.captures;
     switch (@as(Ownership, @enumFromInt(caps.owns))) {
         .borrowed => {},
         .owned => free_bytes(@ptrFromInt(caps.ptr)),
-        .shared => owner_from_words(&caps).rc_decrement(),
+        .shared => owner_from_words(&caps).rc_decrement_as(releasing_worker_id),
     }
 }
 

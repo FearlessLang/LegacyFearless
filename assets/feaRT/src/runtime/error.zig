@@ -78,14 +78,15 @@ pub fn traceOf(p: FatPtr) ?*trace.TraceSnapshot {
     return p.data.err_cell.trace;
 }
 
-/// RC drop hook, routed from `objs.rc_decrement`'s `.primitiveContainer` branch.
-pub noinline fn release(cell: *ErrorCell) void {
+/// RC drop hook, routed from `objs.rc_decrement_as`'s `.primitiveContainer`
+/// branch. `releasing_worker_id` is the identity releasing the cell.
+pub noinline fn release(cell: *ErrorCell, releasing_worker_id: u32) void {
     const old_count = cell.ref_count.fetchSub(1, .release);
     if (std.debug.runtime_safety) std.debug.assert(old_count != 0);
     if (old_count != 1) return;
 
     _ = cell.ref_count.load(.acquire);
-    cell.info.*.rc_decrement();
+    cell.info.*.rc_decrement_as(releasing_worker_id);
     gc.recycleDestroy(FatPtr, cell.info, .error_release);
     gc.recycleDestroy(ErrorCell, cell, .error_release);
     gc.recordRcFree();

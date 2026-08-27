@@ -1,6 +1,8 @@
 const std = @import("std");
-const Fiber = @import("fiber.zig").Fiber;
-const switchFiber = @import("fiber.zig").switchFiber;
+const builtin = @import("builtin");
+const fiber_mod = @import("fiber.zig");
+const Fiber = fiber_mod.Fiber;
+const switchFiber = fiber_mod.switchFiber;
 const JoinObligation = @import("sync/join_obligation.zig").JoinObligation;
 const MpmcBoundedQueue = @import("sync/mpmc.zig").MpmcBoundedQueue;
 const ChaseLevDeque = @import("sync/chase_lev.zig").ChaseLevDeque;
@@ -19,7 +21,7 @@ const objs = @import("objs.zig");
 const FatPtr = objs.FatPtr;
 const TraceFrame = trace.TraceFrame;
 const TRACE_CAP = shadow_stack.TRACE_CAP;
-const LocalsDropHook = *const fn (*anyopaque) void;
+const LocalsDropHook = shadow_stack.LocalsDropHook;
 
 pub const StolenTask = struct {
 	thief_fn: *const fn (*anyopaque, ?*JoinObligation) FatPtr,
@@ -28,13 +30,17 @@ pub const StolenTask = struct {
 	obligation: *JoinObligation,
 	child_obligation: ?*JoinObligation,
 	initial_tokens: u32,
-	/// The promoter's tokens counter. The thief fiber copies it into its own
-	/// `parent_tokens_ptr` and refunds through it just before it fulfills the
-	/// obligation that can wake the parent.
-	parent_tokens_ptr: *u32,
-	/// The promoter's active scope at heartbeat time. The thief inherits it
-	/// through `saved_scope`, so cancel propagates across the fork. Null when the
-	/// promoter had no scope pushed.
+	/// The promoter. The thief fiber copies this into its own `parent` and pays
+	/// the token refund through it, just before it fulfills the obligation that
+	/// can wake the promoter.
+	parent: *Fiber,
+	/// True while this task, rather than a thief fiber built from it, holds the
+	/// reference that keeps `parent`'s mapping alive. It moves to the fiber at
+	/// creation, so exactly one of the two releases it.
+	holds_parent_ref: bool,
+	/// The scope of the promoted shadow frame. The thief inherits it through
+	/// `saved_scope`, so cancel propagates across the fork. Null when no scope was
+	/// pushed where that frame was.
 	scope: ?*scope_mod.Scope,
 	/// The promoter's trace stack at heartbeat time, copied into the thief fiber
 	/// with a boundary sentinel, so a crash on a stolen subtree shows the
@@ -75,7 +81,6 @@ pub const Worker = struct {
 	/// the victim list in lockstep.
 	steal_rng: u64,
 
-	/// Per-worker trace buffer
 	trace_buf: log.TraceBuffer,
 
 	/// Heap objects a foreign worker could not release, because this worker's
@@ -111,10 +116,13 @@ pub const Worker = struct {
 			// A recycled task must not carry the bit won by whoever retired the
 			// promotion it held before.
 			task.claimed.store(false, .monotonic);
+			// A recycled task must not carry the reference its last promotion held.
+			task.holds_parent_ref = false;
 			return task;
 		}
 		const task = gc.allocator.create(StolenTask) catch return null;
 		task.claimed = std.atomic.Value(bool).init(false);
+		task.holds_parent_ref = false;
 		return task;
 	}
 
@@ -128,7 +136,16 @@ pub const Worker = struct {
 	}
 
 	pub fn recycleTask(self: *Worker, task: *StolenTask) void {
-		task.locals_drop_fn(@ptrCast(&task.locals_copy));
+		// A task retired without ever becoming a thief fiber still owns the
+		// promoter's mapping reference, and nothing else will pay the join credit
+		// that would have released it.
+		if (task.holds_parent_ref) {
+			task.holds_parent_ref = false;
+			task.parent.releaseMapping();
+		}
+		// This runs on the scheduler stack as well as on a fiber, so the worker
+		// goes in explicitly rather than off the stack pointer.
+		task.locals_drop_fn(@ptrCast(&task.locals_copy), self.workerId());
 		if (self.task_pool_len < TASK_POOL_CAP) {
 			self.task_pool[self.task_pool_len] = task;
 			self.task_pool_len += 1;
@@ -137,11 +154,20 @@ pub const Worker = struct {
 		}
 	}
 
+	/// This worker's reference-counting id: its index plus one. Zero is reserved
+	/// for "no worker", so this is never the raw index.
+	pub inline fn workerId(self: *const Worker) u32 {
+		return @intCast(self.id + 1);
+	}
+
 	/// Fold the biased half of every object handed back to this worker into its
 	/// shared half. One relaxed load when there is nothing to do.
+	///
+	/// The scheduler loop calls this off a fiber stack, so the drain carries the
+	/// worker rather than reading it off the stack pointer.
 	pub inline fn drainMergeQueue(self: *Worker) void {
 		if (self.merge_queue_head.load(.monotonic) == null) return;
-		objs.drainMergeQueue(&self.merge_queue_head);
+		objs.drainMergeQueue(&self.merge_queue_head, self.workerId());
 	}
 
 	/// Set the fiber state to Parked and switch to the scheduler.
@@ -169,33 +195,35 @@ pub noinline fn getCurrentWorker() ?*Worker {
 	return w;
 }
 
-/// The biased-reference-counting identity of the running worker, `worker.id + 1`,
-/// or 0 when this thread runs no worker.
+/// The worker running the calling fiber, as `worker.id + 1`.
 ///
-/// Every biased reference-count operation calls this, so it is inline. The
-/// barrier is what keeps it correct, and it does so without the call: a fiber
-/// can resume on a different OS thread, and the clobber stops the compiler from
-/// reusing a value it read before that point.
+/// Every biased reference-count operation calls this, so it costs a mask of the
+/// stack pointer and one load out of the fiber header. That beats a thread-local
+/// on Darwin, where the runtime resolves one through `__tls_get_addr` even in a
+/// static build, and it cannot go stale: the value travels with the stack, so a
+/// fiber that resumes on another OS thread reads the new worker without a
+/// barrier.
 ///
-/// Inlining is safe only because the executable resolves this thread-local with
-/// the local-exec model, which the disassembly shows as a `%fs`-relative load at
-/// a fixed offset. The CPU applies the segment base at each access, so no
-/// register ever holds a thread-local address that a fiber switch could make
-/// stale. A build that puts the runtime in a shared library gets dynamic TLS,
-/// where an address comes from `__tls_get_addr` and a cached one does go stale.
-/// Such a build must make this `noinline` again.
-pub inline fn currentReferenceCountOwnerId() u32 {
-	const w = tls_current_worker;
-	asm volatile ("" ::: .{ .memory = true });
-	const worker = w orelse return 0;
-	return @intCast(worker.id + 1);
+/// VALID ONLY ON A FIBER STACK. Masking any other stack pointer lands on
+/// unrelated memory, and a value read from there would put a biased reference
+/// count in the hands of a thread it does not belong to. The scheduler
+/// loop reaches reference counting through `Worker.drainMergeQueue` and
+/// `Worker.recycleTask`, both of which pass `Worker.workerId` down instead.
+///
+/// A unit test runs on the test runner's own stack, which is no fiber, so the
+/// test build answers 0. That is the value an object with no biased half carries,
+/// and it sends every operation down the shared path, which is what the reference
+/// counts a test reads through `ObjectHeader.refCountForTest` assume.
+pub inline fn currentWorkerId() u32 {
+	if (builtin.is_test) return 0;
+	return fiber_mod.currentFiber().worker_id;
 }
 
-/// The merge queue of the worker whose biased identity is `owner_id`.
-pub fn mergeQueueFor(owner_id: u32) ?*objs.MergeQueue {
+/// The merge queue of the worker `worker_id` names.
+pub fn mergeQueueFor(worker_id: u32) ?*objs.MergeQueue {
 	const pool = global_pool orelse return null;
-	if (owner_id == 0 or owner_id > pool.workers.len) return null;
-	return &pool.workers[owner_id - 1].merge_queue_head;
+	if (worker_id == 0 or worker_id > pool.workers.len) return null;
+	return &pool.workers[worker_id - 1].merge_queue_head;
 }
 
 pub var global_done: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -457,7 +485,7 @@ fn workerLoop(worker: *Worker) void {
 
 	// The signal alt stack and recovery stack are what make a fiber stack
 	// overflow on this worker a catchable ND error.
-	signals.initThreadSignalStacks();
+	signals.initThreadSignalStacks(worker.workerId());
 
 	while (!global_done.load(.monotonic)) {
 		// 0. Release the objects foreign workers handed back. Nothing else may
@@ -473,6 +501,9 @@ fn workerLoop(worker: *Worker) void {
 				std.atomic.spinLoopHint();
 			}
 			worker.current_fiber = fiber;
+			// Before the switch: the fiber reads this for every reference count
+			// operation it runs, from its first instruction on.
+			fiber.worker_id = worker.workerId();
 			fiber.state = .Running;
 			log.trace_scheduling(.fiber_switch_to, @intFromPtr(fiber), worker.id, 0);
 			switchFiber(&worker.scheduler_fiber, fiber);
@@ -514,7 +545,10 @@ fn workerLoop(worker: *Worker) void {
 			const fiber = Fiber.create(&thiefTrampoline, @ptrCast(task)) catch @panic("OOM creating thief fiber");
 			fiber.state = .Ready;
 			fiber.tokens = task.initial_tokens;
-			fiber.parent_tokens_ptr = task.parent_tokens_ptr;
+			// The mapping reference moves with the parent: from here the fiber's
+			// join credit is what releases it, not `recycleTask`.
+			fiber.parent = task.parent;
+			task.holds_parent_ref = false;
 			fiber.saved_scope = task.scope;
 			if (build_options.trace_frames) {
 				trace.inheritStackTrace(fiber, &task.trace_frames, task.trace_top);

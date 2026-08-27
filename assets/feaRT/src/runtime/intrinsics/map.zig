@@ -18,10 +18,6 @@ const h = objs.hash_signature;
 // each key's u32 hash in the table, so those closures run once per operation
 // rather than once per probe.
 
-// ==========================================
-// Opt / Void helpers
-// ==========================================
-
 fn make_some(item: FatPtr) FatPtr {
     return objs.call(objs.obj_k_singleton(&pb.VT_Opts_0), comptime h("imm #/1"), .{item}, @src());
 }
@@ -31,10 +27,6 @@ fn make_none() FatPtr {
 fn make_void() FatPtr {
     return objs.obj_k_singleton(&pb.VT_Void_0);
 }
-
-// ==========================================
-// Entry
-// ==========================================
 
 pub const EntryCaptures = extern struct { key: FatPtr, value: FatPtr };
 
@@ -56,10 +48,6 @@ pub const VT_Entry: objs.VTable = .{
 fn make_entry(key: FatPtr, value: FatPtr) FatPtr {
     return objs.obj_k(EntryCaptures, &VT_Entry, .{ .key = key, .value = value });
 }
-
-// ==========================================
-// Hash-map context
-// ==========================================
 
 /// A by-value view of a `MapStorage`'s closures, handed to the std map for the
 /// duration of one operation. It holds *non-owning* copies of `keyEq`/`hashFn`
@@ -94,10 +82,6 @@ pub const MapCtx = struct {
 
 const MapType = std.ArrayHashMapUnmanaged(FatPtr, FatPtr, MapCtx, true);
 
-// ==========================================
-// Map storage
-// ==========================================
-
 pub const MapStorage = struct {
     map: MapType,
     keyEq: FatPtr,
@@ -115,15 +99,15 @@ fn ctx_of(storage: *MapStorage) MapCtx {
     return .{ .keyEq = storage.keyEq, .hashFn = storage.hashFn };
 }
 
-fn map_drop(header: *anyopaque) callconv(.c) void {
+fn map_drop(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void {
     const Layout = objs.GenObjectLayoutType(MapCaptures);
     const self: *const Layout = @ptrCast(@alignCast(header));
     const storage: *MapStorage = @ptrFromInt(self.captures.storage_ptr);
-    for (storage.map.keys()) |k| k.rc_decrement();
-    for (storage.map.values()) |v| v.rc_decrement();
+    for (storage.map.keys()) |k| k.rc_decrement_as(releasing_worker_id);
+    for (storage.map.values()) |v| v.rc_decrement_as(releasing_worker_id);
     storage.map.deinit(gc.allocator);
-    storage.keyEq.rc_decrement();
-    storage.hashFn.rc_decrement();
+    storage.keyEq.rc_decrement_as(releasing_worker_id);
+    storage.hashFn.rc_decrement_as(releasing_worker_id);
     gc.recycleDestroy(MapStorage, storage, .map_release);
 }
 
@@ -139,10 +123,6 @@ fn map_insert(storage: *MapStorage, key: FatPtr, val: FatPtr) void {
         gop.value_ptr.* = val;
     }
 }
-
-// ==========================================
-// LinkedHashMap methods
-// ==========================================
 
 fn map_plus(self: FatPtr, k: FatPtr, v: FatPtr) callconv(.c) FatPtr {
     map_insert(deref_storage(self), k, v);
@@ -186,10 +166,6 @@ fn map_clear(self: FatPtr) callconv(.c) FatPtr {
 fn map_key_eq(self: FatPtr, a: FatPtr, b: FatPtr) callconv(.c) FatPtr {
     return objs.call(deref_storage(self).keyEq, comptime h("read #/2"), .{ a, b }, @src());
 }
-
-// ==========================================
-// Flows
-// ==========================================
 
 /// Flow over an ordered internal slice (keys / values). `make_flow_from_items`
 /// takes ownership and does NOT share, so we copy + `.share()` each element
@@ -254,10 +230,6 @@ pub const VT_LinkedHashMap: objs.VTable = .{
     },
     .drop_fn = map_drop,
 };
-
-// ==========================================
-// Maps factory
-// ==========================================
 
 /// `Maps.hashMap(keyEq, hashFn): mut LinkedHashMap`. Takes ownership of both
 /// closures (stored in the map storage, released on map drop).

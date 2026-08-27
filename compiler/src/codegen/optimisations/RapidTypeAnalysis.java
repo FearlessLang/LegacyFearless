@@ -27,7 +27,7 @@ import java.util.Set;
 /// answer about one unsound to act on. It is also where a runtime-backed type is declared,
 /// and one of those has no object literal for the table to record at all.
 ///
-/// A caller must refuse those packages itself, by declaring package, which is enough because a
+/// A caller must refuse those packages itself by declaring a package, which is enough because a
 /// literal such a package owns can only register against a supertype that same package owns.
 /// {@link RcFreeTypes} takes the set of them for exactly this.
 ///
@@ -91,12 +91,12 @@ public final class RapidTypeAnalysis {
     var work = new ArrayList<MIR.E>();
     work.add(e);
     while (!work.isEmpty()) {
-      var next = work.remove(work.size() - 1);
+      var next = work.removeLast();
       switch (next) {
         case MIR.CreateObj k -> {
           var id = k.concreteT().id();
           if (literals.putIfAbsent(id, k) == null) { record(p, id); }
-          k.captures().forEach(work::add);
+          work.addAll(k.captures());
         }
         case MIR.X ignored -> {}
         case MIR.MCall call -> {

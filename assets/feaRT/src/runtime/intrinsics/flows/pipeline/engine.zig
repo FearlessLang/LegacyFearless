@@ -1,7 +1,8 @@
-//! The pipeline-parallel flow engine. The op array is cut at those ops; each
-//! serial op and each stateless run between them gets its own stage fiber,
-//! adjacent stages are connected by bounded SPSC rings, and the calling fiber
-//! consumes the last ring, running any trailing stateless ops plus the terminal.
+//! The pipeline-parallel flow engine. The op array is cut at each serial-work op
+//! (`scan`, `actor`, `map`/`peek` with a context). Each such op, and each
+//! stateless run between them, gets its own stage fiber. Bounded SPSC rings
+//! connect adjacent stages. The calling fiber consumes the last ring and runs the
+//! trailing stateless ops and the terminal.
 //!
 //! Deliberately shares no control flow with the DP flow driver: stateful chains
 //! never split, so `_FeartDriver`'s splitMatch already collapses them to the

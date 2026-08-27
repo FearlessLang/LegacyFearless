@@ -87,7 +87,7 @@ fn mut_str_str(self: FatPtr) callconv(.c) FatPtr {
     return str.make_str_copy(str.deref_str(self));
 }
 
-fn mut_str_drop(header: *anyopaque) callconv(.c) void {
+fn mut_str_drop(header: *anyopaque, _: u32) callconv(.c) void {
     const Layout = objs.GenObjectLayoutType(MutStrCaptures);
     const self: *const Layout = @ptrCast(@alignCast(header));
     str.free_bytes(@ptrFromInt(self.captures.buf_ptr));

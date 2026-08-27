@@ -38,7 +38,6 @@ fn drive(flow: *types.FeartFlow, ctx: *anyopaque, accept: exec.AcceptFn) void {
     }
 }
 
-// fold --------------------------------------------------------------
 const FoldCtx = struct { acc: FatPtr, combine: FatPtr };
 fn fold_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *FoldCtx = @ptrCast(@alignCast(ctx_ptr));
@@ -53,7 +52,6 @@ pub fn drive_fold(flow: *types.FeartFlow, initial: FatPtr, combine: FatPtr) FatP
     return ctx.acc;
 }
 
-// first / last -------------------------------------------------------
 const OneCtx = struct { value: ?FatPtr };
 fn first_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *OneCtx = @ptrCast(@alignCast(ctx_ptr));
@@ -77,7 +75,6 @@ pub fn drive_last(flow: *types.FeartFlow) FatPtr {
     return if (ctx.value) |v| object.make_some(v) else object.make_none();
 }
 
-// count --------------------------------------------------------------
 const CountCtx = struct { n: u64 };
 fn count_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *CountCtx = @ptrCast(@alignCast(ctx_ptr));
@@ -91,7 +88,6 @@ pub fn drive_count(flow: *types.FeartFlow) FatPtr {
     return nat_rt.make(ctx.n);
 }
 
-// list ---------------------------------------------------------------
 const ListCtx = struct { al: *ArrayList };
 fn list_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *ListCtx = @ptrCast(@alignCast(ctx_ptr));
@@ -105,7 +101,6 @@ pub fn drive_list(flow: *types.FeartFlow) FatPtr {
     return list_rt.wrap_list_storage(storage);
 }
 
-// for / forEffect ---------------------------------------------------
 const ForCtx = struct { callback: FatPtr };
 fn for_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *ForCtx = @ptrCast(@alignCast(ctx_ptr));
@@ -119,7 +114,6 @@ pub fn drive_for(flow: *types.FeartFlow, callback: FatPtr) FatPtr {
     return object.make_void();
 }
 
-// findMap (ordered) -------------------------------------------------
 // Used by `.findMap` / `.find` / `.first(pred)` -- ordered semantics, so the
 // accept fn must NOT trigger scope.request: the merge picks the leftmost
 // match, and a sibling fork could still hold an earlier match we need.
@@ -140,9 +134,8 @@ pub fn drive_find_map(flow: *types.FeartFlow, mapper: FatPtr) FatPtr {
     return if (ctx.found) |v| object.make_some(v) else object.make_none();
 }
 
-// unorderedFindMap (cancel-safe) ------------------------------------
-// Used by `.any` / `.all` / `.none` (via the rewritten `_TerminalOps`
-// defaults) and any direct caller of `.unorderedFindMap`. On first match,
+// Used by `.any` / `.all` / `.none` (through the `_TerminalOps` defaults)
+// and by any direct caller of `.unorderedFindMap`. On first match,
 // the accept fn calls `scope.request()` so any sibling forks running on
 // thief fibers observe the cancel at their next per-iteration scope poll.
 fn unordered_find_map_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {

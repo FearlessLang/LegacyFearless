@@ -1,18 +1,18 @@
-//! Non-deterministic hardware faults (stack overflow), wrapped as nondeterministic Fearless errors
+//! Hardware faults (stack overflow) become non-deterministic Fearless errors.
 //!
-//! A fiber's machine stack is a fixed mmap with a PROT_NONE guard page at its
-//! low end (see `fiber.zig`). Unbounded recursion grows the stack down past
-//! `stack_bottom` into the guard page, raising SIGSEGV. `@panic`-class ND faults
-//! are already handled by `ndPanicHandler`, but a hardware fault can't be caught
-//! by Zig's panic machinery, so we need a real signal handler.
+//! A fiber's machine stack is a fixed mmap with a PROT_NONE guard page at its low
+//! end (see `fiber.zig`). Unbounded recursion grows the stack down past
+//! `stack_bottom` into the guard page, which raises SIGSEGV. `ndPanicHandler`
+//! already covers `@panic`-class ND faults, but Zig's panic machinery cannot
+//! catch a hardware fault, so a real signal handler is necessary.
 //!
-//! Most of the complexity here is that the stack is basically rubbish at this point,
-//! so we need to make a new stack toi handle the signal. We rewrite the saved registers (via `sigreturn`)
-//! so context switching can clean up the error flags and start running our recovery code (`ndRecoveryTrampoline`).
-//! At that point, we then jump into the normal `feart_unwind` logic that user-level errors use.
+//! The faulting stack has no space left, so the signal needs a stack of its own.
+//! The handler rewrites the saved registers, and `sigreturn` then resumes on the
+//! recovery stack in `ndRecoveryTrampoline`, which enters the same `feart_unwind`
+//! path a user-level error uses.
 //!
-//! One extra point of complexity is GC. BDW-GC uses signals too. For now I just forward anything that isn't a fiber
-//! stack overflowing to the GC's error handler.
+//! BDW-GC uses signals too. A fault that is not a fiber stack overflow goes to
+//! the GC's own handler (`chainOldHandler`).
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -228,7 +228,7 @@ pub fn installNdHandlers() void {
 /// worker loop (covers worker 0 / the main thread too). The recovery stack is
 /// registered as a GC root range so an `Info` built on it during recovery isn't
 /// swept by a concurrent cycle collection.
-pub fn initThreadSignalStacks() void {
+pub fn initThreadSignalStacks(worker_id: u32) void {
     if (signal_block != 0) return;
 
     const base = fiber_mod.mapAlignedBlock() catch @panic("OOM mapping signal stacks");
@@ -248,6 +248,10 @@ pub fn initThreadSignalStacks() void {
         .entry_fn = null,
         .context = null,
         .state = .Running,
+        // Only this worker's thread ever runs on the recovery stack, so an
+        // unwind there keeps the biased reference counting paths it would have
+        // taken on the fiber that faulted.
+        .worker_id = worker_id,
     };
 
     var ss = std.posix.stack_t{

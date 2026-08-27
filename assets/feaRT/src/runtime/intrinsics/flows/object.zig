@@ -19,8 +19,6 @@ const FatPtr = objs.FatPtr;
 
 const ArrayList = std.ArrayList(FatPtr);
 
-// Forward-declared VTable. `instance.VT_Flow` fills it in.
-// Consumers import `instance.VT_Flow` directly; we only need the pointer here.
 pub const FlowCaptures = extern struct { flow_ptr: usize };
 
 pub fn deref_flow(fp: FatPtr) *types.FeartFlow {
@@ -48,44 +46,46 @@ pub fn retain_flow(f: *types.FeartFlow) void {
     _ = f.ref_count.fetchAdd(1, .monotonic);
 }
 
-pub fn release_flow(f: *types.FeartFlow) void {
+/// `releasing_worker_id` is the worker on whose behalf this release runs. It
+/// travels down from the start of the drop chain.
+pub fn release_flow(f: *types.FeartFlow, releasing_worker_id: u32) void {
     const old_count = f.ref_count.fetchSub(1, .release);
     if (std.debug.runtime_safety) std.debug.assert(old_count != 0);
     if (old_count != 1) return;
     _ = f.ref_count.load(.acquire);
 
-    release_source(f);
-    release_ops(f);
+    release_source(f, releasing_worker_id);
+    release_ops(f, releasing_worker_id);
     gc.recycleDestroy(types.FeartFlow, f, .flow_release);
 }
 
-pub fn flow_drop(header: *anyopaque) callconv(.c) void {
+pub fn flow_drop(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void {
     const Layout = objs.GenObjectLayoutType(FlowCaptures);
     const self: *const Layout = @ptrCast(@alignCast(header));
-    release_flow(@ptrFromInt(self.captures.flow_ptr));
+    release_flow(@ptrFromInt(self.captures.flow_ptr), releasing_worker_id);
 }
 
-fn release_source(f: *types.FeartFlow) void {
+fn release_source(f: *types.FeartFlow, releasing_worker_id: u32) void {
     // String sources own their owner Str directly (graphemes use a stateless
     // native lookup, so there is no cursor to release).
     switch (f.source) {
         .str => |ss| {
-            ss.owner.rc_decrement();
+            ss.owner.rc_decrement_as(releasing_worker_id);
             return;
         },
         else => {},
     }
 
-    if (f.source_owner) |owner| {
-        owner.rc_decrement();
+    if (f.source_owner) |source_owner| {
+        source_owner.rc_decrement_as(releasing_worker_id);
         return;
     }
 
     switch (f.source) {
         // List sources own one reference to every item in their slice; iteration
         // shares items out instead of moving them.
-        .list => |ls| for (ls.items) |item| item.rc_decrement(),
-        .single => |ss| if (!ss.consumed) ss.value.rc_decrement(),
+        .list => |ls| for (ls.items) |item| item.rc_decrement_as(releasing_worker_id),
+        .single => |ss| if (!ss.consumed) ss.value.rc_decrement_as(releasing_worker_id),
         .str => unreachable, // handled above
         .range_finite, .range_infinite, .empty => {},
     }
@@ -121,40 +121,40 @@ fn retain_ops(flow: *types.FeartFlow) void {
     }
 }
 
-fn release_ops(flow: *types.FeartFlow) void {
+fn release_ops(flow: *types.FeartFlow, releasing_worker_id: u32) void {
     const ref_count = flow.ops_ref_count orelse return;
     const old_count = ref_count.value.fetchSub(1, .release);
     if (std.debug.runtime_safety) std.debug.assert(old_count != 0);
     if (old_count != 1) return;
     _ = ref_count.value.load(.acquire);
 
-    for (flow.ops) |op| release_op(op);
+    for (flow.ops) |op| release_op(op, releasing_worker_id);
     gc.recycleDestroySlice(types.OpDesc, flow.ops, .flow_op_release);
     gc.recycleDestroy(types.OpsRefCount, ref_count, .flow_op_release);
 }
 
-fn release_op(op: types.OpDesc) void {
+fn release_op(op: types.OpDesc, releasing_worker_id: u32) void {
     switch (op.kind) {
         .scan => {
             const cell: *types.ScanCell = @ptrFromInt(op.state);
-            cell.acc.rc_decrement();
+            cell.acc.rc_decrement_as(releasing_worker_id);
             gc.recycleDestroy(types.ScanCell, cell, .flow_op_release);
-            op.closure.rc_decrement();
+            op.closure.rc_decrement_as(releasing_worker_id);
         },
         .actor => {
             const state: *types.ActorState = @ptrFromInt(op.state);
-            state.state_fp.rc_decrement();
-            state.callback.rc_decrement();
+            state.state_fp.rc_decrement_as(releasing_worker_id);
+            state.callback.rc_decrement_as(releasing_worker_id);
             gc.recycleDestroy(types.ActorState, state, .flow_op_release);
         },
         .map_ctx, .peek_ctx => {
             const cell: *types.CtxCell = @ptrFromInt(op.state);
-            cell.ctx.rc_decrement();
+            cell.ctx.rc_decrement_as(releasing_worker_id);
             gc.recycleDestroy(types.CtxCell, cell, .flow_op_release);
-            op.closure.rc_decrement();
+            op.closure.rc_decrement_as(releasing_worker_id);
         },
         .limit => {},
-        .map, .filter, .peek, .map_filter, .flat_map => op.closure.rc_decrement(),
+        .map, .filter, .peek, .map_filter, .flat_map => op.closure.rc_decrement_as(releasing_worker_id),
     }
 }
 
@@ -375,10 +375,9 @@ pub fn clone_with_finiteness(existing: *types.FeartFlow, is_finite: bool) *types
     return new_flow;
 }
 
-// ==========================================
-// Source constructors (used by factory + list.zig's .flow)
-// ==========================================
-
+/// Takes the one reference `source_owner` holds, which `release_source` drops.
+/// A `.flow` thunk therefore shares its receiver: self is lent to the thunk, not
+/// given to it.
 pub fn make_flow_from_list(comptime vt: *const objs.VTable, list_fp: FatPtr) FatPtr {
     const al = list_rt.deref_list(list_fp);
     const flow = create_flow(.{ .list = .{ .items = al.items, .index = 0 } }, true);
@@ -424,10 +423,6 @@ pub fn make_flow_from_single(comptime vt: *const objs.VTable, value: FatPtr) Fat
 pub fn make_empty_flow(comptime vt: *const objs.VTable) FatPtr {
     return make_flow_fp(vt, create_flow(.empty, true));
 }
-
-// ==========================================
-// Tiny Fearless-object helpers (Opt/Void) shared across the flow runtime
-// ==========================================
 
 const h = objs.hash_signature;
 

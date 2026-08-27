@@ -10,10 +10,6 @@ const pb = root.pkg_base;
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
 
-// ==========================================
-// Regex object (VT_Regex)
-// ==========================================
-
 /// A compiled regex. `handle` is the native `frt_regex_compile` handle (dropped
 /// on release); `pattern` is the original pattern Str, returned by `.str`.
 pub const RegexCaptures = extern struct {
@@ -36,11 +32,11 @@ fn regex_is_match(self: FatPtr, haystack: FatPtr) callconv(.c) FatPtr {
     return bool_intrinsics.to_bool(native.frt_regex_is_match(handle, hay.ptr, hay.len));
 }
 
-fn regex_drop(header: *anyopaque) callconv(.c) void {
+fn regex_drop(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void {
     const Layout = objs.GenObjectLayoutType(RegexCaptures);
     const self: *const Layout = @ptrCast(@alignCast(header));
     native.frt_regex_drop(@ptrFromInt(self.captures.handle));
-    self.captures.pattern.rc_decrement();
+    self.captures.pattern.rc_decrement_as(releasing_worker_id);
 }
 
 pub const VT_Regex: objs.VTable = .{
@@ -50,10 +46,6 @@ pub const VT_Regex: objs.VTable = .{
     .method_names = &.{ "read .str/0", "imm .isMatch/1" },
     .drop_fn = regex_drop,
 };
-
-// ==========================================
-// Regex factory (VT_Regexs)
-// ==========================================
 
 /// `Regexs#(pattern: Str): Regex` -- compile the pattern, raising a deterministic
 /// `FearlessError` carrying the native compiler's message on failure.

@@ -56,8 +56,6 @@ pub fn make_void() FatPtr {
     return objs.obj_k_singleton(&pb.VT_Void_0);
 }
 
-// Shared instance methods (List + UList)
-
 fn list_get(self: FatPtr, index: FatPtr) callconv(.c) FatPtr {
     defer index.rc_decrement();
     const al = deref_list(self);
@@ -83,8 +81,6 @@ fn list_isEmpty(self: FatPtr) callconv(.c) FatPtr {
     return bool_intrinsics.to_bool(al.items.len == 0);
 }
 
-// List-specific methods
-
 fn list_uList(self: FatPtr) callconv(.c) FatPtr {
     const al = deref_list(self);
     const storage = storage_mod.make_storage(al.items.len);
@@ -92,8 +88,6 @@ fn list_uList(self: FatPtr) callconv(.c) FatPtr {
     for (storage.al.items) |item| _ = item.share();
     return wrap_ulist_storage(storage);
 }
-
-// UList-specific methods
 
 fn ulist_add(self: FatPtr, item: FatPtr) callconv(.c) FatPtr {
     const al = deref_list(self);
@@ -116,7 +110,7 @@ fn ulist_clear(self: FatPtr) callconv(.c) FatPtr {
 }
 
 fn ulist_to_list(self: FatPtr) callconv(.c) FatPtr {
-    // Zero-copy retag: share backing with a List wrapper
+    // Zero-copy retag: a List wrapper over the same storage.
     const caps = objs.deref(ListCaptures, self);
     storage_mod.retain_storage(@ptrFromInt(caps.list_ptr));
     return objs.obj_k(ListCaptures, &VT_List, caps.*);
@@ -128,19 +122,19 @@ fn T_list_as_read(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
     return pb.List_1__Zdotas_1_read_Zfun(f_m, self_m);
 }
 fn T_list_flow_mut(self_m: FatPtr) callconv(.c) FatPtr {
-    return flow_rt.make_flow_from_list(self_m);
+    return flow_rt.make_flow_from_list(self_m.share());
 }
 fn T_list_flowmut_mut(self_m: FatPtr, start_m: FatPtr, end_m: FatPtr) callconv(.c) FatPtr {
     return pb.List_1__Zdot_flowmut_2_mut_Zfun(start_m, end_m, self_m);
 }
 fn T_list_flow_read(self_m: FatPtr) callconv(.c) FatPtr {
-    return flow_rt.make_flow_from_list(self_m);
+    return flow_rt.make_flow_from_list(self_m.share());
 }
 fn T_list_flowread_read(self_m: FatPtr, start_m: FatPtr, end_m: FatPtr) callconv(.c) FatPtr {
     return pb.List_1__Zdot_flowread_2_read_Zfun(start_m, end_m, self_m);
 }
 fn T_list_flow_imm(self_m: FatPtr) callconv(.c) FatPtr {
-    return flow_rt.make_flow_from_list(self_m);
+    return flow_rt.make_flow_from_list(self_m.share());
 }
 fn T_list_flowimm_imm(self_m: FatPtr, start_m: FatPtr, end_m: FatPtr) callconv(.c) FatPtr {
     return pb.List_1__Zdot_flowimm_2_imm_Zfun(start_m, end_m, self_m);
@@ -168,16 +162,16 @@ fn T_ulist_as_read(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
     return pb.UList_1__Zdotas_1_read_Zfun(f_m, self_m);
 }
 fn T_ulist_flow_mut(self_m: FatPtr) callconv(.c) FatPtr {
-    return flow_rt.make_flow_from_list(self_m);
+    return flow_rt.make_flow_from_list(self_m.share());
 }
 fn T_ulist_flow_read(self_m: FatPtr) callconv(.c) FatPtr {
-    return flow_rt.make_flow_from_list(self_m);
+    return flow_rt.make_flow_from_list(self_m.share());
 }
 fn T_ulist_flowread_read(self_m: FatPtr, start_m: FatPtr, end_m: FatPtr) callconv(.c) FatPtr {
     return pb.UList_1__Zdot_flowread_2_read_Zfun(start_m, end_m, self_m);
 }
 fn T_ulist_flow_imm(self_m: FatPtr) callconv(.c) FatPtr {
-    return flow_rt.make_flow_from_list(self_m);
+    return flow_rt.make_flow_from_list(self_m.share());
 }
 fn T_ulist_flowimm_imm(self_m: FatPtr, start_m: FatPtr, end_m: FatPtr) callconv(.c) FatPtr {
     return pb.UList_1__Zdot_flowimm_2_imm_Zfun(start_m, end_m, self_m);

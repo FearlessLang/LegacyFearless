@@ -31,7 +31,7 @@ pub const Op = enum {
     /// A fold of a biased count into a shared count. At most one per object.
     rc_merge,
     /// An object handed to its owning worker because a foreign worker released a
-    /// reference the owner's biased count still covered.
+    /// reference the biased half still covered.
     rc_queue_push,
     /// `rt.call` on an object receiver: storage-mode switch, then inline cache.
     virtual_call,

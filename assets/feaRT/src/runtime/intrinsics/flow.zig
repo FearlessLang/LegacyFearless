@@ -18,7 +18,8 @@ pub const VT_Flow = instance.VT_Flow;
 pub const VT_FlowFactory = factory.VT_FlowFactory;
 pub const VT_FeartDriver = instance.VT_FeartDriver;
 
-// Called by `list.zig` when a List/UList hands itself to `.flow`.
+// Called by `list.zig` when a List/UList hands itself to `.flow`. It takes one
+// reference, so a thunk with a borrowed receiver shares before it calls.
 pub fn make_flow_from_list(list_fp: FatPtr) FatPtr {
     return object.make_flow_from_list(&VT_Flow, list_fp);
 }

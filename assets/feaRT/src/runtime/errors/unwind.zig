@@ -31,6 +31,9 @@ const writeStderr = @import("./io.zig").writeStderr;
 pub fn feart_unwind(payload: FatPtr) noreturn {
     gc.disable_cycle_collection();
     const cursor = shadow_stack.getShadowCursor() orelse dieNoFiber();
+    // One read for the whole walk: an unwind stays on the stack it started on,
+    // so every frame releases on behalf of the same worker.
+    const releasing_worker_id = worker_mod.currentWorkerId();
 
     var top = cursor.top;
     while (top > 0) {
@@ -48,7 +51,7 @@ pub fn feart_unwind(payload: FatPtr) noreturn {
             if (obl != CLAIMED) shadow_stack.fulfillChildObligation(top, payload.share());
         }
 
-        frame.drop_fn(frame.locals);
+        frame.drop_fn(frame.locals, releasing_worker_id);
         cursor.top = top;
         cursor.lowest_unpromoted = @min(cursor.lowest_unpromoted, top);
     }

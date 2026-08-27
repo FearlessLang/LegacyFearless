@@ -32,7 +32,7 @@ pub fn hash_signature(comptime str: []const u8) u64 {
 /// Biased reference counting, after Choi et al. (PACT'18). A heap object records
 /// the worker that built it. That worker adds and removes references with plain
 /// loads and stores on `biased`; every other worker uses atomics on `shared`.
-/// The true reference count is `biased + count(shared)`. Once the owner gives up
+/// The true reference count is `biased + count(shared)`. Once that worker gives up
 /// the object, the two halves merge and the object stays shared-only.
 ///
 /// `extern` keeps the C layout, so the header is always the first bytes.
@@ -41,18 +41,20 @@ pub const ObjectHeader = extern struct {
 	/// `QUEUED`. The count moves in `UNIT` steps, so it never carries into the
 	/// flags, and the flags are only set, never cleared.
 	shared: std.atomic.Value(u32),
-	/// References held for the owner worker. No other thread may touch it.
+	/// References held for the worker named by `biased_worker_id`. No other thread
+	/// may touch it.
 	biased: u32,
 	drop_fn: ?DropFn,
 	alloc_size: usize,
-	/// The owning worker's id plus one, or 0 for an object with no owner. Atomic
-	/// because non-owners read it while the owner clears it, but `.monotonic` is
-	/// enough: only a thread that reads its own id can take a biased path, and
-	/// every other reader sees a foreign id or 0 and takes the shared path.
-	owner: std.atomic.Value(u32),
+	/// The worker whose `biased` half covers references, as its id plus one, or 0
+	/// when no worker holds a biased reference. Atomic because other workers read
+	/// it while this one clears it, but `.monotonic` is enough: only a thread that
+	/// reads its own id can take a biased path, and every other reader sees a
+	/// foreign id or 0 and takes the shared path.
+	biased_worker_id: std.atomic.Value(u32),
 	alloc_align_log2: u8,
 
-	/// The reference count as seen by a thread that is not the owner. A unit test
+	/// The reference count as seen by a thread with no biased half. A unit test
 	/// binds no worker, so every operation takes the shared path and this is the
 	/// whole count.
 	pub fn refCountForTest(self: *const ObjectHeader) u32 {
@@ -66,7 +68,11 @@ comptime {
 	assert(@sizeOf(ObjectHeader) == 32);
 }
 
-pub const DropFn = *const fn (*anyopaque) callconv(.c) void;
+/// Releases the reference-counted captures of a dying object. The second
+/// argument is the worker to release them on behalf of: a drop chain can start
+/// on the scheduler stack, where the stack pointer masks to no fiber, so the
+/// worker travels with the call.
+pub const DropFn = *const fn (*anyopaque, releasing_worker_id: u32) callconv(.c) void;
 pub const BoxFn = *const fn (FatPtr) callconv(.c) FatPtr;
 
 const MERGED: u32 = 1;
@@ -164,29 +170,45 @@ pub const FatPtr = extern struct {
 		}
 	}
 
+	/// Release one reference held by the fiber this runs on. Generated code
+	/// calls this, so the identity comes off the stack pointer.
+	///
+	/// The storage mode decides first, so a value that holds no reference count
+	/// returns without reading an identity it would not use.
 	pub fn rc_decrement(ptr: *const FatPtr) void {
+		switch (ptr.vt.storage_mode) {
+			.primitive, .singleton, .transient => return,
+			.heap, .primitiveContainer =>
+				ptr.rc_decrement_as(worker_mod.currentWorkerId()),
+		}
+	}
+
+	/// Release one reference on behalf of `releasing_worker_id`, for a caller that may not be on a
+	/// fiber stack. A drop chain carries the identity from its start, so an
+	/// object released on the scheduler stack takes the same paths it would have
+	/// taken on the worker's own fiber.
+	pub fn rc_decrement_as(ptr: *const FatPtr, releasing_worker_id: u32) void {
 		switch (ptr.vt.storage_mode) {
 			.primitive, .singleton, .transient => return,
 			.primitiveContainer =>
 				if (ptr.vt == &var_rt.VT_Var)
-					var_rt.release(ptr.data.cell)
+					var_rt.release(ptr.data.cell, releasing_worker_id)
 				else if (ptr.vt == &isopod_rt.VT_IsoPod)
-					isopod_rt.release(ptr.data.iso_cell)
+					isopod_rt.release(ptr.data.iso_cell, releasing_worker_id)
 				else if (ptr.vt == &error_rt.VT_RuntimeError or ptr.vt == &error_rt.VT_RuntimeNdError)
-					error_rt.release(ptr.data.err_cell),
-			.heap => rc_decrement_slow(ptr),
+					error_rt.release(ptr.data.err_cell, releasing_worker_id),
+			.heap => rc_decrement_slow(ptr, releasing_worker_id),
 		}
 	}
 
-	noinline fn rc_decrement_slow(ptr: *const FatPtr) void {
+	noinline fn rc_decrement_slow(ptr: *const FatPtr, releasing_worker_id: u32) void {
 		op_counters.bump(.rc_decrement);
 		const obj = ptr.boxed_value();
-		const me = worker_mod.currentReferenceCountOwnerId();
-		if (me != 0 and obj.owner.load(.monotonic) == me) {
-			ownerDecRef(obj);
+		if (releasing_worker_id != 0 and obj.biased_worker_id.load(.monotonic) == releasing_worker_id) {
+			biasedDecRef(obj, releasing_worker_id);
 			return;
 		}
-		sharedDecRef(obj);
+		sharedDecRef(obj, releasing_worker_id);
 	}
 
 	pub fn is_primitive(ptr: *const FatPtr) bool {
@@ -205,10 +227,11 @@ pub const FatPtr = extern struct {
 	}
 };
 
-/// The owner takes the plain path; anyone else pays for an atomic.
+/// The worker holding the biased half takes the plain path; anyone else pays for
+/// an atomic.
 inline fn incRef(obj: *ObjectHeader) void {
-	const me = worker_mod.currentReferenceCountOwnerId();
-	if (me != 0 and obj.owner.load(.monotonic) == me) {
+	const me = worker_mod.currentWorkerId();
+	if (me != 0 and obj.biased_worker_id.load(.monotonic) == me) {
 		const biased = obj.biased;
 		if (biased >= BIASED_LIMIT) {
 			@branchHint(.unlikely);
@@ -229,42 +252,43 @@ noinline fn sharedIncRef(obj: *ObjectHeader) void {
 	}
 }
 
-/// The owner is the only writer of `biased`, so this needs no atomic until the
-/// last biased reference goes. The object then gives up its owner and merges the
-/// two halves, and that merge is what discovers whether it is dead.
-fn ownerDecRef(obj: *ObjectHeader) void {
+/// The worker holding the biased half is its only writer, so this needs no atomic
+/// until the last biased reference goes. The object then clears
+/// `biased_worker_id` and merges the two halves, and that merge is what discovers
+/// whether it is dead.
+fn biasedDecRef(obj: *ObjectHeader, releasing_worker_id: u32) void {
 	const biased = obj.biased;
 	if (std.debug.runtime_safety) assert(biased != 0);
 	obj.biased = biased - 1;
 	if (biased != 1) return;
 
-	obj.owner.store(0, .monotonic);
+	obj.biased_worker_id.store(0, .monotonic);
 	op_counters.bump(.rc_merge);
 	const old = obj.shared.fetchOr(MERGED, .acq_rel);
 	// With the biased half at zero the shared count is the whole count, so a
 	// negative value means a thread released a reference it never held.
 	if (std.debug.runtime_safety) assert(sharedCount(old) >= 0);
-	if (sharedCount(old) == 0) freeHeader(obj);
+	if (sharedCount(old) == 0) freeHeader(obj, releasing_worker_id);
 }
 
-/// Release one reference held by a thread that is not the owner.
+/// Release one reference from a thread that holds no biased half.
 ///
 /// One compare-and-swap picks between three outcomes, so no other thread can see
 /// the object look dead while this call still needs it:
 ///   * already merged: a plain decrement, and the object dies at zero;
 ///   * the shared count stays at or above zero: a plain decrement, and the
 ///     object lives on its remaining references;
-///   * the shared count would go below zero, so the owner's biased count still
-///     covers this reference. Hand the object to the owner. The queue entry
+///   * the shared count would go below zero, so the biased half still covers this
+///     reference. Hand the object to the worker holding it. The queue entry
 ///     takes over the reference, which is why the count does not move.
-fn sharedDecRef(obj: *ObjectHeader) void {
+fn sharedDecRef(obj: *ObjectHeader, releasing_worker_id: u32) void {
 	op_counters.bump(.rc_shared_decrement);
 	while (true) {
 		const word = obj.shared.load(.monotonic);
-		const owner = obj.owner.load(.monotonic);
+		const biased_worker_id = obj.biased_worker_id.load(.monotonic);
 		if (!isMerged(word) and !isQueued(word) and sharedCount(word) <= 0) {
 			if (obj.shared.cmpxchgWeak(word, word | QUEUED, .acq_rel, .monotonic) != null) continue;
-			queueForMerge(obj, owner);
+			queueForMerge(obj, biased_worker_id);
 			return;
 		}
 		if (obj.shared.cmpxchgWeak(word, word -% UNIT, .release, .monotonic) != null) continue;
@@ -274,14 +298,14 @@ fn sharedDecRef(obj: *ObjectHeader) void {
 			// Acquire the release sequence from prior decrements before the drop
 			// hooks run.
 			_ = obj.shared.load(.acquire);
-			freeHeader(obj);
+			freeHeader(obj, releasing_worker_id);
 		}
 		return;
 	}
 }
 
 /// An object whose biased half must fold into its shared half before it can
-/// die. The entry owns a reference, so the object survives until the owner
+/// die. The entry owns a reference, so the object survives until that worker
 /// drains the queue.
 pub const MergeNode = extern struct {
 	next: ?*MergeNode,
@@ -291,11 +315,11 @@ pub const MergeNode = extern struct {
 pub const MergeQueue = std.atomic.Value(?*MergeNode);
 
 /// Treiber stack push, the same shape as the destroyer's backlog.
-fn queueForMerge(obj: *ObjectHeader, owner: u32) void {
+fn queueForMerge(obj: *ObjectHeader, biased_worker_id: u32) void {
 	op_counters.bump(.rc_queue_push);
-	// A negative shared count means the owner's biased half covers a reference,
-	// so the object has an owner and that owner has a queue.
-	const head = worker_mod.mergeQueueFor(owner) orelse @panic("Merge of an object with no owning worker");
+	// A negative shared count means a biased half covers a reference, so the object
+	// names a worker and that worker has a queue.
+	const head = worker_mod.mergeQueueFor(biased_worker_id) orelse @panic("Merge of an object with no owning worker");
 	const node = gc.recycleAlloc(MergeNode);
 	node.obj = obj;
 	var old = head.load(.monotonic);
@@ -308,34 +332,37 @@ fn queueForMerge(obj: *ObjectHeader, owner: u32) void {
 }
 
 /// Runs on the owning worker, the only thread allowed to read `biased`.
-pub fn drainMergeQueue(head: *MergeQueue) void {
+///
+/// The worker is passed in because the scheduler loop
+/// drains off a fiber stack.
+pub fn drainMergeQueue(head: *MergeQueue, releasing_worker_id: u32) void {
 	var node = head.swap(null, .acquire) orelse return;
 	while (true) {
 		const next = node.next;
-		mergeAndRelease(node.obj);
+		mergeAndRelease(node.obj, releasing_worker_id);
 		gc.recycleDestroy(MergeNode, node, .rc_merge_node);
 		node = next orelse return;
 	}
 }
 
-fn mergeAndRelease(obj: *ObjectHeader) void {
-	if (obj.owner.load(.monotonic) != 0) {
+fn mergeAndRelease(obj: *ObjectHeader, releasing_worker_id: u32) void {
+	if (obj.biased_worker_id.load(.monotonic) != 0) {
 		op_counters.bump(.rc_merge);
 		const biased = obj.biased;
 		obj.biased = 0;
-		obj.owner.store(0, .monotonic);
+		obj.biased_worker_id.store(0, .monotonic);
 		// The entry's own reference is one of the biased ones, so the shared
 		// count stays above zero between these two updates and no other thread
 		// can decide the object is dead inside the gap.
 		if (biased != 0) _ = obj.shared.fetchAdd(biased *% UNIT, .monotonic);
 		_ = obj.shared.fetchOr(MERGED, .acq_rel);
 	}
-	sharedDecRef(obj);
+	sharedDecRef(obj, releasing_worker_id);
 }
 
 /// The caller has already established that the last reference is gone.
-fn freeHeader(obj: *ObjectHeader) void {
-	if (obj.drop_fn) |drop| drop(@ptrCast(obj));
+fn freeHeader(obj: *ObjectHeader, releasing_worker_id: u32) void {
+	if (obj.drop_fn) |drop| drop(@ptrCast(obj), releasing_worker_id);
 	const bytes = @as([*]u8, @ptrCast(obj))[0..obj.alloc_size];
 	const alloc_size = obj.alloc_size;
 	const align_log2 = obj.alloc_align_log2;
@@ -431,7 +458,7 @@ const InlineCache = struct {
 
 /// Slow path: a linear scan of the VTable.
 fn lookup_method(vt: *const VTable, target_hash: u64) ?*const anyopaque {
-	// This compiles very well for the small arrays a VTable holds.
+	// A linear scan is fastest for the small arrays a VTable holds.
 	for (vt.hashes, 0..) |h, i| {
 		if (h == target_hash) {
 			return vt.methods[i];
@@ -608,16 +635,16 @@ pub fn obj_k(
 		break :blk .{ .ptr = fresh, .raw_size = @sizeOf(Layout) };
 	};
 	// The building worker owns the object and holds its first reference in the
-	// biased half. An object built before the pool starts has no owner, so it is
+	// biased half. An object built before the pool starts names no worker, so it is
 	// born merged and every operation on it takes the shared path.
-	const me = worker_mod.currentReferenceCountOwnerId();
+	const me = worker_mod.currentWorkerId();
 	memory_slot.ptr.* = .{
 			.header = .{
 				.shared = std.atomic.Value(u32).init(if (me == 0) UNIT | MERGED else 0),
 				.biased = if (me == 0) 0 else 1,
 				.drop_fn = vt.drop_fn orelse captureDropFn(Captures),
 				.alloc_size = memory_slot.raw_size,
-				.owner = std.atomic.Value(u32).init(me),
+				.biased_worker_id = std.atomic.Value(u32).init(me),
 				.alloc_align_log2 = align_log2,
 			},
 		.captures = shareCaptureFields(Captures, captures),
@@ -639,7 +666,7 @@ pub fn obj_k_singleton(comptime vt: *const VTable) FatPtr {
 				.biased = 0,
 				.drop_fn = null,
 				.alloc_size = @sizeOf(Layout),
-				.owner = std.atomic.Value(u32).init(0),
+				.biased_worker_id = std.atomic.Value(u32).init(0),
 				.alloc_align_log2 = @intFromEnum(std.mem.Alignment.of(Layout)),
 			},
 			.captures = .{},
@@ -664,7 +691,7 @@ pub fn init_transient_obj(
 			.biased = 0,
 			.drop_fn = vt.drop_fn orelse captureDropFn(Captures),
 			.alloc_size = @sizeOf(GenObjectLayoutType(Captures)),
-			.owner = std.atomic.Value(u32).init(0),
+			.biased_worker_id = std.atomic.Value(u32).init(0),
 			.alloc_align_log2 = @intFromEnum(std.mem.Alignment.of(GenObjectLayoutType(Captures))),
 		},
 		.captures = shareCaptureFields(Captures, captures),
@@ -676,7 +703,7 @@ pub fn init_transient_obj(
 }
 
 pub fn drop_transient_obj(comptime Captures: type, obj: *GenObjectLayoutType(Captures)) void {
-	dropCaptureFields(Captures, &obj.captures);
+	dropCaptureFields(Captures, &obj.captures, worker_mod.currentWorkerId());
 }
 
 pub fn deref(comptime Captures: type, ptr: FatPtr) *const Captures {
@@ -688,10 +715,10 @@ pub fn deref(comptime Captures: type, ptr: FatPtr) *const Captures {
 fn captureDropFn(comptime Captures: type) ?DropFn {
 	if (!capturesContainFatPtr(Captures)) return null;
 	return struct {
-		fn drop(header: *anyopaque) callconv(.c) void {
+		fn drop(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void {
 			const Layout = GenObjectLayoutType(Captures);
 			const self: *const Layout = @ptrCast(@alignCast(header));
-			dropCaptureFields(Captures, &self.captures);
+			dropCaptureFields(Captures, &self.captures, releasing_worker_id);
 		}
 	}.drop;
 }
@@ -734,11 +761,11 @@ fn shareCaptureFields(comptime Captures: type, captures: Captures) Captures {
 	return copy;
 }
 
-fn dropCaptureFields(comptime Captures: type, captures: *const Captures) void {
+fn dropCaptureFields(comptime Captures: type, captures: *const Captures, releasing_worker_id: u32) void {
 	switch (@typeInfo(Captures)) {
 		.@"struct" => |info| inline for (info.fields) |field| {
 			if (comptime isCountedField(Captures, field)) {
-				@field(captures.*, field.name).rc_decrement();
+				@field(captures.*, field.name).rc_decrement_as(releasing_worker_id);
 			}
 		},
 		else => {},

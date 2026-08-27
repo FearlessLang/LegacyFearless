@@ -45,7 +45,10 @@ pub fn spawnFiber(entry: *const fn (*Fiber) void, context: *anyopaque, obl: *Joi
     const child = Fiber.create(entry, context) catch @panic("OOM creating pipeline fiber");
     child.root_obligation = obl;
     child.saved_scope = scope_mod.activeScope();
-    child.parent_tokens_ptr = &parent_fiber.tokens;
+    // The child pays a join credit into the parent's `tokens`, so it holds the
+    // parent's mapping alive until `creditParentTokens` releases it.
+    parent_fiber.retainMapping();
+    child.parent = parent_fiber;
     if (build_options.trace_frames) {
         trace.inheritStackTrace(child, &parent_fiber.trace_frames, parent_fiber.trace_top);
     }

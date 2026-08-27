@@ -43,18 +43,20 @@ pub fn retain_storage(storage: *ListStorage) void {
     _ = storage.ref_count.fetchAdd(1, .monotonic);
 }
 
-pub fn release_storage(storage: *ListStorage) void {
+/// `releasing_worker_id` is the worker on whose behalf this release runs. It
+/// travels down from the start of the drop chain.
+pub fn release_storage(storage: *ListStorage, releasing_worker_id: u32) void {
     const old_count = storage.ref_count.fetchSub(1, .release);
     if (std.debug.runtime_safety) std.debug.assert(old_count != 0);
     if (old_count != 1) return;
     _ = storage.ref_count.load(.acquire);
-    for (storage.al.items) |item| item.rc_decrement();
+    for (storage.al.items) |item| item.rc_decrement_as(releasing_worker_id);
     storage.al.deinit(gc.allocator);
     gc.recycleDestroy(ListStorage, storage, .list_release);
 }
 
-pub fn list_drop(header: *anyopaque) callconv(.c) void {
+pub fn list_drop(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void {
     const Layout = objs.GenObjectLayoutType(ListCaptures);
     const self: *const Layout = @ptrCast(@alignCast(header));
-    release_storage(@ptrFromInt(self.captures.list_ptr));
+    release_storage(@ptrFromInt(self.captures.list_ptr), releasing_worker_id);
 }

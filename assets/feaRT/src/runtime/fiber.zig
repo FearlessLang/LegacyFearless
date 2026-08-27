@@ -48,9 +48,9 @@ pub inline fn currentFiber() *Fiber {
 /// stack.
 ///
 /// For paths that may run off a fiber stack, where masking `sp` would land on
-/// unrelated memory. It costs the thread-local read `currentFiber` exists to
-/// avoid, so keep it off the hot paths. On the recovery stack this deliberately
-/// yields the *faulting* fiber, which is the one an unwind has to walk.
+/// unrelated memory. It costs the thread-local read that `currentFiber` avoids,
+/// so keep it off the hot paths. On the recovery stack it deliberately gives the
+/// *faulting* fiber, which is the one an unwind must walk.
 pub fn currentFiberOrNull() ?*Fiber {
 	const worker = @import("worker.zig").getCurrentWorker() orelse return null;
 	const fiber = worker.current_fiber orelse return null;
@@ -116,20 +116,39 @@ pub const Fiber = struct {
 
 	/// False wherever promotion must be suppressed: a scheduler fiber, a fiber
 	/// past its last frame, and the pseudo-fiber backing the recovery stack.
-	/// `tryPromote` tests this in place of the null thread-local it replaced.
 	vpf_enabled: bool = false,
 
 	/// The cancellation scope active on this fiber's stack. A thief fiber seeds
 	/// it from the promoter's scope.
 	saved_scope: ?*scope_mod.Scope = null,
 
+	/// The worker running this fiber, as its id plus one, or 0 for a fiber no
+	/// worker has picked up. The worker writes it before each switch in, so
+	/// reference counting reads it off the masked stack pointer rather than a
+	/// thread-local.
+	worker_id: u32 = 0,
+
 	/// Set for every fiber whose completion a parent awaits: thieves and
 	/// Try/CapTry children. The trampoline fulfills it on a normal finish,
 	/// `feart_unwind` fulfills it with an error payload on an abandon.
 	root_obligation: ?*shadow_stack.JoinObligation = null,
 
-	/// The parent fiber's tokens counter. Null for a fiber with no parent.
-	parent_tokens_ptr: ?*u32 = null,
+	/// The fiber this one was promoted from, whose token counter takes the join
+	/// credit. Null for a fiber with no parent. Holding the fiber rather than a
+	/// bare pointer to its counter is what lets the credit release the mapping
+	/// reference it travels with.
+	parent: ?*Fiber = null,
+
+	/// Live references to this fiber's mapping: one for the fiber itself, and one
+	/// for every promotion of it that can still pay a join credit into `tokens`.
+	/// Whoever brings it to zero unmaps the block.
+	///
+	/// The `Fiber` sits at the base of the mapping, so `tokens` goes with it. An
+	/// abandoning parent does not wait for its thieves -- `feart_unwind` fulfills
+	/// the child obligation, which releases the thief, and then finishes -- so
+	/// without this the block is unmapped while a thief is still on its way to
+	/// `creditParentTokens`.
+	mapping_refs: std.atomic.Value(u32) = std.atomic.Value(u32).init(1),
 
 	/// Intrusive link for the worker pool's shared ready list. A link inside the
 	/// fiber is what makes that list unbounded with no buffer to retire.
@@ -151,13 +170,39 @@ pub const Fiber = struct {
 	/// because promotion destroys `TOKENS_THRESHOLD` tokens, so a refund can
 	/// redistribute but never manufacture.
 	///
-	/// MUST run before the obligation that wakes the parent is fulfilled: after
-	/// that the parent may be destroyed and `parent_tokens_ptr` dangles. A
-	/// fiber that never fulfills forfeits its tokens, matching APM 5.3.
+	/// Runs exactly once per fiber that has a parent: the entry path credits
+	/// before it fulfills, and `feart_unwind` credits on the path that abandons.
+	/// A fiber that never fulfills forfeits its tokens, matching APM 5.3.
+	///
+	/// The parent may already be destroyed by the time this runs, because an
+	/// abandoning parent releases its thieves without waiting for them. The
+	/// credit stays safe because the promotion took a reference to the parent's
+	/// mapping, which this call is the last holder of.
 	pub fn creditParentTokens(self: *Fiber) void {
-		const ptr = self.parent_tokens_ptr orelse return;
-		self.parent_tokens_ptr = null;
-		ptr.* += self.tokens;
+		const parent = self.parent orelse return;
+		self.parent = null;
+		parent.tokens += self.tokens;
+		// Last use of the parent's memory on this path, so the reference the
+		// promotion took goes back here.
+		parent.releaseMapping();
+	}
+
+	/// Drop one reference to this fiber's mapping, unmapping it at zero.
+	///
+	/// Nothing may touch the fiber afterwards: the struct lives in the mapping
+	/// this can unmap.
+	pub fn releaseMapping(self: *Fiber) void {
+		if (self.mapping_refs.fetchSub(1, .release) != 1) return;
+		// Pairs with the releases above, so the unmap follows every write the
+		// other holders made through this mapping.
+		_ = self.mapping_refs.load(.acquire);
+		unmapAlignedBlock(@intFromPtr(self));
+	}
+
+	/// Take a reference for a promotion, so the promoter's `tokens` stays
+	/// writable until that promotion pays its join credit back.
+	pub fn retainMapping(self: *Fiber) void {
+		_ = self.mapping_refs.fetchAdd(1, .monotonic);
 	}
 
 	/// False for a scheduler fiber, which runs on the OS thread's stack.
@@ -268,16 +313,20 @@ pub const Fiber = struct {
 	}
 
 	/// Nothing may touch `self` afterwards: the struct lives in the mapping this
-	/// unmaps.
+	/// drops its last reference to.
+	///
+	/// The block outlives this call while a promotion of this fiber has yet to
+	/// pay its join credit. It is dead either way: nothing runs on the stack, and
+	/// the only reader left is `creditParentTokens` writing `tokens`.
 	pub fn destroy(self: *Fiber) void {
 		// Catches a destroy of a worker's scheduler fiber, which owns no mapping.
 		std.debug.assert(self.hasMappedStack());
 
-		// Strictly before the munmap: the mark hook scans whatever a live slot
+		// Strictly before the unmap: the mark hook scans whatever a live slot
 		// points at, and an unmapped stack faults.
 		gc.unregisterFiber(self.registry_slot);
 
-		unmapAlignedBlock(@intFromPtr(self));
+		self.releaseMapping();
 	}
 };
 

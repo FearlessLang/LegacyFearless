@@ -31,7 +31,7 @@ pub fn make_action(path_bytes: []const u8) FatPtr {
     return objs.obj_k(ReadStrCaptures, &VT_ReadStrAction, .{ .ptr = @intFromPtr(buf.ptr), .len = @intCast(buf.len) });
 }
 
-fn readstr_drop(header: *anyopaque) callconv(.c) void {
+fn readstr_drop(header: *anyopaque, _: u32) callconv(.c) void {
     const Layout = objs.GenObjectLayoutType(ReadStrCaptures);
     const self: *const Layout = @ptrCast(@alignCast(header));
     gc.free(@ptrFromInt(self.captures.ptr));

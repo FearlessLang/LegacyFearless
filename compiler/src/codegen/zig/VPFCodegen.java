@@ -389,13 +389,17 @@ class VPFCodegen {
     parent.currentState().functions.add(retain.toString());
 
     var drop = new StringBuilder();
-    drop.append("fn ").append(localsName).append("_drop(locals_ptr: *anyopaque) void {\n");
+    // The worker comes in as a parameter rather than off the stack pointer:
+    // `Worker.recycleTask` drops a promotion's locals from the scheduler stack,
+    // where there is no fiber to read.
+    drop.append("fn ").append(localsName).append("_drop(locals_ptr: *anyopaque, releasing_worker_id: u32) void {\n");
     drop.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
     if (fatPtrFields.isEmpty()) {
       drop.append("_ = locals;\n");
+      drop.append("_ = releasing_worker_id;\n");
     } else {
       for (var field : fatPtrFields) {
-        drop.append("locals.").append(field).append(".rc_decrement();\n");
+        drop.append("locals.").append(field).append(".rc_decrement_as(releasing_worker_id);\n");
       }
     }
     drop.append("}");
@@ -605,7 +609,7 @@ class VPFCodegen {
       if (createObj.captures().isEmpty()) { return parentResult; }
       if (parentResult.contains("obj_k_singleton") || !parentResult.contains("obj_k(")) { return parentResult; }
 
-      // Generate again with this visitX, so the captures get the locals. prefix.
+      // Rebuild the captures through this visitX, so each one takes the `locals.` prefix.
       var objId = createObj.concreteT().id();
       var captures = createObj.captures().stream()
         .map(x -> "." + delegate.id.varName(x.name()) + " = " + this.visitX(x, checkMagic))

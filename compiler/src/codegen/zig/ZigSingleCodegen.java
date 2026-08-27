@@ -650,8 +650,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       var fields = createObj.captures().stream()
         .map(x -> id.varName(x.name()) + ": rt.FatPtr,")
         .collect(Collectors.joining("\n"));
+      // `pub`, because a guarded devirtualisation in another package names this struct to
+      // size the stack slot it calls through. See {@link #capturesRef}, which qualifies the
+      // name with the owning package for exactly that case.
       currentState().captureStructs.put(objId,
-        "const " + id.getSimpleName(objId) + "_Captures = extern struct {\n"
+        "pub const " + id.getSimpleName(objId) + "_Captures = extern struct {\n"
         + fields + "\n" + rcFreeFieldsDecl(createObj.captures()) + "};");
       currentState().captureLists.put(objId, createObj.captures());
     }
@@ -911,13 +914,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var paramNames = fun.args().stream()
       .map(x -> id.varName(x.name()))
       .toList();
-    // A param whose static type carries no reference count needs no drop, so it never
-    // reaches the drop list and no storage-mode test is emitted for it. The receiver is
-    // out of the list as well, because a caller lends it rather than gives it away. See
-    // `receiverOperand`.
-    // Everything from the receiver onwards is lent: the receiver by its caller, and each
-    // capture by the receiver that holds it. Captures are final, so a lent capture cannot be
-    // replaced while the call runs. Only the declared params are owned, and only they drop.
+    // Only the declared params are owned, so only they drop. Everything from the receiver
+    // onwards is lent: the receiver by its caller (see `receiverOperand`), and each capture
+    // by the receiver that holds it. Captures are final, so a lent capture cannot be
+    // replaced while the call runs. A param whose static type carries no reference count
+    // needs no drop either, so it also stays out of the list.
     var selfIdx = selfArgIndex(fun);
     var dropNames = java.util.stream.IntStream.range(0, fun.args().size())
       .filter(i -> i < selfIdx)
@@ -1287,11 +1288,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       methWrapperRef(call.concreteType(), methName) + "(" + String.join(", ", all) + ")");
   }
 
-  /// A guarded call: a vtable test, the wrapper of the guessed type, and the virtual call.
-  ///
-  /// Receiver and arguments bind to a name first. Both arms name them and only one arm runs, so
-  /// a bare expression would be built twice, and an argument the callee owns would be built for
-  /// a call that never happens.
   @Override
   public String visitGuardedCall(MIR.GuardedCall call, boolean checkMagic) {
     return emitGuardedCall(call, this, checkMagic);
@@ -1300,6 +1296,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   /// A name no other emitted declaration in this file uses.
   String freshName(String prefix) { return prefix + blockCounter++; }
 
+  /// A guarded call: a vtable test, the wrapper of the guessed type, and the virtual call.
+  ///
+  /// Receiver and arguments bind to a name first. Both arms name them and only one arm runs, so
+  /// a bare expression would be built twice, and an argument the callee owns would be built for
+  /// a call that never happens.
   String emitGuardedCall(MIR.GuardedCall call, MIRVisitor<String> gen, boolean checkMagic) {
     var original = call.original();
     var ops = slottedCallOperands(original, gen, checkMagic, Optional.empty());

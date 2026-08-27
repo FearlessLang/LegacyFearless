@@ -1,9 +1,10 @@
-//! Despite the name, the system for controlling VPF (Very Parallel Fearless) is not a direct implementation of
-//! Heartbeat Scheduling or even the Task Parallel Assembly Language. Instead, it is based on
-//! Automatic Parallelism Management by Westrick et. al. This is a descendant of the work on
-//! Heartbeat Scheduling, but with much better performance in practice.
+//! Promotion control for VPF (Very Parallel Fearless).
 //!
-//! This is basically exactly what I proposed doing in the future work section of my PhD Thesis "Fearless Automatic Parallelisation"
+//! The name is historical: this is not Heartbeat Scheduling, nor the Task
+//! Parallel Assembly Language. It follows Automatic Parallelism Management
+//! (Westrick et al.), a descendant of Heartbeat Scheduling that performs much
+//! better in practice, and it is the design proposed in the future work of the
+//! PhD thesis "Fearless Automatic Parallelisation".
 
 const std = @import("std");
 const shadow_stack_mod = @import("shadow_stack.zig");
@@ -134,8 +135,8 @@ noinline fn doPromote(fiber: *Fiber, child_initial_tokens: u32) bool {
     task.thief_fn = frame.thief_fn;
     task.obligation = obligation;
     task.initial_tokens = child_initial_tokens;
-    task.parent_tokens_ptr = &fiber.tokens;
-    task.scope = fiber.saved_scope;
+    task.parent = fiber;
+    task.scope = frame.scope;
     // The thief fiber shows this call chain beneath a fiber boundary if it
     // crashes.
     if (build_options.trace_frames) {
@@ -156,6 +157,13 @@ noinline fn doPromote(fiber: *Fiber, child_initial_tokens: u32) bool {
     frame.task.store(task, .monotonic);
 
     log.trace_scheduling(.hb_promote, frame_idx, @intFromPtr(obligation), @intFromPtr(child_obl));
+
+    // Strictly before the task can be dequeued: from here another worker may
+    // build a thief for it, and that thief pays a join credit into this fiber's
+    // `tokens`. The reference keeps the mapping that holds them alive even if
+    // this fiber abandons and is destroyed first.
+    fiber.retainMapping();
+    task.holds_parent_ref = true;
 
     // Before the join obligation becomes observable: a window between CAS and
     // enqueue would leave the parent waiting on an obligation nothing fulfills.

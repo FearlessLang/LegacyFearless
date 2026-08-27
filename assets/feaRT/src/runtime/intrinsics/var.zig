@@ -46,14 +46,16 @@ pub fn retain(cell: *VarCell) void {
     }
 }
 
-pub noinline fn release(cell: *VarCell) void {
+/// `releasing_worker_id` is the worker on whose behalf this release runs. It
+/// travels down from the start of the drop chain.
+pub noinline fn release(cell: *VarCell, releasing_worker_id: u32) void {
     const old_count = cell.ref_count.fetchSub(1, .release);
     if (std.debug.runtime_safety) std.debug.assert(old_count != 0);
     if (old_count != 1) return;
 
     _ = cell.ref_count.load(.acquire);
     const old_ptr = cell.value.load(.monotonic);
-    old_ptr.*.rc_decrement();
+    old_ptr.*.rc_decrement_as(releasing_worker_id);
     gc.recycleDestroy(FatPtr, old_ptr, .var_release);
     gc.recycleDestroy(VarCell, cell, .var_release);
     gc.recordRcFree();

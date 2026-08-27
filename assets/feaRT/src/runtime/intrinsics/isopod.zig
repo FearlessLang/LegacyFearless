@@ -46,14 +46,16 @@ pub fn retain(cell: *IsoCell) void {
     }
 }
 
-pub noinline fn release(cell: *IsoCell) void {
+/// `releasing_worker_id` is the worker on whose behalf this release runs. It
+/// travels down from the start of the drop chain.
+pub noinline fn release(cell: *IsoCell, releasing_worker_id: u32) void {
     const old_count = cell.ref_count.fetchSub(1, .release);
     if (std.debug.runtime_safety) std.debug.assert(old_count != 0);
     if (old_count != 1) return;
 
     _ = cell.ref_count.load(.acquire);
     if (cell.value.swap(null, .monotonic)) |old_ptr| {
-        old_ptr.*.rc_decrement();
+        old_ptr.*.rc_decrement_as(releasing_worker_id);
         gc.recycleDestroy(FatPtr, old_ptr, .isopod_release);
     }
     gc.recycleDestroy(IsoCell, cell, .isopod_release);
@@ -122,7 +124,7 @@ const VT_TestVoid: objs.VTable = .{
     .storage_mode = .singleton,
 };
 
-/// Invoke the generated Mearless function of an IsoPod method.
+/// Call the generated Fearless body of an IsoPod method.
 fn fearlessBody(comptime name: []const u8, args: anytype) FatPtr {
     if (comptime @hasDecl(root, "pkg_base")) {
         if (comptime @hasDecl(root.pkg_base, name)) {

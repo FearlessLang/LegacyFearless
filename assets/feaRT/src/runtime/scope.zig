@@ -15,16 +15,15 @@
 //! Scopes live on the GC heap (allocated by `pushScope` in the flow-instance
 //! VT). `Fiber.saved_scope` and `StolenTask.scope` are both GC-tracked roots,
 //! so the Scope stays live for as long as either references it -- even if the
-//! terminal that pushed it has already returned. (Earlier revisions
-//! stack-allocated the Scope and relied on the terminal outliving every reader;
-//! that invariant proved fragile under enqueue/CAS races at low APM
-//! thresholds.)
+//! terminal that pushed it has already returned.
 //!
 //! ### Fiber interaction
 //! `Fiber.saved_scope` is the only copy, reached through the fiber header, so a
 //! fiber switch neither saves nor restores it. Stolen tasks capture the
 //! promoter's scope into `StolenTask.scope` at promotion time (heartbeat.zig),
-//! and the thief fiber's `saved_scope` is seeded from that at creation.
+//! and the thief fiber's `saved_scope` is seeded from that at creation. The
+//! promotion reads the scope recorded in the shadow frame, not the one the
+//! promoter has reached, so a nested terminal's cancel stays inside itself.
 
 const std = @import("std");
 

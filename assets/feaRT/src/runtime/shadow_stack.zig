@@ -15,9 +15,13 @@ const gc = @import("gc.zig");
 const trace = @import("./errors/trace.zig");
 const op_counters = @import("op_counters.zig");
 const fiber_mod = @import("fiber.zig");
+const scope_mod = @import("scope.zig");
 
 pub const LocalsRetainHook = *const fn (*anyopaque, *anyopaque) void;
-pub const LocalsDropHook = *const fn (*anyopaque) void;
+/// Releases the reference-counted fields of a promoted frame's locals. The
+/// second argument is the worker to release on behalf of, because
+/// `Worker.recycleTask` runs this off a fiber stack.
+pub const LocalsDropHook = *const fn (*anyopaque, releasing_worker_id: u32) void;
 
 pub const ShadowFrame = struct {
 	target_method: u64,
@@ -34,6 +38,11 @@ pub const ShadowFrame = struct {
 	/// the work back if nobody stole it. Only that fiber writes it; the thief
 	/// side never reaches the frame.
 	task: std.atomic.Value(?*worker_mod.StolenTask) = std.atomic.Value(?*worker_mod.StolenTask).init(null),
+	/// The cancellation scope in effect where the frame was pushed. A promotion
+	/// gives this to the thief, and not the scope the fiber has reached by then:
+	/// a nested flow terminal below this frame pushes a scope of its own and
+	/// cancels it on a short circuit, which must not reach the stolen work.
+	scope: ?*scope_mod.Scope = null,
 };
 
 /// Both indices in one struct, so push, pop and the heartbeat reach them off a
@@ -75,6 +84,7 @@ pub inline fn pushFrame(frame: ShadowFrame) ?usize {
 	if (idx >= MAX_SHADOW_DEPTH) return null;
 	op_counters.bump(.vpf_frame_push);
 	ss[idx] = frame;
+	ss[idx].scope = f.saved_scope;
 	asm volatile ("" ::: .{ .memory = true });
 	cursor.top = idx + 1;
 	return idx;
