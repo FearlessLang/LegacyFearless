@@ -12,7 +12,7 @@ Str: Stringable,Sealed{
 Stringable: {
   read .str: Str,
   }
-_StrInstance: Str{
+_StrInstance: RuntimeImplemented,Str{
   .size -> Magic!,
   .isEmpty -> Magic!,
   .str -> Magic!,

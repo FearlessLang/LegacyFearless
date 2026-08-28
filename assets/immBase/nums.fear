@@ -47,7 +47,7 @@ _IntOps[T]: Sealed{
   }
 
 // Fake concrete type for all numbers. The real implementation is generated at code-gen.
-_IntInstance: Int{
+_IntInstance: RuntimeImplemented,Int{
   .int -> Magic!,
   .nat -> Magic!,
   .float -> Magic!,
@@ -77,7 +77,7 @@ _IntInstance: Int{
   .assertEq(actual) -> Magic!,
   .assertEq(actual, message) -> Magic!,
   }
-_NatInstance: Nat{
+_NatInstance: RuntimeImplemented,Nat{
   .int -> Magic!,
   .nat -> Magic!,
   .float -> Magic!,
@@ -107,7 +107,7 @@ _NatInstance: Nat{
   .assertEq(actual) -> Magic!,
   .assertEq(actual, message) -> Magic!,
   }
-_FloatInstance: Float{
+_FloatInstance: RuntimeImplemented,Float{
   .int -> Magic!,
   .nat -> Magic!,
   .float -> Magic!,

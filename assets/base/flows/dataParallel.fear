@@ -1,6 +1,6 @@
 package base.flows
 
-_DataParallelFlow: _FlowFactory{
+_DataParallelFlow: RuntimeImplemented,_FlowFactory{
   .fromOp[E:*](source: mut FlowOp[E], size: Opt[Nat]): mut Flow[E] -> Magic!,
 //  .fromOp[E:*](source: mut FlowOp[E], size: Opt[Nat]): mut Flow[E] -> {'self
 //    .unwrapOp(_) -> source,

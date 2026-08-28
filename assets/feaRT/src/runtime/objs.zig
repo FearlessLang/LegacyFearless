@@ -635,8 +635,9 @@ pub fn obj_k(
 		break :blk .{ .ptr = fresh, .raw_size = @sizeOf(Layout) };
 	};
 	// The building worker owns the object and holds its first reference in the
-	// biased half. An object built before the pool starts names no worker, so it is
-	// born merged and every operation on it takes the shared path.
+	// biased half. Generated code always runs on a fiber, so it always names a
+	// worker. `me == 0` only happens under `builtin.is_test`; such an object is
+	// born merged and takes the shared path for every operation.
 	const me = worker_mod.currentWorkerId();
 	memory_slot.ptr.* = .{
 			.header = .{

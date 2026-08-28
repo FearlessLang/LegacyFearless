@@ -60,7 +60,7 @@ _UnsignedOps[T]: Sealed{
   }
 
 // Fake concrete type for all numbers. The real implementation is generated at code-gen.
-_IntInstance: Int{
+_IntInstance: RuntimeImplemented,Int{
   .int -> Magic!,
   .nat -> Magic!,
   .float -> Magic!,
@@ -93,41 +93,7 @@ _IntInstance: Int{
   .assertEq(actual, message) -> Magic!,
   .hash(_) -> Magic!,
   }
-_NatInstance: Nat{
-  .int -> Magic!,
-  .nat -> Magic!,
-  .float -> Magic!,
-  .byte -> Magic!,
-  .str -> Magic!,
-  +(n) -> Magic!,
-  -(n) -> Magic!,
-  *(n) -> Magic!,
-  /(n) -> Magic!,
-  %(n) -> Magic!,
-  **(n) -> Magic!,
-  .abs -> Magic!,
-  .sqrt -> Magic!,
-  .offset(n) -> Magic!,
-
-  // bitwise
-  .shiftLeft(n) -> Magic!,
-  .shiftRight(n) -> Magic!,
-  .xor(n) -> Magic!,
-  .bitwiseAnd(n) -> Magic!,
-  .bitwiseOr(n) -> Magic!,
-
-  // Comparisons
-  >n -> Magic!,
-  <n -> Magic!,
-  >=n -> Magic!,
-  <=n -> Magic!,
-  ==n -> Magic!,
-  !=n -> Magic!,
-  .assertEq(actual) -> Magic!,
-  .assertEq(actual, message) -> Magic!,
-  .hash(_) -> Magic!,
-  }
-_ByteInstance: Byte{
+_NatInstance: RuntimeImplemented,Nat{
   .int -> Magic!,
   .nat -> Magic!,
   .float -> Magic!,
@@ -161,7 +127,41 @@ _ByteInstance: Byte{
   .assertEq(actual, message) -> Magic!,
   .hash(_) -> Magic!,
   }
-_FloatInstance: Float{
+_ByteInstance: RuntimeImplemented,Byte{
+  .int -> Magic!,
+  .nat -> Magic!,
+  .float -> Magic!,
+  .byte -> Magic!,
+  .str -> Magic!,
+  +(n) -> Magic!,
+  -(n) -> Magic!,
+  *(n) -> Magic!,
+  /(n) -> Magic!,
+  %(n) -> Magic!,
+  **(n) -> Magic!,
+  .abs -> Magic!,
+  .sqrt -> Magic!,
+  .offset(n) -> Magic!,
+
+  // bitwise
+  .shiftLeft(n) -> Magic!,
+  .shiftRight(n) -> Magic!,
+  .xor(n) -> Magic!,
+  .bitwiseAnd(n) -> Magic!,
+  .bitwiseOr(n) -> Magic!,
+
+  // Comparisons
+  >n -> Magic!,
+  <n -> Magic!,
+  >=n -> Magic!,
+  <=n -> Magic!,
+  ==n -> Magic!,
+  !=n -> Magic!,
+  .assertEq(actual) -> Magic!,
+  .assertEq(actual, message) -> Magic!,
+  .hash(_) -> Magic!,
+  }
+_FloatInstance: RuntimeImplemented,Float{
   .int -> Magic!,
   .nat -> Magic!,
   .float -> Magic!,

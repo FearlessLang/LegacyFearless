@@ -1,6 +1,6 @@
 package base.flows
 
-_PipelineParallelSink: _SinkDecorator{s -> Magic!}
+_PipelineParallelSink: RuntimeImplemented,_SinkDecorator{s -> Magic!}
 _PipelineParallelSink[T:*]: _Sink[T]{}
 
 _PipelineParallelFlow: _FlowFactory{

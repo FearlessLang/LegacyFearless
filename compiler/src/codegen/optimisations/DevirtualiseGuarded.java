@@ -4,7 +4,6 @@ import ast.E;
 import codegen.MIR;
 import codegen.MIRCloneVisitor;
 import id.Id;
-import magic.LiteralKind;
 import magic.Magic;
 import magic.MagicImpls;
 import main.CompilationUnit;
@@ -40,23 +39,6 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
   private final Map<Id.DecId, MIR.TypeDef> defs = new HashMap<>();
   /// Every method that has a body, as (owner, name, receiver modifier).
   private final Set<String> bodies = new LinkedHashSet<>();
-  /// The types of the packages lowered from source whose methods are magic stubs. The runtime
-  /// makes the values that answer such a call, with a vtable of their own, so the literal beside
-  /// the declaration implements nothing. A package read back from its type information holds
-  /// stubs for every method and says nothing here: what it implements is read from its implInfo.
-  private final Set<Id.DecId> runtimeBacked = new LinkedHashSet<>();
-
-  /// Declarations the FeaRT runtime implements with a vtable of its own, although the Fearless
-  /// side gives them ordinary bodies. {@link Magic#isMagicStub} cannot find these, because the
-  /// bodies are real and the Java backend runs them; only the FeaRT runtime substitutes a value
-  /// of its own where the declaration says the literal beside it is the only one.
-  ///
-  /// `base.flows._ActorSink` is the sink an `.actor` callback writes to. It is a named inline
-  /// dec, so a call on it would otherwise need no test at all, and `exec.zig` hands the callback
-  /// its own `VT_ActorSink` object and never the lambda `_ActorSinks#` returns.
-  private static final Set<Id.DecId> RUNTIME_IMPLEMENTED = Set.of(
-    new Id.DecId("base.flows._ActorSink", 1));
-
   /// The package whose code is being rewritten. A call site inside a {@link CompilationUnit}
   /// may only name a target of that same unit, because the two are cached together and read
   /// back together.
@@ -92,15 +74,10 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
     this.candidates.clear();
     this.candidates.addAll(ast.ds().keySet());
     this.candidates.addAll(ast.inlineDs().keySet());
-    this.runtimeBacked.clear();
-    this.runtimeBacked.addAll(RUNTIME_IMPLEMENTED);
     for (var pkg : p.pkgs()) {
       for (var def : pkg.defs().values()) { defs.put(def.name(), def); }
       for (var fun : pkg.funs()) {
         bodies.add(key(fun.name().d(), fun.name().m(), fun.name().mdf()));
-        if (!alreadyCompiledPkgs.contains(pkg.name()) && Magic.isMagicStub(fun.body())) {
-          runtimeBacked.add(fun.name().d());
-        }
       }
     }
     return MIRCloneVisitor.super.visitProgram(p);
@@ -109,6 +86,20 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
   @Override public MIR.Package visitPackage(MIR.Package pkg) {
     this.emitPkg = pkg.name();
     return MIRCloneVisitor.super.visitPackage(pkg);
+  }
+
+  /// Whether the runtime, rather than generated code, makes the values of `dec`. The wrapper
+  /// generated beside such a declaration aborts.
+  ///
+  /// The declaration says so itself, by implementing {@link Magic#RuntimeImplemented}, which the
+  /// cached type information of a package keeps. An object literal has no declaration to ask, and
+  /// carries no marker, so it answers no.
+  private boolean isRuntimeImplemented(Id.DecId dec) {
+    return isDeclared(dec) && ast.superDecIds(dec).contains(Magic.RuntimeImplemented);
+  }
+
+  private boolean isDeclared(Id.DecId dec) {
+    return ast.ds().containsKey(dec) || ast.inlineDs().containsKey(dec);
   }
 
   private static String key(Id.DecId owner, Id.MethName name, id.Mdf mdf) {
@@ -134,12 +125,20 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
     var target = soleImplOf(declared.get());
     if (target.isEmpty() || !callable(target.get(), rewritten)) { return visited; }
     targets.add(target.get());
-    if (isFinal(declared.get()) || isEffectivelyFinal()) {
+    if (canDirectCall(declared.get())) {
       directCalls++;
       return new MIR.DirectCall(rewritten, target.get());
     }
     guardedCalls++;
     return new MIR.GuardedCall(rewritten, target.get());
+  }
+
+  /// Whether this call may name its one implementation with no test in front of it. Both grounds
+  /// for that rest on the join having counted every value that can reach the receiver, and
+  /// neither the declaration nor the join counts the values the runtime makes.
+  private boolean canDirectCall(Id.DecId declared) {
+    if (isRuntimeImplemented(declared)) { return false; }
+    return isFinal(declared) || isEffectivelyFinal();
   }
 
   /// Whether the one implementation the join found is the only one this call can ever reach,
@@ -150,6 +149,7 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
   /// implement. A sealed type, which only its own package may implement, and which therefore
   /// counted every implementation it will ever have.
   private boolean isFinal(Id.DecId declared) {
+    if (isRuntimeImplemented(declared)) { return false; }
     var known = cachedImpls.get(declared);
     if (known.map(ImplInfo.Entry::inlineDec).orElseGet(() -> ast.isInlineDec(declared))) {
       return true;
@@ -238,28 +238,15 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
     });
   }
 
-  private static Optional<Id.DecId> soleOf(java.util.List<Id.DecId> impls) {
-    return impls.size() == 1 ? Optional.of(impls.getFirst()) : Optional.empty();
-  }
-
   /// Whether a declaration gives a body to every method it writes. A declaration with an
   /// abstract method is an interface, and no value carries its vtable.
   private boolean hasOwnBody(Id.DecId dec) {
-    if (runtimeBacked.contains(dec)) { return false; }
+    if (isRuntimeImplemented(dec)) { return false; }
     // A lambda that writes no method is the empty literal a Sealed type permits outside its
     // package. Such a literal takes the vtable of its parent, so it is not another implementation.
     var meths = ast.of(dec).lambda().meths();
     return !meths.isEmpty() && meths.stream().noneMatch(E.Meth::isAbs);
   }
-
-  /// The instance type of each literal kind. A string, number or float literal is made by the
-  /// runtime and carries a vtable the runtime owns, so generated code never writes one. Such a
-  /// type has a {@link MIR.TypeDef} like any other, which is why holding a definition is not on
-  /// its own a promise that a vtable exists to name.
-  private static final Set<Id.DecId> LITERAL_INSTANCES = java.util.Arrays
-    .stream(LiteralKind.values())
-    .map(LiteralKind::toDecId)
-    .collect(java.util.stream.Collectors.toUnmodifiableSet());
 
   /// Whether codegen holds a wrapper of `target` for this call.
   private boolean callable(Id.DecId target, MIR.MCall call) {
@@ -269,9 +256,7 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
     // there is no such gap: the two packages are generated together and cached together, and the
     // name of an anonymous literal is numbered by the unit that writes it.
     if (!sameUnit(target)) { return false; }
-    if (Magic.allMagicDecs().contains(target)) { return false; }
-    if (runtimeBacked.contains(target)) { return false; }
-    if (LITERAL_INSTANCES.contains(target)) { return false; }
+    if (isRuntimeImplemented(target)) { return false; }
     if (!defs.containsKey(target)) { return false; }
     if (bodies.contains(key(target, call.name(), call.mdf()))) { return true; }
     // A type that writes no body of its own for the method still has a wrapper, which calls

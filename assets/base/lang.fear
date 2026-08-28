@@ -3,14 +3,16 @@ alias base.caps.System as System,
 
 Main: { #(s: mut System): Void }
 Sealed: {}
+/// A type the runtime implements. No package may write an implementation of one, and
+/// generated code holds none.
+RuntimeImplemented: Sealed{}
 Void: Sealed{}
 
-Abort: Sealed{![R:**]: R -> this!} // can be optimised to just terminate (goes stuck)
-Magic: Sealed{
+Abort: RuntimeImplemented{![R:**]: R -> this!} // can be optimised to just terminate (goes stuck)
+Magic: RuntimeImplemented{
   ![R:**]: R -> this!, // magic'd out to tell us what we forgot to implement
-  ![R:readH,mutH,read,mut,imm,iso](_: mut base.caps._System): R -> this!,
   }
-Debug: Sealed{
+Debug: RuntimeImplemented{
   #[T:**](x: T): T -> x,
   .println[T:**](x: T): Void -> {},
   .identify[T:**](x: T): Str -> Magic!,

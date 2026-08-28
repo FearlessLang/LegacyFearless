@@ -12,7 +12,7 @@ EmptyMap[K:imm,V:*]: Map[K,V]{
   .get(k) -> {},
   }
 
-Maps: Sealed{
+Maps: RuntimeImplemented{
   .hashMap[K:imm,V:*](keyEq: read F[K,K,Bool], hash: F[K,read ToHash]): mut LinkedHashMap[K,V] -> Magic!,
   }
 LinkedHashMap[K:imm,V:*]: Map[K,V]{

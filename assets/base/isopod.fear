@@ -34,7 +34,7 @@ IsoViewer'[T, R:iso,imm,mut,read,mutH]:{
   }
 _IsoMutator:{ #[T:**](f: F[mut T, Void], val: mut T): mut T -> Block#(f#val, val) }
 
-_MagicIsoPodImpl: {
+_MagicIsoPodImpl: RuntimeImplemented{
   #[T:**](val: iso T): mut _MagicIsoPodImpl[imm T] -> Magic!,
   .toIsoPod[T:**](inner: mut _MagicIsoPodImpl[imm T]): mut IsoPod[imm T] -> {
     read .isAlive: Bool -> inner.isAlive,
@@ -43,11 +43,11 @@ _MagicIsoPodImpl: {
     mut .next(val: iso T): Void -> inner.next(val),
     },
   }
-_MagicIsoPodImpl[T]: {
-  read .isAlive: Bool -> Magic!,
-  read .peek[R:iso,imm,mut,read,mutH](f: mut IsoViewer[T, R]): R -> Magic!,
-  mut !: iso T -> Magic!,
-  mut .next(val: iso T): Void -> Magic!,
+_MagicIsoPodImpl[T]: RuntimeImplemented{
+  read .isAlive: Bool,
+  read .peek[R:iso,imm,mut,read,mutH](f: mut IsoViewer[T, R]): R,
+  mut !: iso T,
+  mut .next(val: iso T): Void,
   }
 
 // TODO The idea:

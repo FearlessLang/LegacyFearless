@@ -3,6 +3,7 @@ package codegen.optimisations;
 import codegen.MIR;
 import id.Id;
 import magic.Magic;
+import magic.MagicImpls;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -11,12 +12,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Stream;
 
 /// Rapid type analysis over a {@link MIR.Program}.
 ///
 /// The table maps a declared type to every concrete type that can flow into a receiver of
-/// it. A concrete type enters from an object literal ({@link MIR.CreateObj}) or from the
-/// fixed set the runtime provides ({@link Magic}). One entry with an object literal behind
+/// it. A concrete type enters from an object literal ({@link MIR.CreateObj}) or from the set
+/// the runtime provides ({@link magic.MagicImpls#MAGIC_DECS} and every declaration that
+/// implements {@link Magic#RuntimeImplemented}). One entry with an object literal behind
 /// it means a monomorphic receiver.
 ///
 /// The table covers the whole compilation only for a package the compiler parsed in full. A
@@ -43,10 +46,16 @@ public final class RapidTypeAnalysis {
   public RapidTypeAnalysis(MIR.Program p) {
     // The runtime provides these without an object literal. Recording them keeps a declared
     // type that a runtime-backed type implements out of the monomorphic set.
-    for (var magicDec : Magic.allMagicDecs()) {
-      // `superDecIds` needs a declaration, which a program that never imports the magic
-      // type does not have.
-      if (!p.p().ds().containsKey(magicDec)) { continue; }
+    var runtimeSupplied = new HashSet<>(MagicImpls.MAGIC_DECS);
+    Stream.concat(p.p().ds().keySet().stream(), p.p().inlineDs().keySet().stream())
+      .filter(d -> p.p().superDecIds(d).contains(Magic.RuntimeImplemented))
+      .forEach(runtimeSupplied::add);
+    for (var magicDec : runtimeSupplied) {
+      // `superDecIds` needs a declaration, which a program that never imports the type does
+      // not have.
+      if (!p.p().ds().containsKey(magicDec) && !p.p().inlineDs().containsKey(magicDec)) {
+        continue;
+      }
       record(p, magicDec);
     }
     for (var pkg : p.pkgs()) {

@@ -17,6 +17,11 @@ const GUARD_SIZE = std.heap.page_size_min;
 
 const gc = @import("gc.zig");
 
+/// Stamped into every `Fiber` header so `currentFiber` can tell a real fiber
+/// mapping from whatever a masked stack pointer lands on. Cleared before the
+/// mapping goes away, which catches a use after destroy.
+pub const FIBER_MAGIC: u64 = 0xF1BE_4A11_0000_F00D;
+
 /// Bytes at the base of the mapping holding the `Fiber` itself, page-rounded so
 /// the guard page that follows it is aligned.
 pub const FIBER_REGION = std.mem.alignForward(usize, @sizeOf(Fiber), std.heap.page_size_min);
@@ -41,7 +46,13 @@ pub inline fn currentFiber() *Fiber {
 		),
 		else => @compileError("Unsupported architecture"),
 	};
-	return @ptrFromInt(sp & ~@as(usize, STACK_SIZE - 1));
+	const f: *Fiber = @ptrFromInt(sp & ~@as(usize, STACK_SIZE - 1));
+	// Free in ReleaseFast. In a safe mode, a call from a non-fiber stack panics
+	// instead of corrupting memory.
+	if (std.debug.runtime_safety) {
+		std.debug.assert(f.magic == FIBER_MAGIC);
+	}
+	return f;
 }
 
 /// The fiber the calling thread is running, or null on a worker's scheduler
@@ -92,6 +103,11 @@ pub fn unmapAlignedBlock(base_addr: usize) void {
 pub const Fiber = struct {
 	/// Saved stack pointer -- MUST be first field (offset 0) for assembly.
 	sp: usize,
+
+	/// `FIBER_MAGIC` while the mapping is live, and 0 once it is on its way out.
+	/// See `currentFiber`.
+	magic: u64 = 0,
+
 	stack_bottom: [*]align(std.heap.page_size_min) u8,
 	stack_size: usize,
 	entry_fn: ?*const fn (*Fiber) void,
@@ -112,7 +128,13 @@ pub const Fiber = struct {
 	trace_top: usize = 0,
 
 	/// APM tokens. Incremented by `tryPromote`, halved on a promotion attempt.
-	tokens: u32 = 0,
+	///
+	/// Atomic because a thief credits it from its own thread while the owner runs:
+	/// each thief credits when its own work finishes, not when the parent joins.
+	/// The owner uses a relaxed load/store pair, so a credit that lands between
+	/// them is lost. APM 5.3 already forfeits the tokens of a fiber that never
+	/// fulfills, and a refund can only move tokens, never make them.
+	tokens: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
 	/// False wherever promotion must be suppressed: a scheduler fiber, a fiber
 	/// past its last frame, and the pseudo-fiber backing the recovery stack.
@@ -181,7 +203,7 @@ pub const Fiber = struct {
 	pub fn creditParentTokens(self: *Fiber) void {
 		const parent = self.parent orelse return;
 		self.parent = null;
-		parent.tokens += self.tokens;
+		_ = parent.tokens.fetchAdd(self.tokens.load(.monotonic), .monotonic);
 		// Last use of the parent's memory on this path, so the reference the
 		// promotion took goes back here.
 		parent.releaseMapping();
@@ -253,13 +275,14 @@ pub const Fiber = struct {
 			.context = context,
 			.state = .Fresh,
 			.vpf_enabled = true,
+			.magic = FIBER_MAGIC,
 		};
 
 		// The initial stack makes switchTo land at fiber_entry with the fiber
 		// pointer in the callee-saved register fiber_entry reads.
-		// Never equal to `base_addr + STACK_SIZE` once slots are reserved, and it
-		// only decreases from there, so a live `sp` always masks back to `base_addr`.
-		const aligned_top = (base_addr + STACK_SIZE) & ~@as(usize, 15);
+		// Below the end of the block, and `sp` only decreases from here, so every
+		// live stack pointer masks back to `base_addr`.
+		const aligned_top = ((base_addr + STACK_SIZE) & ~@as(usize, 15)) - 16;
 
 		switch (builtin.cpu.arch) {
 			.x86_64 => {
@@ -325,6 +348,10 @@ pub const Fiber = struct {
 		// Strictly before the unmap: the mark hook scans whatever a live slot
 		// points at, and an unmapped stack faults.
 		gc.unregisterFiber(self.registry_slot);
+
+		// Before the mapping can go away, so a second destroy or a `currentFiber` on
+		// a stale stack pointer fails the magic assert instead of using a dead header.
+		self.magic = 0;
 
 		self.releaseMapping();
 	}

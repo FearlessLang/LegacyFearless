@@ -101,7 +101,7 @@ _FlowConverters: Sealed{
 //        .return {{}},
 //      }}
   }
-_FlowRange: {
+_FlowRange: RuntimeImplemented{
   #(start: Int, end: Int): mut Flow[Int] -> Magic!,
   #(start: Int): mut Flow[Int] -> Magic!,
   }

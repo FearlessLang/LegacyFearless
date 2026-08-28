@@ -34,13 +34,13 @@ Stringable: {
   read .str: Str,
   }
 
-UTF16: Sealed{
+UTF16: RuntimeImplemented{
   .fromCodePoint(codePoint: Nat): Str -> Magic!,
   .isSurrogate(codePoint: Nat): Bool -> codePoint >= 55296 & (codePoint < 57344),
   .fromSurrogatePair(high: Nat, low: Nat): Str -> Magic!,
   }
 
-UTF8: Sealed{
+UTF8: RuntimeImplemented{
   .fromBytes(utf8Bytes: read List[Byte]): mut Action[Str] -> Magic!,
   }
 
@@ -48,7 +48,7 @@ SimpleStr: Str{}
 
 StrMap[V:*]: LinkedLens[Str, V]{k1, k2 -> k1 == k2}
 
-_StrInstance: Str{
+_StrInstance: RuntimeImplemented,Str{
   .size -> Magic!,
   .isEmpty -> Magic!,
   +(other) -> Magic!,

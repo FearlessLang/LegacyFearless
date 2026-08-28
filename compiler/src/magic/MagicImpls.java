@@ -3,9 +3,22 @@ package magic;
 import codegen.MIR;
 import id.Id;
 
+import java.util.List;
 import java.util.Optional;
 
 public interface MagicImpls<R> {
+  /// The traits the runtime implements that cannot carry the `base.RuntimeImplemented` marker.
+  ///
+  /// A literal type cannot: its implementation is a clone {@link Magic#getDec} synthesises from
+  /// a template, which would carry the marker into a lambda that the well-formedness rule on the
+  /// marker forbids. `base.Bool` cannot either, for the opposite reason: `True` and `False` are
+  /// ordinary Fearless singletons, so nothing marks the trait, yet the backend still answers
+  /// calls on it.
+  ///
+  /// {@link #get} is not derived from this list and keeps its own if-chain.
+  List<Id.DecId> MAGIC_DECS = List.of(
+    Magic.Int, Magic.Nat, Magic.Float, Magic.Byte, Magic.Str, Magic.Bool);
+
   default Optional<MagicTrait<MIR.E,R>> get(MIR.E e) {
     if (isMagic(Magic.Int, e)) { return Optional.ofNullable(int_(e)); }
     if (isMagic(Magic.Nat, e)) { return Optional.ofNullable(nat(e)); }

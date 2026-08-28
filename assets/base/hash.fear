@@ -17,7 +17,7 @@ Hasher: {
   }
 
 /// Implementation defined hash algorithm with no security guarantees.
-CheapHash: Hasher{
+CheapHash: RuntimeImplemented,Hasher{
   .compute -> Magic!,
   .nat(x) -> Magic!,
   .int(x) -> Magic!,

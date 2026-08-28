@@ -1,7 +1,8 @@
 package base
 
-Bytess: {
-  .fromList(list: read List[Byte]): Bytes -> Magic!,
+// TODO: no backend implements `.fromList` yet
+Bytess: RuntimeImplemented{
+  .fromList(list: read List[Byte]): Bytes
   }
 
 /// Bytes internal representation can vary, sometimes it refers to a byte array

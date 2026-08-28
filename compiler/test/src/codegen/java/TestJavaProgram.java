@@ -1704,6 +1704,7 @@ public class TestJavaProgram {
         .rng -> Abort!,
         .try -> Abort!,
         .io -> Abort!,
+        .clock -> Abort!,
         },
       }
     Test: Main{_ -> UnrestrictedIO#(Evil.break).println "oh no"}

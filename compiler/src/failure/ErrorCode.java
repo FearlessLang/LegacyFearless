@@ -78,7 +78,9 @@ public enum ErrorCode {
   transientCapture,
   transientReceiver,
   transientStorage,
-  transientWithIdentity;
+  transientWithIdentity,
+  runtimeImplementedOutsideBase,
+  implementRuntimeImplemented;
   private static final ErrorCode[] values = values();
   public int code() {
     return this.ordinal() + 1;

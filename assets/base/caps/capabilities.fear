@@ -6,11 +6,4 @@ System: ToIso[System]{
   mut .try: mut CapTry,
   mut .clock: mut Clock,
   }
-_System: Sealed,System{
-  .iso -> iso _System,
-  .self -> this,
-  .io -> Magic!this,
-  .rng -> Magic!this,
-  .try -> Magic!this,
-  .clock -> Magic!this,
-  }
+_System: RuntimeImplemented,System{}

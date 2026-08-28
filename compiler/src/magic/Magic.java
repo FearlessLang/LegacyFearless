@@ -5,8 +5,6 @@ import failure.CompileError;
 import id.Id;
 import visitors.FullEAntlrVisitor;
 
-import java.lang.reflect.Modifier;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.function.Function;
@@ -19,6 +17,7 @@ import ast.T.Dec;
 public class Magic {
   public static final Id.DecId Main = new Id.DecId("base.Main", 0);
   public static final Id.DecId Sealed = new Id.DecId("base.Sealed", 0);
+  public static final Id.DecId RuntimeImplemented = new Id.DecId("base.RuntimeImplemented", 0);
   public static final Id.DecId HasIdentity = new Id.DecId("base.HasIdentity", 0);
   public static final Id.DecId Nat = new Id.DecId("base.Nat", 0);
   public static final Id.DecId Int = new Id.DecId("base.Int", 0);
@@ -67,45 +66,6 @@ public class Magic {
 
   public static final Id.DecId MapK = new Id.DecId("base.Maps", 0);
 
-  /// Whether `e` is the body a magic method lowers to: a call on the `base.Magic` stub.
-  ///
-  /// Such a method has no generated implementation. The runtime provides the value that answers
-  /// it, with a vtable of its own, so the wrapper generated beside the declaration aborts and a
-  /// type that writes only these is no implementation of anything.
-  public static boolean isMagicStub(codegen.MIR.E e) {
-    return switch (e) {
-      case codegen.MIR.MCall call -> isMagicAbortValue(call.recv());
-      case codegen.MIR.DirectCall call -> isMagicStub(call.original());
-      case codegen.MIR.GuardedCall call -> isMagicStub(call.original());
-      case codegen.MIR.StaticCall call -> isMagicStub(call.original());
-      case codegen.MIR.Block block -> isMagicStub(block.original());
-      case codegen.MIR.BoolExpr expr -> isMagicStub(expr.original());
-      case codegen.MIR.Box box -> isMagicStub(box.inner());
-      default -> false;
-    };
-  }
-
-  private static boolean isMagicAbortValue(codegen.MIR.E recv) {
-    if (!(recv instanceof codegen.MIR.CreateObj k)) { return false; }
-    return MagicAbort.equals(k.concreteT().id())
-      || k.t().name().map(MagicAbort::equals).orElse(false);
-  }
-
-  /// Every `DecId` this class names. A whole-program analysis over the MIR misses these:
-  /// some have no object literal at all, because the runtime provides the instance and its
-  /// vtable. Built from the fields of this class, so a new magic type needs no upkeep, and
-  /// deliberately over-wide: a spare entry only makes a caller more conservative, while a
-  /// missing one makes it unsound.
-  public static List<Id.DecId> allMagicDecs() { return MAGIC_DECS; }
-
-  private static final List<Id.DecId> MAGIC_DECS = Arrays.stream(Magic.class.getDeclaredFields())
-    .filter(f -> f.getType().equals(Id.DecId.class) && Modifier.isStatic(f.getModifiers()))
-    .map(f -> {
-      try { return (Id.DecId) f.get(null); }
-      catch (IllegalAccessException e) { throw new RuntimeException(e); }
-    })
-    .toList();
-
   public static astFull.T.Dec getFullDec(Function<Id.DecId, astFull.T.Dec> resolve, Id.DecId id) {
     var base = _getDec(resolve, id);
     return base.map(b -> b.withName(id)).orElse(null);
@@ -116,13 +76,19 @@ public class Magic {
     return base.map(b -> createMagicTrait(b, id)).orElse(null);
   }
 
+  /// The declaration of one literal, cloned from the template of its kind.
+  ///
+  /// {@link #RuntimeImplemented} on the template keeps the template out of codegen, because
+  /// nothing makes a value of it. The clone is the value a literal makes and generated code
+  /// implements it, so it takes the kind alone.
   private static Dec createMagicTrait(Dec b, Id.DecId id) {
     Lambda l = b.lambda();
     LambdaId lid = l.id();
     assert lid.id().name().endsWith("Instance");
-    assert l.its().size() == 1 : l;
+    var kinds = l.its().stream().filter(it -> !it.name().equals(RuntimeImplemented)).toList();
+    assert kinds.size() == 1 : l;
     // instance, kind   0.5  anon:base._FloatInstance, base.Float
-    var its = List.of(lid.toIT(), l.its().getFirst());
+    var its = List.of(lid.toIT(), kinds.getFirst());
     l = l.withId(lid.withId(id)).withITs(its);
     return b.withLambda(l);
   }
@@ -173,6 +139,6 @@ public class Magic {
   private static <T> Optional<T> _getDec(Function<Id.DecId, T> resolve, Id.DecId id) {
     return LiteralKind.match(id.name())
       .map(LiteralKind::toDecId)
-      .map(resolve::apply);
+      .map(resolve);
   }
 }

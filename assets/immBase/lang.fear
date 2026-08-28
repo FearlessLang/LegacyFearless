@@ -2,10 +2,13 @@ package base
 
 Main:{ #(args: LList[Str]): Str }
 Sealed:{}
+/// A type the runtime implements. No package may write an implementation of one, and
+/// generated code holds none.
+RuntimeImplemented:Sealed{}
 Void:{}
 
-Abort:{ ![R:imm]: R -> this! } // can be optimised to just terminate (goes stuck)
-Magic:{ ![R:imm]: R -> this! } // can be optimised to just terminate (goes stuck)
+Abort:RuntimeImplemented{ ![R:imm]: R -> this! } // can be optimised to just terminate (goes stuck)
+Magic:RuntimeImplemented{ ![R:imm]: R -> this! } // can be optimised to just terminate (goes stuck)
 
 Let:{ #[V:imm,R:imm](l: Let[V, R]): R -> l.in(l.var) }
 Let[V:imm,R:imm]:{ .var: V, .in(v: V): R }

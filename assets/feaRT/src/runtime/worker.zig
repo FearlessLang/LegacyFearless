@@ -544,7 +544,7 @@ fn workerLoop(worker: *Worker) void {
 			op_counters.bump(.thief_fiber_created);
 			const fiber = Fiber.create(&thiefTrampoline, @ptrCast(task)) catch @panic("OOM creating thief fiber");
 			fiber.state = .Ready;
-			fiber.tokens = task.initial_tokens;
+			fiber.tokens.store(task.initial_tokens, .monotonic);
 			// The mapping reference moves with the parent: from here the fiber's
 			// join credit is what releases it, not `recycleTask`.
 			fiber.parent = task.parent;

@@ -216,6 +216,14 @@ public class Fail{
   public static CompileError privateTraitImplementation(Id.DecId dec) {
     return of("The private trait "+dec+" cannot be implemented outside of its package.");
   }
+  public static CompileError runtimeImplementedOutsideBase(Id.DecId dec, String pkg) {
+    return of("Only the base library may declare a type as "+magic.Magic.RuntimeImplemented
+      +". "+dec+" is declared in "+pkg+".");
+  }
+  public static CompileError implementRuntimeImplemented(Id.DecId dec) {
+    return of("The runtime-implemented trait "+dec+" cannot be implemented. The runtime"
+      +" provides its only implementation.");
+  }
 
   /** This method is for when in inference we cannot extract a method's signature from meths because nothing with
    * that name exists on the currently inferred type. */

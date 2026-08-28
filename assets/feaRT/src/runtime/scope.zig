@@ -1,9 +1,9 @@
 //! Cooperative cancellation scope.
 //!
 //! A Scope is a shared cancel bit plus an optional parent pointer. Each
-//! flow-terminal entry pushes a fresh scope onto the current fiber's TLS slot;
+//! flow-terminal entry pushes a fresh scope into the current fiber's header;
 //! work below that point (Fearless drive* recursion, Zig run_chunk polling,
-//! stolen thief fibers) reads the TLS scope and bails out on cancel.
+//! stolen thief fibers) reads that scope and bails out on cancel.
 //!
 //! The `parent` link supports nested scopes: when an inner scope is queried,
 //! cancellation bubbles up through its ancestors. This keeps cancel cheap
@@ -64,9 +64,14 @@ pub fn activeScope() ?*Scope {
     return f.saved_scope;
 }
 
+/// Set the running fiber's active scope. A caller off a fiber stack would lose
+/// the write and break cancellation, so a safe build fails loudly.
 pub fn setActiveScope(s: ?*Scope) void {
-    const f = fiber_mod.currentFiberOrNull() orelse return;
-    f.saved_scope = s;
+    const f = fiber_mod.currentFiberOrNull();
+    if (std.debug.runtime_safety) {
+        std.debug.assert(f != null);
+    }
+    if (f) |fiber| { fiber.saved_scope = s; }
 }
 
 /// True if the currently-active scope (or any of its ancestors) is cancelled.

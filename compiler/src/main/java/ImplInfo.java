@@ -38,6 +38,9 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
 
   /// What a package knew about one type it declares. `impls` holds names rather than
   /// {@link Id.DecId}, which is what the file carries and what Jackson maps without help.
+  ///
+  /// Nothing here says whether the runtime implements the type. That comes from the
+  /// `base.RuntimeImplemented` marker, which `pkgInfo` keeps and `superDecIds` resolves.
   public record Entry(boolean sealed, boolean inlineDec, List<String> impls) {
     public static Entry of(boolean sealed, boolean inlineDec, Set<Id.DecId> impls) {
       return new Entry(sealed, inlineDec, impls.stream().map(Id.DecId::toString).toList());
@@ -60,10 +63,8 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
   /// codegen makes, so a type that is never instantiated, and therefore carries no vtable, is no
   /// implementation of anything.
   public static ImplInfo of(String pkgName, ast.Program program, MIR.Program mir) {
-    var runtimeBacked = runtimeBackedOf(mir);
     var values = valuesOf(mir).stream()
       .filter(value -> value.pkg().equals(pkgName))
-      .filter(value -> !runtimeBacked.contains(value))
       .collect(Collectors.toUnmodifiableSet());
     return new ImplInfo(Mapper.of(out -> targetsOf(pkgName, program).forEach(target ->
       out.put(target, Entry.of(
@@ -83,18 +84,6 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
   private static Set<Id.DecId> implsOf(ast.Program program, Id.DecId target, Set<Id.DecId> values) {
     return values.stream()
       .filter(value -> program.superDecIds(value).contains(target))
-      .collect(Collectors.toCollection(LinkedHashSet::new));
-  }
-
-  /// Every type that writes a magic method, whose values the runtime makes with a vtable of its
-  /// own. The literal such a type has beside its declaration is a placeholder, so counting it as
-  /// an implementation would name a wrapper that aborts and would hide the values that answer
-  /// the call for real.
-  private static Set<Id.DecId> runtimeBackedOf(MIR.Program mir) {
-    return mir.pkgs().stream()
-      .flatMap(pkg -> pkg.funs().stream())
-      .filter(fun -> Magic.isMagicStub(fun.body()))
-      .map(fun -> fun.name().d())
       .collect(Collectors.toCollection(LinkedHashSet::new));
   }
 

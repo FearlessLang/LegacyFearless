@@ -252,6 +252,9 @@ pub fn initThreadSignalStacks(worker_id: u32) void {
         // unwind there keeps the biased reference counting paths it would have
         // taken on the fiber that faulted.
         .worker_id = worker_id,
+        // A masked recovery-stack pointer must find this header and pass the
+        // `currentFiber` check.
+        .magic = fiber_mod.FIBER_MAGIC,
     };
 
     var ss = std.posix.stack_t{
@@ -261,7 +264,10 @@ pub fn initThreadSignalStacks(worker_id: u32) void {
     };
     std.posix.sigaltstack(&ss, null) catch {};
 
-    gc.addRoots(@ptrFromInt(base), @ptrFromInt(base + fiber_mod.STACK_SIZE));
+    // Only the recovery region: an `Info` built during recovery lives there and a
+    // collection must not sweep it. The alt stack holds no Fearless objects, and
+    // the fiber registry reaches the header.
+    gc.addRoots(@ptrFromInt(recovery_bottom), @ptrFromInt(recovery_stack_top));
 }
 
 /// Undo `initThreadSignalStacks` before a worker thread's TLS is torn down, so a
@@ -270,7 +276,12 @@ pub fn deinitThreadSignalStacks() void {
     const base = signal_block;
     if (base == 0) return;
     signal_block = 0;
+    const recovery_bottom = base + fiber_mod.FIBER_REGION + ALT_STACK_SIZE;
+    gc.removeRoots(@ptrFromInt(recovery_bottom), @ptrFromInt(recovery_stack_top));
     recovery_stack_top = 0;
-    gc.removeRoots(@ptrFromInt(base), @ptrFromInt(base + fiber_mod.STACK_SIZE));
+    // Before the unmap, so a stale stack pointer that masks here fails the
+    // `currentFiber` check instead of reading a dead header.
+    const header: *Fiber = @ptrFromInt(base);
+    header.magic = 0;
     fiber_mod.unmapAlignedBlock(base);
 }

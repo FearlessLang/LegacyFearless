@@ -4,6 +4,7 @@ import codegen.MIR;
 import codegen.MIRCloneVisitor;
 import id.Id;
 import magic.Magic;
+import magic.MagicImpls;
 
 /// Turns the recursive call of a method into a {@link MIR.DirectCall}.
 ///
@@ -15,6 +16,7 @@ import magic.Magic;
 /// So the call needs no test and no analysis. The receiver passes through as it stands, which
 /// keeps the vtable of the value for any other call the body makes.
 public class DirectSelfRecursion implements MIRCloneVisitor {
+  private ast.Program ast;
   private String selfName;
   private Id.DecId owner;
   private Id.MethName method;
@@ -23,13 +25,20 @@ public class DirectSelfRecursion implements MIRCloneVisitor {
 
   public int rewrittenCalls() { return rewritten; }
 
+  @Override public MIR.Program visitProgram(MIR.Program p) {
+    this.ast = p.p();
+    return MIRCloneVisitor.super.visitProgram(p);
+  }
+
   @Override public MIR.Fun visitFun(MIR.Fun fun) {
     var savedName = selfName;
     var savedOwner = owner;
     var savedMethod = method;
     var savedMdf = mdf;
     var selfIdx = fun.name().m().num();
-    if (selfIdx < fun.args().size() && !Magic.allMagicDecs().contains(fun.name().d())) {
+    // `Abort!` and `Magic!` are written `-> this!`, so the recursion is real. The runtime
+    // answers such a call, so there is no wrapper for a direct call to name.
+    if (selfIdx < fun.args().size() && !isRuntimeOwned(fun.name().d())) {
       selfName = fun.args().get(selfIdx).name();
       owner = fun.name().d();
       method = fun.name().m();
@@ -43,6 +52,16 @@ public class DirectSelfRecursion implements MIRCloneVisitor {
     method = savedMethod;
     mdf = savedMdf;
     return res;
+  }
+
+  /// Whether the runtime answers a call on `owner`, either because the backend intercepts it or
+  /// because the declaration carries the runtime-implemented marker. An object literal, which a
+  /// package read back from its type information no longer holds, has no declaration to ask and
+  /// carries no marker, so it answers no.
+  private boolean isRuntimeOwned(Id.DecId owner) {
+    if (MagicImpls.MAGIC_DECS.contains(owner)) { return true; }
+    if (!ast.ds().containsKey(owner) && !ast.inlineDs().containsKey(owner)) { return false; }
+    return ast.superDecIds(owner).contains(Magic.RuntimeImplemented);
   }
 
   @Override public MIR.E visitMCall(MIR.MCall call, boolean checkMagic) {

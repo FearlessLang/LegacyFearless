@@ -1,9 +1,10 @@
 package base.benchmarking
 alias base.Magic as Magic,
+alias base.RuntimeImplemented as RuntimeImplemented,
 alias base.Nat as Nat,
 alias base.Void as Void,
 
-BlackBox: {
+BlackBox: RuntimeImplemented{
   /// Consumes a value to prevent de-optimisation
   #[T:imm,mut,read](value: T): Void -> Magic!,
   .consumeCpu(tokens: Nat): Void -> Magic!,

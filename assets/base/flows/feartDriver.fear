@@ -12,7 +12,7 @@ package base.flows
 /// The runtime side is `intrinsics/flows/instance.zig`. It delegates to the Fearless code
 /// here, except for the magic methods. A magic method that reads runtime state stays `mut`,
 /// to obey the type system.
-_FeartDriver: Sealed{
+_FeartDriver: RuntimeImplemented{
   /// The public `.fold` terminal. `F[A,E,A]` is an arbitrary left-fold step. It is not
   /// associative, `initial` is not an identity, and `A` can differ from `E`. Thus you cannot
   /// combine two accumulators. `combine` must see all elements on one thread, in order.

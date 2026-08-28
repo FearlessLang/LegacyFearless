@@ -152,6 +152,13 @@ const LinuxBackend = struct {
 /// `*Completion`s onto an MPMC queue; the thread drains it, runs the syscall and
 /// fulfils the obligation. All fallback I/O serialises through it, by design.
 const FallbackBackend = struct {
+    // `syscallRes` tests its result with `n >= 0`, which needs the signed returns
+    // of `std.c`. Without libc, `std.posix.system` is the raw OS layer, whose
+    // wrappers give an unsigned result and make that test vacuous.
+    comptime {
+        std.debug.assert(builtin.link_libc);
+    }
+
     var submit_queue: *MpmcBoundedQueue(*Completion) = undefined;
 
     fn init() !void {

@@ -43,6 +43,8 @@ public class WellFormednessShortCircuitVisitor extends ShortCircuitVisitorWithEn
     return ShortCircuitVisitor.visitAll(e.its(), it->noPrivateTraitOutsidePkg(it.name()))
       .or(()->validLambdaMdf(e))
       .or(()->noSealedOutsidePkg(e))
+      .or(()->noRuntimeImplementedOutsideBase(e))
+      .or(()->noImplementRuntimeImplemented(e))
       .or(()->noImplInlineDec(e))
       .or(()->noAbsMethods(e))
       .or(()->noFreeGensInLambda(e))
@@ -149,8 +151,35 @@ public class WellFormednessShortCircuitVisitor extends ShortCircuitVisitorWithEn
       .map(Id.IT::name)
       .filter(dec->isLiteral(dec.name()) || !dec.pkg().equals(pkg))
       .filter(dec->p.superDecIds(dec).contains(Magic.Sealed))
-      .filter(dec->!dec.equals(Magic.Sealed))
+      .filter(dec->!dec.equals(Magic.Sealed) && !dec.equals(Magic.RuntimeImplemented))
       .toList();
+  }
+
+  /// `base.RuntimeImplemented` marks a type the runtime implements, which only the base library
+  /// can know. A package that claimed it would take itself out of every devirtualisation.
+  private Optional<CompileError> noRuntimeImplementedOutsideBase(E.Lambda e) {
+    if (e.its().stream().noneMatch(it->it.name().equals(Magic.RuntimeImplemented))) {
+      return Optional.empty();
+    }
+    var pkg = this.pkg.orElseThrow();
+    if (pkg.equals("base") || pkg.startsWith("base.")) { return Optional.empty(); }
+    return Optional.of(
+      Fail.runtimeImplementedOutsideBase(e.id().id(), pkg).pos(e.pos()));
+  }
+
+  /// A runtime-implemented type has no implementation written in Fearless, anywhere. One would
+  /// be the only implementation this compilation can count, so a receiver of the type would look
+  /// monomorphic and a call devirtualised onto it would miss every value the runtime hands back.
+  private Optional<CompileError> noImplementRuntimeImplemented(E.Lambda e) {
+    // A lambda that writes no method takes the vtable of the type it names, which is the vtable
+    // the runtime owns. Naming a runtime-implemented singleton is written this way.
+    if (e.meths().isEmpty()) { return Optional.empty(); }
+    var marked = e.its().stream()
+      .map(Id.IT::name)
+      .filter(it->!e.id().id().equals(it) && !it.equals(Magic.RuntimeImplemented))
+      .filter(it->p.superDecIds(it).contains(Magic.RuntimeImplemented))
+      .findFirst();
+    return marked.map(it->Fail.implementRuntimeImplemented(it).pos(e.pos()));
   }
 
   private Optional<CompileError> noImplInlineDec(E.Lambda e) {

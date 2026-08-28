@@ -100,6 +100,30 @@ public class TestWellFormedness {
     package base
     Sealed:{}
     """); }
+  @Test void runtimeImplementedOutsideBase() { fail("""
+    In position [###]/Dummy0.fear:2:0
+    [E78 runtimeImplementedOutsideBase]
+    Only the base library may declare a type as base.RuntimeImplemented/0. a.Foo/0 is declared in a.
+    """, """
+    package a
+    Foo:base.RuntimeImplemented{ .m1: Foo }
+    """, """
+    package base
+    Sealed:{}
+    RuntimeImplemented:Sealed{}
+    """); }
+  /// The rule holds inside the base library too, where sealing gives no protection.
+  @Test void implementRuntimeImplemented() { fail("""
+    In position [###]/Dummy0.fear:5:0
+    [E79 implementRuntimeImplemented]
+    The runtime-implemented trait base.Regex/0 cannot be implemented. The runtime provides its only implementation.
+    """, """
+    package base
+    Sealed:{}
+    RuntimeImplemented:Sealed{}
+    Regex:RuntimeImplemented{ .isMatch(h: Regex): Regex }
+    Foo:Regex{ .isMatch(h) -> h }
+    """); }
   @Test void sealedOutsidePkgNoOverridesInline() { ok("""
     package a
     alias base.Sealed as Sealed,

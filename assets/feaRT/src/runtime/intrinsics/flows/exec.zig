@@ -291,7 +291,7 @@ fn actor_sink_push_error(self: FatPtr, info: FatPtr) callconv(.c) FatPtr {
 }
 
 const VT_ActorSink: objs.VTable = .{
-    .type_name = "<runtime flow actor sink>",
+    .type_name = "base.flows._ActorSink/1",
     .hashes = &.{ h("mut #/1"), h("mut .pushError/1") },
     .methods = &.{
         @as(*const anyopaque, @ptrCast(&actor_sink_accept)),

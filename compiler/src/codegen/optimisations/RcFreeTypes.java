@@ -79,7 +79,11 @@ public final class RcFreeTypes {
   /// Whether the declaration itself bars a package other than the declaring one from
   /// implementing it: a named inline declaration, which nothing may implement, or a sealed
   /// type, which only its own package may.
+  ///
+  /// A runtime-implemented type is never closed: sealing it bars a second Fearless
+  /// implementation, not the runtime's own, which is heap allocated and counted.
   private boolean isClosed(Id.DecId declared) {
+    if (program.superDecIds(declared).contains(Magic.RuntimeImplemented)) { return false; }
     return program.isInlineDec(declared) || program.superDecIds(declared).contains(Magic.Sealed);
   }
 

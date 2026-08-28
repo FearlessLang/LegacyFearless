@@ -1,6 +1,6 @@
 package base
 
-Assert:Sealed{
+Assert:RuntimeImplemented{
   !(assertion: Bool): Void -> this!(assertion, { Void }),
   ![R:*](assertion: Bool, cont: mut AssertCont[R]): R -> assertion ? {
     .then -> cont#,

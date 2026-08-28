@@ -1,6 +1,6 @@
 package base
 
-Vars: {
+Vars: RuntimeImplemented{
   #[X:*](x: X): mut Var[X] -> Block#
     .let[mut _MagicVarImpl[X]] inner = {_MagicVarImpl#x}
     .return {{
@@ -58,8 +58,8 @@ Count:{
 
 // Var as defined in the formal reduction of Fearless.
 // We capture this in the richer Var.
-_MagicVarImpl: {#[X:*](x: X): mut _MagicVarImpl[X] -> Magic!}
-_MagicVarImpl[X:*]: {
+_MagicVarImpl: RuntimeImplemented{#[X:*](x: X): mut _MagicVarImpl[X] -> Magic!}
+_MagicVarImpl[X:*]: RuntimeImplemented{
   mut  .get: X,
   read .get: read/imm X,
   mut .swap(x: X): X,

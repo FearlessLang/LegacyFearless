@@ -122,7 +122,12 @@ ActorRes: Sealed{
   }
 ActorResMatch[R:*]: { mut .continue: R, mut .stop: R, }
 
-_ActorSinks: {#[T:*](sink: mut _Sink[T]): mut _ActorSink[T] -> mut _ActorSink[T:*]: {
+_ActorSink[T:*]: {
+  mut #(x: T): Void,
+  mut .pushError(info: Info): Void,
+  }
+
+_ActorSinks: {#[T:*](sink: mut _Sink[T]): mut _ActorSink[T] -> {
   mut #(x: T): Void -> sink#x,
   mut .pushError(info: Info): Void -> sink.pushError(info),
   }}

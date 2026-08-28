@@ -176,7 +176,7 @@ LListMatchRead[E:*,R:*]: {
   mut .empty: R,
   }
 
-UList: Sealed{
+UList: RuntimeImplemented{
   #[E:*]: mut UList[E] -> Magic!,
   #[E:*](e1: E): mut UList[E] -> Magic!,
   #[E:*](e1: E, e2: E): mut UList[E] -> Magic!,
@@ -330,7 +330,7 @@ UList[E:*]: Collection,Sealed{
     },
   }
 
-List: Sealed{
+List: RuntimeImplemented{
   #[E:*]: mut List[E] -> Magic!,
   #[E:*](e1: E): mut List[E] -> Magic!,
   #[E:*](e1: E, e2: E): mut List[E] -> Magic!,

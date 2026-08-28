@@ -1,6 +1,6 @@
 package base
 
-Error: {
+Error: RuntimeImplemented{
   ![R:**](info: Info): R -> Magic!,
   .msg[R:**](msg: Str): R -> this!(Infos.msg msg)
   }
@@ -18,7 +18,7 @@ Unreachable: {
 /// Strong exception safety is upheld:
 /// The operation has either completed successfully or thrown an exception,
 // leaving the program state exactly as it was before the operation started.
-Try: {
+Try: RuntimeImplemented{
   #[R:*](try: read F[R]): mut Action[R] -> Magic!,
   #[T:iso,imm,mut,read,R](data: iso T, try: read F[iso T, R]): mut Action[R] -> Magic!,
   }

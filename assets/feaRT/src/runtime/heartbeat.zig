@@ -39,17 +39,20 @@ pub inline fn tryPromote() void {
     // there to be found; the flag is what suppresses promotion.
     const fiber = fiber_mod.currentFiber();
     if (!fiber.vpf_enabled) return;
-    const tokens_ptr = &fiber.tokens;
-    if (tokens_ptr.* >= TOKENS_THRESHOLD) {
+    // Relaxed: a plain load and store on the owner's path. A thief credit that
+    // lands between them is lost; see `Fiber.tokens`.
+    const tokens = fiber.tokens.load(.monotonic);
+    if (tokens >= TOKENS_THRESHOLD) {
         // Both tests are inline and reject without a call, which is what keeps
         // a miss cheap; nothing else may run on the healthy path. Promoting
         // into a cancelled subtree only burns a thief fiber on work that is
         // about to abort.
         if (hasPromotableFrame(fiber) and !scope_mod.cancelledOn(fiber)) {
-            const remainder = (tokens_ptr.* - TOKENS_THRESHOLD) / 2;
+            const remainder = (tokens - TOKENS_THRESHOLD) / 2;
             if (doPromote(fiber, remainder)) {
                 op_counters.bump(.promotion);
-                tokens_ptr.* = remainder;
+                fiber.tokens.store(remainder, .monotonic);
+                return;
             }
         } else {
             // doPromote records its own reason.
@@ -60,12 +63,12 @@ pub inline fn tryPromote() void {
                     op_counters.bump(.promotion_miss_cancelled);
                 }
             }
-            periodicDrain(tokens_ptr.*);
+            periodicDrain(tokens);
         }
     }
     // The threshold check above bounds this below U32_MAX, so it cannot overflow.
     op_counters.bump(.token_granted);
-    tokens_ptr.* += 1;
+    fiber.tokens.store(tokens + 1, .monotonic);
 }
 
 /// True when the fiber has an un-promoted shadow frame.
