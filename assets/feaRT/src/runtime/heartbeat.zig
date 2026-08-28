@@ -3,7 +3,7 @@
 //! The name is historical: this is not Heartbeat Scheduling, nor the Task
 //! Parallel Assembly Language. It follows Automatic Parallelism Management
 //! (Westrick et al.), a descendant of Heartbeat Scheduling that performs much
-//! better in practice, and it is the design proposed in the future work of the
+//! better in practice, and it is the design proposed in the future work of my
 //! PhD thesis "Fearless Automatic Parallelisation".
 
 const std = @import("std");
