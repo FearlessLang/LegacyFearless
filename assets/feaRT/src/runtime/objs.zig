@@ -170,6 +170,27 @@ pub const FatPtr = extern struct {
 		}
 	}
 
+	/// Take one reference where the static type admits `.heap` alone, so the count goes up with
+	/// no storage-mode test.
+	pub inline fn share_heap(ptr: *const FatPtr) FatPtr {
+		if (std.debug.runtime_safety) assert(ptr.vt.storage_mode == .heap);
+		const copy = ptr.*;
+		op_counters.bump(.rc_increment);
+		incRef(ptr.boxed_value());
+		return copy;
+	}
+
+	/// Take one reference where the static type admits `.heap` and `.transient` only. A transient
+	/// value holds no count, so one test replaces the general dispatch.
+	pub inline fn share_heap_or_transient(ptr: *const FatPtr) FatPtr {
+		const copy = ptr.*;
+		if (ptr.vt.storage_mode == .heap) {
+			op_counters.bump(.rc_increment);
+			incRef(ptr.boxed_value());
+		} else if (std.debug.runtime_safety) assert(ptr.vt.storage_mode == .transient);
+		return copy;
+	}
+
 	/// Release one reference held by the fiber this runs on. Generated code
 	/// calls this, so the identity comes off the stack pointer.
 	///
@@ -199,6 +220,37 @@ pub const FatPtr = extern struct {
 					error_rt.release(ptr.data.err_cell, releasing_worker_id),
 			.heap => rc_decrement_slow(ptr, releasing_worker_id),
 		}
+	}
+
+	/// Release one reference where the static type admits `.heap` alone. The counterpart of
+	/// [`share_heap`].
+	pub inline fn rc_decrement_heap(ptr: *const FatPtr) void {
+		if (std.debug.runtime_safety) assert(ptr.vt.storage_mode == .heap);
+		rc_decrement_slow(ptr, worker_mod.currentWorkerId());
+	}
+
+	/// [`rc_decrement_heap`] for a caller that carries the identity rather than reading it off the
+	/// stack pointer.
+	pub inline fn rc_decrement_heap_as(ptr: *const FatPtr, releasing_worker_id: u32) void {
+		if (std.debug.runtime_safety) assert(ptr.vt.storage_mode == .heap);
+		rc_decrement_slow(ptr, releasing_worker_id);
+	}
+
+	/// Release one reference where the static type admits `.heap` and `.transient` only. The
+	/// counterpart of [`share_heap_or_transient`]. The identity comes off the stack pointer, and
+	/// only the heap arm reads it.
+	pub inline fn rc_decrement_heap_or_transient(ptr: *const FatPtr) void {
+		if (ptr.vt.storage_mode == .heap) {
+			rc_decrement_slow(ptr, worker_mod.currentWorkerId());
+		} else if (std.debug.runtime_safety) assert(ptr.vt.storage_mode == .transient);
+	}
+
+	/// [`rc_decrement_heap_or_transient`] for a caller that carries the identity rather than
+	/// reading it off the stack pointer.
+	pub inline fn rc_decrement_heap_or_transient_as(ptr: *const FatPtr, releasing_worker_id: u32) void {
+		if (ptr.vt.storage_mode == .heap) {
+			rc_decrement_slow(ptr, releasing_worker_id);
+		} else if (std.debug.runtime_safety) assert(ptr.vt.storage_mode == .transient);
 	}
 
 	noinline fn rc_decrement_slow(ptr: *const FatPtr, releasing_worker_id: u32) void {

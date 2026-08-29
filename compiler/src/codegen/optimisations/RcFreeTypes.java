@@ -2,36 +2,45 @@ package codegen.optimisations;
 
 import codegen.MIR;
 import id.Id;
+import magic.LiteralKind;
 import magic.Magic;
+import main.java.ImplInfo;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/// Which static types need no reference counting at run time.
+/// The reference-count operation that the possible run-time storage modes require.
 ///
-/// A `FatPtr` carries its storage mode on its vtable, so `share`, `rc_decrement` and
-/// `box_transient` all start by loading that byte and branching on it. Where the static type
-/// admits only storage modes that make those operations the identity, a backend can drop the
-/// operation and the load with it.
+/// A `FatPtr` carries its storage mode on its vtable. Where rapid type analysis constrains all
+/// values of a static type to one supported storage-mode class, code generation can avoid the
+/// general storage-mode dispatch.
 ///
-/// Two tiers answer the question, and they hold for different lengths of time:
+/// Two tiers answer the question. {@link #strategy} uses the concrete types in the current
+/// compilation. {@link #strategyForever} additionally requires a declaration that later
+/// compilations cannot implement, and is therefore safe to write into cached package code.
 ///
-///   * A primitive number type is `.primitive` by construction, whatever else the program
-///     contains. This is the same trust a backend already places in a declared type when it
-///     emits a comptime-resolved primitive dispatch with no vtable test.
-///   * Any other type needs the set of concrete types that can reach it, which is what
-///     {@link RapidTypeAnalysis} computes for devirtualisation. A declared type whose
-///     concrete types are all primitives or singletons is rc-free as well. This tier reads the
-///     compilation running now, and a later compilation can add a concrete type to the set.
-///
-/// {@link #isRcFreeForever} is the part of the second tier that no later compilation can take
-/// away: a declaration nothing outside its package may implement has its whole concrete set
-/// here, so the answer is a property of the declaration rather than of this program.
-///
-/// Every answer is one-way: an unknown type is counted, so a missing entry costs speed and
+/// Missing information gives {@link Strategy#DYNAMIC}, so an incomplete answer costs speed and
 /// never correctness.
 public final class RcFreeTypes {
+  public enum Strategy {
+    /// Every possible storage mode makes share and decrement no-ops.
+    NONE,
+    /// Every possible value is a generated heap object, so no storage-mode test is needed.
+    HEAP,
+    /// Every possible value is a generated object that can be heap or transient, so one heap
+    /// test stands in for the general dispatch.
+    HEAP_OR_TRANSIENT,
+    /// The storage mode needs the general run-time dispatch.
+    DYNAMIC;
+
+    /// What serves two concrete types at once. Disagreement falls to the general dispatch: a
+    /// widening join is sound, but the specialised operations are `inline`, and the code they
+    /// add at a hot site costs more than the dispatch they remove.
+    static Strategy join(Strategy a, Strategy b) { return a == b ? a : DYNAMIC; }
+  }
+
   /// The magic types the runtime holds entirely inside the `FatPtr`, with no object header.
   private static final Set<Id.DecId> PRIMITIVES =
     Set.of(Magic.Nat, Magic.Int, Magic.Float, Magic.Byte);
@@ -39,69 +48,111 @@ public final class RcFreeTypes {
   private final RapidTypeAnalysis rta;
   private final ast.Program program;
   /// The packages the front end read back from their type information rather than from source.
-  /// Every body such a package holds is `base.Abort!`, so its object literals never reached the
-  /// table and every impl set it would have filled is a floor. A literal one of these owns can
-  /// only register against a type that same package declares, so refusing by declaring package
-  /// covers each of them.
+  /// Every body such a package holds is `base.Abort!`, so its object literals never reached
+  /// {@link #rta} and only {@link #cachedImpls} answers for it.
   private final Set<String> erasedPkgs;
-  private final Map<Id.DecId, Boolean> cache = new HashMap<>();
+  /// What every cached package recorded about the types it declares, joined.
+  private final ImplInfo cachedImpls;
+  private final Map<Id.DecId, Strategy> cache = new HashMap<>();
 
   public RcFreeTypes(RapidTypeAnalysis rta, ast.Program program, Set<String> erasedPkgs) {
+    this(rta, program, erasedPkgs, ImplInfo.EMPTY);
+  }
+
+  public RcFreeTypes(RapidTypeAnalysis rta, ast.Program program, Set<String> erasedPkgs,
+                     ImplInfo cachedImpls) {
     this.rta = rta;
     this.program = program;
     this.erasedPkgs = Set.copyOf(erasedPkgs);
+    this.cachedImpls = cachedImpls;
   }
 
-  /// Both tiers, for the compilation running now. False for a type variable, whose runtime type
-  /// the declaration does not pin down.
-  public boolean isRcFree(MIR.MT t) {
-    return t.name().map(this::isRcFree).orElse(false);
+  public Strategy strategy(MIR.MT t) {
+    return t.name().map(this::strategy).orElse(Strategy.DYNAMIC);
   }
 
-  public boolean isRcFree(MIR.E e) { return isRcFree(e.t()); }
+  public Strategy strategy(MIR.E e) { return strategy(e.t()); }
 
-  public boolean isRcFree(Id.DecId declared) {
+  public Strategy strategy(Id.DecId declared) {
     return cache.computeIfAbsent(declared, this::compute);
   }
 
-  /// The answer where it outlives the compilation that took it, such as inside a
-  /// {@link main.CompilationUnit} whose generated text later compilations read as it stands.
+  /// The strategy for generated text that outlives this compilation, such as a
+  /// {@link main.CompilationUnit} that later compilations read as it stands.
+  public Strategy strategyForever(MIR.MT t) {
+    return t.name()
+      .map(declared -> (isPrimitive(declared) || isClosed(declared))
+        ? strategy(declared)
+        : Strategy.DYNAMIC)
+      .orElse(Strategy.DYNAMIC);
+  }
+
+  public Strategy strategyForever(MIR.E e) { return strategyForever(e.t()); }
+
+  public boolean isRcFree(MIR.MT t) { return strategy(t) == Strategy.NONE; }
+
+  public boolean isRcFree(MIR.E e) { return isRcFree(e.t()); }
+
+  public boolean isRcFree(Id.DecId declared) { return strategy(declared) == Strategy.NONE; }
+
+  public boolean isRcFreeForever(MIR.E e) { return strategyForever(e) == Strategy.NONE; }
+
+  /// Whether the declaration is one the runtime keeps inside the `FatPtr`.
   ///
-  /// A primitive qualifies by construction. Anything else qualifies only where the declaration
-  /// closes the set of its implementations, because a later compilation adds packages this one
-  /// cannot see and any of them may implement an open declaration.
-  public boolean isRcFreeForever(MIR.E e) {
-    return e.t().name()
-      .map(declared -> PRIMITIVES.contains(declared) || (isClosed(declared) && isRcFree(declared)))
+  /// A number literal has a declared type of its own, such as `base.natLit.1`, rather than the
+  /// magic type it carries. That type names the magic type it stands for.
+  private boolean isPrimitive(Id.DecId declared) {
+    if (PRIMITIVES.contains(declared)) { return true; }
+    return LiteralKind.match(declared.name())
+      .map(kind -> PRIMITIVES.contains(kind.magicKind()))
       .orElse(false);
   }
 
-  /// Whether the declaration itself bars a package other than the declaring one from
-  /// implementing it: a named inline declaration, which nothing may implement, or a sealed
-  /// type, which only its own package may.
-  ///
-  /// A runtime-implemented type is never closed: sealing it bars a second Fearless
-  /// implementation, not the runtime's own, which is heap allocated and counted.
+  /// Whether the declaration bars a package other than its declaring package from implementing
+  /// it. A runtime-implemented declaration is open because sealing does not remove the runtime's
+  /// implementation.
   private boolean isClosed(Id.DecId declared) {
     if (program.superDecIds(declared).contains(Magic.RuntimeImplemented)) { return false; }
     return program.isInlineDec(declared) || program.superDecIds(declared).contains(Magic.Sealed);
   }
 
-  private boolean compute(Id.DecId declared) {
-    if (PRIMITIVES.contains(declared)) { return true; }
-    if (erasedPkgs.contains(declared.pkg())) { return false; }
-    var concretes = rta.implsOf(declared);
-    // Nothing recorded means nothing was seen creating a value of this type, which is not
-    // the same as nothing being able to.
-    if (concretes.isEmpty()) { return false; }
-    return concretes.stream().allMatch(this::isRcFreeConcrete);
+  private Strategy compute(Id.DecId declared) {
+    if (isPrimitive(declared)) { return Strategy.NONE; }
+    var concretes = erasedPkgs.contains(declared.pkg())
+      ? cachedImpls.get(declared).map(ImplInfo.Entry::implIds).orElse(List.of())
+      : List.copyOf(rta.implsOf(declared));
+    // Nothing was seen making a value of this type, which does not mean nothing can.
+    if (concretes.isEmpty()) { return Strategy.DYNAMIC; }
+
+    return concretes.stream()
+      .map(this::concreteStrategy)
+      .reduce(Strategy::join)
+      .orElse(Strategy.DYNAMIC);
   }
 
-  /// A concrete type carries no reference count when its storage mode has no header to
-  /// count: a primitive, or a singleton, which is an object literal capturing nothing. A
-  /// runtime-backed type with no object literal behind it is counted.
-  private boolean isRcFreeConcrete(Id.DecId concrete) {
-    if (PRIMITIVES.contains(concrete)) { return true; }
-    return rta.literalOf(concrete).map(k -> k.captures().isEmpty()).orElse(false);
+  /// An erased package answers from {@link #cachedImpls} alone. Most of its values are inline
+  /// declarations, which `pkgInfo` does not keep, so asking the program about one raises
+  /// {@link failure.Fail#traitNotFound}.
+  private Strategy concreteStrategy(Id.DecId concrete) {
+    if (isPrimitive(concrete)) { return Strategy.NONE; }
+    if (erasedPkgs.contains(concrete.pkg())) {
+      return cachedImpls.get(concrete)
+        .map(entry -> entry.singleton()
+          ? Strategy.NONE
+          : capturingStrategy(entry.hasIdentity()))
+        .orElse(Strategy.DYNAMIC);
+    }
+    return rta.literalOf(concrete)
+      .map(literal -> literal.captures().isEmpty()
+        ? Strategy.NONE
+        : capturingStrategy(program.superDecIds(concrete).contains(Magic.HasIdentity)))
+      .orElse(Strategy.DYNAMIC);
+  }
+
+  /// A capturing value is heap allocated, and transient as well where the runtime may hold it in
+  /// the frame that makes it. An identity the program can compare bars the transient form, which
+  /// leaves the heap alone and needs no test.
+  private Strategy capturingStrategy(boolean hasIdentity) {
+    return hasIdentity ? Strategy.HEAP : Strategy.HEAP_OR_TRANSIENT;
   }
 }

@@ -39,11 +39,22 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
   /// What a package knew about one type it declares. `impls` holds names rather than
   /// {@link Id.DecId}, which is what the file carries and what Jackson maps without help.
   ///
-  /// Nothing here says whether the runtime implements the type. That comes from the
+  /// `singleton` says the value of this type carries no reference count: the package made it as
+  /// an object literal that captures nothing, so the runtime gives it a static header.
+  ///
+  /// `hasIdentity` says the type carries the `base.HasIdentity` marker, so the runtime always
+  /// gives its values a heap header and never a transient one. A reader cannot work this out for
+  /// itself, because an inline declaration never reaches `pkgInfo` and `superDecIds` therefore
+  /// does not resolve one.
+  ///
+  /// Whether the runtime implements the type is not here. That comes from the
   /// `base.RuntimeImplemented` marker, which `pkgInfo` keeps and `superDecIds` resolves.
-  public record Entry(boolean sealed, boolean inlineDec, List<String> impls) {
-    public static Entry of(boolean sealed, boolean inlineDec, Set<Id.DecId> impls) {
-      return new Entry(sealed, inlineDec, impls.stream().map(Id.DecId::toString).toList());
+  public record Entry(boolean sealed, boolean inlineDec, boolean singleton, boolean hasIdentity,
+                      List<String> impls) {
+    public static Entry of(boolean sealed, boolean inlineDec, boolean singleton,
+                           boolean hasIdentity, Set<Id.DecId> impls) {
+      return new Entry(sealed, inlineDec, singleton, hasIdentity,
+        impls.stream().map(Id.DecId::toString).toList());
     }
 
     /// The implementations as names again. One a later compiler no longer parses is left out,
@@ -66,11 +77,25 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
     var values = valuesOf(mir).stream()
       .filter(value -> value.pkg().equals(pkgName))
       .collect(Collectors.toUnmodifiableSet());
+    var singletons = singletonsOf(mir);
     return new ImplInfo(Mapper.of(out -> targetsOf(pkgName, program).forEach(target ->
       out.put(target, Entry.of(
         program.superDecIds(target).contains(Magic.Sealed),
         program.isInlineDec(target),
+        singletons.contains(target),
+        program.superDecIds(target).contains(Magic.HasIdentity),
         implsOf(program, target, values))))));
+  }
+
+  /// The types the lowered program makes as an object literal capturing nothing. The runtime
+  /// gives such a value a static header, so no reference count follows it.
+  private static Set<Id.DecId> singletonsOf(MIR.Program mir) {
+    var found = new LinkedHashSet<Id.DecId>();
+    mir.pkgs().forEach(pkg -> pkg.defs().forEach((name, def) ->
+      def.singletonInstance()
+        .filter(k -> k.captures().isEmpty())
+        .ifPresent(_ -> found.add(name))));
+    return found;
   }
 
   /// The types `pkgName` declares, inline declarations included.
@@ -115,13 +140,8 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
     }
   }
 
-  /// The file as JSON: an object whose keys are type names and whose values carry the flags and
-  /// the implementations. A name is written as `pkg.Short/arity`, which {@link Id.DecId#toString}
-  /// gives.
-  ///
-  /// ```json
-  /// { "base.Opt/1": { "sealed": true, "inlineDec": false, "impls": ["base.Opt/1"] } }
-  /// ```
+  /// The file as JSON: an object whose keys are {@link Id.DecId#toString} names, of the form
+  /// `pkg.Short/arity`, and whose values are the entries.
   public String write() {
     Map<String, Entry> doc = Mapper.of(out ->
       entries.forEach((target, entry) -> out.put(target.toString(), entry)));
@@ -130,10 +150,6 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
 
   /// The entries of every package of `pkgs`, joined. Each package writes the types it declares
   /// alone, so no two files name the same target.
-  ///
-  /// A package whose generated code is cached wrote this file beside it. Arriving here without
-  /// one means the two came apart, and a decision taken on the half that is left would read a
-  /// count that is a floor.
   public static ImplInfo readAll(Path cacheDir, Set<String> pkgs, String backend) {
     Map<Id.DecId, Entry> entries = Mapper.of(out -> pkgs.stream()
       .map(pkg -> fileOf(cacheDir, pkg, backend))

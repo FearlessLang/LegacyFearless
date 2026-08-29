@@ -31,6 +31,7 @@ public enum LiteralKind {
     return Optional.empty();
   }
   public Id.DecId toDecId(){ return new Id.DecId(instance, 0); }
+  public Id.DecId magicKind(){ return magicKind; }
   public Optional<Supplier<CompileError>> validate(String fullName){
     String simpleName=fullName.substring(pkgName.length()+1);
     return switch(this) {
@@ -55,7 +56,6 @@ public enum LiteralKind {
     if (Magic.strValidation(name,'`')){ return Optional.of(SStr); }
     if (Magic.strValidation(name,'"')){ return Optional.of(UStr); }
     return Optional.empty();
-    //throw new InvalidLiteralException("Unknown literal kind: " + name);
   }
   public static Optional<Id.IT<astFull.T>> nameToType(String name){
     return match(name)

@@ -13,7 +13,7 @@ class VPFCodegen {
   private final ZigSingleCodegen parent;
   private int vpfCounter = 0;
 
-  // Must match StolenTask.locals_copy in worker.zig.
+  /// Must match StolenTask.locals_copy in worker.zig.
   static final int LOCALS_COPY_LIMIT = 256;
 
   VPFCodegen(ZigSingleCodegen parent) {
@@ -97,7 +97,7 @@ class VPFCodegen {
     };
   }
 
-  void emitVPFFun(MIR.Fun fun, String name, List<String> paramNames, List<String> dropNames,
+  void emitVPFFun(MIR.Fun fun, String name, List<String> paramNames, List<ZigSingleCodegen.Drop> dropNames,
                   String params, VPFCallInfo vpf) {
     int vpfId = vpfCounter++;
     var localsName = name + "_" + vpfId + "_Locals";
@@ -139,8 +139,8 @@ class VPFCodegen {
 
     // Before the base-case check, so it always runs.
     sb.append("heartbeat.tryPromote();\n");
-    for (var dropName : dropNames) {
-      sb.append("defer ").append(dropName).append(".rc_decrement();\n");
+    for (var drop : dropNames) {
+      sb.append("defer ").append(parent.decrementCode(drop.name(), drop.t())).append(";\n");
     }
 
     if (vpf.boolExpr != null) {
@@ -371,7 +371,7 @@ class VPFCodegen {
   private void emitLocalsHooks(String localsName, List<MIR.X> args) {
     var fatPtrFields = args.stream()
       .filter(x -> !parent.isRcFree(x))
-      .map(x -> parent.id.varName(x.name()))
+      .map(x -> new ZigSingleCodegen.Drop(parent.id.varName(x.name()), x.t()))
       .toList();
     var retain = new StringBuilder();
     retain.append("fn ").append(localsName).append("_retain(copy_ptr: *anyopaque, parent_ptr: *anyopaque) void {\n");
@@ -381,8 +381,8 @@ class VPFCodegen {
       retain.append("_ = .{ copy, parent };\n");
     } else {
       for (var field : fatPtrFields) {
-        retain.append("if (parent.").append(field).append(".is_transient()) parent.").append(field).append(" = parent.").append(field).append(".box_transient();\n");
-        retain.append("copy.").append(field).append(" = parent.").append(field).append(".share();\n");
+        retain.append("if (parent.").append(field.name()).append(".is_transient()) parent.").append(field.name()).append(" = parent.").append(field.name()).append(".box_transient();\n");
+        retain.append("copy.").append(field.name()).append(" = ").append(parent.shareCode("parent." + field.name(), field.t())).append(";\n");
       }
     }
     retain.append("}");
@@ -399,7 +399,7 @@ class VPFCodegen {
       drop.append("_ = releasing_worker_id;\n");
     } else {
       for (var field : fatPtrFields) {
-        drop.append("locals.").append(field).append(".rc_decrement_as(releasing_worker_id);\n");
+        drop.append(parent.decrementAsCode("locals." + field.name(), field.t(), "releasing_worker_id")).append(";\n");
       }
     }
     drop.append("}");
@@ -515,8 +515,9 @@ class VPFCodegen {
         // The combiner lends its receiver and owns its arguments, so index 0 passes the
         // locals field as it stands and only an argument shares.
         allArgs[sub.index] = (sub.expr instanceof MIR.X x)
-          ? "locals." + parent.id.varName(x.name())
-            + (sub.index == 0 || parent.isRcFree(x) ? "" : ".share()")
+          ? sub.index == 0
+            ? "locals." + parent.id.varName(x.name())
+            : parent.shareCode("locals." + parent.id.varName(x.name()), x.t())
           : sub.expr.accept(codegen, true);
       }
     }

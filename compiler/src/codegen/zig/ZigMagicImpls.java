@@ -18,7 +18,8 @@ import static magic.Magic.getLiteral;
 public record ZigMagicImpls(
     MIRVisitor<String> gen,
     Function<MIR.MT, String> getTName,
-    ast.Program p) implements magic.MagicImpls<String> {
+    ast.Program p,
+    java.util.function.BiFunction<String, MIR.MT, String> shareCode) implements magic.MagicImpls<String> {
 
   private static final MagicTrait<MIR.E, String> EMPTY = new MagicTrait<>() {
     @Override public Optional<String> instantiate() { return Optional.empty(); }
@@ -33,9 +34,8 @@ public record ZigMagicImpls(
       var lit = getLiteral(p, name);
       try {
         return lit
-          // Rendered unsigned: `nat_rt.make` takes a u64, and the top half of the
-          // Nat range comes back from parseUnsignedLong as a negative long, which
-          // zig rejects rather than wrapping the way Java's `long` would.
+          // `nat_rt.make` takes a u64. The top half of the Nat range comes back from
+          // parseUnsignedLong as a negative long, which Zig rejects rather than wrapping.
           .map(lambdaName -> "nat_rt.make(" + Long.toUnsignedString(Long.parseUnsignedLong(lambdaName.replace("_", ""), 10)) + ")")
           .orElseGet(() -> e.accept(gen, true)).describeConstable();
       } catch (NumberFormatException ignored) {
@@ -92,8 +92,7 @@ public record ZigMagicImpls(
       try {
         return lit
           .map(lambdaName -> Double.parseDouble(lambdaName.replace("_", "")))
-          // Emit the bit pattern so -0.0, subnormals, NaN, infinities all survive
-          // exactly, matching the Java backend's Double semantics.
+          // The bit pattern, so -0.0, subnormals, NaN and infinities all survive exactly.
           .map(d -> String.format("float_rt.make(@as(f64, @bitCast(@as(u64, 0x%016x))))", Double.doubleToRawLongBits(d)))
           .orElseGet(() -> e.accept(gen, true)).describeConstable();
       } catch (NumberFormatException ignored) {
@@ -107,7 +106,6 @@ public record ZigMagicImpls(
     return () -> {
       var lit = getLiteral(p, name);
       try {
-        // Fearless bytes are u8 (unsigned); parse as an unsigned long then mask to a byte.
         return lit
           .map(lambdaName -> "byte_rt.make(" + (Long.parseUnsignedLong(lambdaName.replace("_", ""), 10) & 0xff) + ")")
           .orElseGet(() -> e.accept(gen, true)).describeConstable();
@@ -198,7 +196,7 @@ public record ZigMagicImpls(
 
   private String ownedArg(MIR.E e) {
     if (e instanceof MIR.X) {
-      return e.accept(gen, true) + ".share()";
+      return shareCode.apply(e.accept(gen, true), e.t());
     }
     return e.accept(gen, true);
   }

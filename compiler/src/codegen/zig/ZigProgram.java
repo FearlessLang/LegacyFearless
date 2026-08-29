@@ -13,15 +13,14 @@ public record ZigProgram(Map<String, String> packageFiles, String mainFile, Stri
     this(builder.packageFiles, builder.mainFile, builder.entryPoint);
   }
 
-  public static ZigProgram of(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent, boolean vpfEnabled) {
-    return new ZigProgram(new ZigProgramBuilder(entryPoint, program, cachedPkg, cachedContent, vpfEnabled));
+  public static ZigProgram of(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent, boolean vpfEnabled, main.java.ImplInfo cachedImpls) {
+    return new ZigProgram(new ZigProgramBuilder(entryPoint, program, cachedPkg, cachedContent, vpfEnabled, cachedImpls));
   }
 
-  /// The generated packages of a {@link main.CompilationUnit}. A unit stops after code
-  /// generation, so it needs the package files alone: `main.zig` starts at an entry point and
-  /// a unit has none.
-  public static ZigProgram ofUnit(MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent, boolean vpfEnabled) {
-    return new ZigProgram(new ZigProgramBuilder(null, program, cachedPkg, cachedContent, vpfEnabled));
+  /// The generated packages of a {@link main.CompilationUnit}, which stops after code
+  /// generation and so needs the package files alone.
+  public static ZigProgram ofUnit(MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent, boolean vpfEnabled, main.java.ImplInfo cachedImpls) {
+    return new ZigProgram(new ZigProgramBuilder(null, program, cachedPkg, cachedContent, vpfEnabled, cachedImpls));
   }
 }
 
@@ -32,13 +31,13 @@ class ZigProgramBuilder {
   private final MIR.Program program;
   private final java.util.Set<String> cachedPkg;
 
-  ZigProgramBuilder(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent, boolean vpfEnabled) {
+  ZigProgramBuilder(String entryPoint, MIR.Program program, java.util.Set<String> cachedPkg, Map<String, String> cachedContent, boolean vpfEnabled, main.java.ImplInfo cachedImpls) {
     this.entryPoint = entryPoint;
     this.program = program;
     this.cachedPkg = cachedPkg;
 
     var rta = new codegen.optimisations.RapidTypeAnalysis(program);
-    var gen = new ZigSingleCodegen(program, vpfEnabled, rta, cachedPkg);
+    var gen = new ZigSingleCodegen(program, vpfEnabled, rta, cachedPkg, cachedImpls);
 
     for (MIR.Package pkg : program.pkgs()) {
       if (cachedPkg.contains(pkg.name())) { continue; }
@@ -57,7 +56,7 @@ class ZigProgramBuilder {
     this.mainFile = entryPoint == null ? "" : buildMainFile(gen);
   }
 
-  /// Emits the type of every {@link MIR.DirectCall} target the walk above did not reach. A
+  /// Emits the type of every {@link MIR.DirectCall} target the package walk did not reach. A
   /// per-literal wrapper is emitted with the object literal that creates it, and a
   /// devirtualised call site can name a literal no generated package creates.
   ///
@@ -171,7 +170,7 @@ class ZigProgramBuilder {
     sb.append("comptime { _ = Fiber; }\n");
     sb.append("pub const native = @import(\"runtime/native.zig\");\n");
     // A `@panic`-class fault in a fiber becomes a non-deterministic error that unwinds to the
-    // nearest `CapTry` boundary or to the top level. See `runtime/errors/unwind.zig`.
+    // nearest `CapTry` boundary, or to the top level.
     sb.append("pub const panic = std.debug.FullPanic(errors.ndPanicHandler);\n");
     sb.append('\n');
 
