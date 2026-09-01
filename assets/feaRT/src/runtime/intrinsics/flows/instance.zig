@@ -411,17 +411,51 @@ fn driver_merge_fold(_: FatPtr, acc: FatPtr, chunk: FatPtr, combine: FatPtr) cal
     return a;
 }
 
+const FlowSlot = objs.GenObjectLayoutType(object.FlowCaptures);
+
+/// Both halves of a split live in this frame, which outlives every use of them.
+///
+/// The `.some/2` arms below drive the halves to completion before they return, so no
+/// half survives this call. A VPF promotion inside an arm does not change that: the
+/// promoted frame boxes each transient it captures, and the parent stays suspended at
+/// its join, so the frame it reads stays mapped. Splitting is the whole cost of the
+/// divide-and-conquer, so a frame slot in place of four heap objects is what makes the
+/// leaves, not the splits, the price of a flow.
+///
+/// A transient holds no reference count, so the `rc_decrement` an arm does on a half is
+/// a no-op and this frame owns the single release. That covers the `.shouldStop` arms,
+/// which return without driving either half.
 fn driver_split_match(self: FatPtr, flow: FatPtr, cases: FatPtr) callconv(.c) FatPtr {
     _ = self;
     defer flow.rc_decrement();
     defer cases.rc_decrement();
 
-    const parts = object.split_flow(object.deref_flow(flow)) orelse
+    var left_body: types.FeartFlow = undefined;
+    var right_body: types.FeartFlow = undefined;
+    if (!object.split_flow_into(object.deref_flow(flow), &left_body, &right_body)) {
         return objs.call(cases, h("mut .empty/0"), .{}, @src());
+    }
+    defer {
+        const releasing_worker_id = worker_mod.currentWorkerId();
+        object.release_flow_body(&left_body, releasing_worker_id);
+        object.release_flow_body(&right_body, releasing_worker_id);
+    }
 
-    const left_fp = object.make_flow_fp(&VT_Flow, parts.left);
-    const right_fp = object.make_flow_fp(&VT_Flow, parts.right);
+    var left_slot: FlowSlot = undefined;
+    var right_slot: FlowSlot = undefined;
+    const left_fp = objs.init_transient_obj(object.FlowCaptures, &left_slot, &VT_FlowTransient, .{
+        .flow_ptr = @intFromPtr(&left_body),
+    });
+    const right_fp = objs.init_transient_obj(object.FlowCaptures, &right_slot, &VT_FlowTransient, .{
+        .flow_ptr = @intFromPtr(&right_body),
+    });
     return objs.call(cases, h("mut .some/2"), .{ left_fp, right_fp }, @src());
+}
+
+/// Promotes a flow in a caller frame to the heap, and leaves the original whole. Called
+/// when a value crosses a fiber boundary, so the copy must be able to outlive that frame.
+fn box_flow(self_m: FatPtr) callconv(.c) FatPtr {
+    return object.make_flow_fp(&VT_Flow, object.copy_flow_body(object.deref_flow(self_m)));
 }
 
 fn list_concat_apply(_: FatPtr, l: FatPtr, r: FatPtr) callconv(.c) FatPtr {
@@ -696,4 +730,14 @@ pub const VT_Flow: objs.VTable = .{
         "mut .unwrapOp/1",
     },
     .drop_fn = object.flow_drop,
+};
+
+/// `VT_Flow` for a flow whose storage is a caller frame. It answers the same methods:
+/// each intermediate op clones the body onto the heap, and each terminal reads it.
+pub const VT_FlowTransient: objs.VTable = blk: {
+    var vt = VT_Flow;
+    vt.storage_mode = .transient;
+    vt.drop_fn = null;
+    vt.box_fn = &box_flow;
+    break :blk vt;
 };

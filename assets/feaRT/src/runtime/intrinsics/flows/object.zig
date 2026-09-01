@@ -54,9 +54,15 @@ pub fn release_flow(f: *types.FeartFlow, releasing_worker_id: u32) void {
     if (old_count != 1) return;
     _ = f.ref_count.load(.acquire);
 
+    release_flow_body(f, releasing_worker_id);
+    gc.recycleDestroy(types.FeartFlow, f, .flow_release);
+}
+
+/// Drops the one reference the body holds on its source and its ops, and leaves the
+/// storage of the body alone. A body in a caller frame has no allocation to give back.
+pub fn release_flow_body(f: *types.FeartFlow, releasing_worker_id: u32) void {
     release_source(f, releasing_worker_id);
     release_ops(f, releasing_worker_id);
-    gc.recycleDestroy(types.FeartFlow, f, .flow_release);
 }
 
 pub fn flow_drop(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void {
@@ -115,7 +121,7 @@ fn make_ops_ref_count() *types.OpsRefCount {
     return ref_count;
 }
 
-fn retain_ops(flow: *types.FeartFlow) void {
+fn retain_ops(flow: *const types.FeartFlow) void {
     if (flow.ops_ref_count) |ref_count| {
         _ = ref_count.value.fetchAdd(1, .monotonic);
     }
@@ -211,21 +217,31 @@ fn clone_ops(ops: []types.OpDesc) struct { ops: []types.OpDesc, ref_count: ?*typ
 //   - the source isn't index-addressable (single/empty/range_infinite).
 // Mirrors the Java reference impl in assets/rt/flows/Range.java which
 // also splits both list- and range-backed flows.
-pub fn split_flow(flow: *types.FeartFlow) ?struct { left: *types.FeartFlow, right: *types.FeartFlow } {
+/// The smallest chunk a split will leave behind.
+///
+/// A split costs two flow allocations and two retains of the op chain, and the driver of a
+/// non-associative fold collects each right half into a list. Splitting to single elements
+/// therefore charges that per element, and makes a promotion token stand for one element
+/// rather than a chunk of work, which is what the APM bound assumes it stands for.
+pub const SPLIT_MIN = 2;
+
+/// Divides `flow` in two, and writes the halves into `left` and `right`. False when a
+/// split is not possible, and then neither output is written.
+///
+/// The caller owns the storage of both halves. `driver_split_match` puts them in its own
+/// frame, which outlives every use: the halves reach only the `.some/2` arms it calls, and
+/// a VPF promotion boxes what it takes across a fiber boundary.
+pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *types.FeartFlow) bool {
     for (flow.ops) |op| {
-        if (!op.flags.stateless) return null;
+        if (!op.flags.stateless) return false;
     }
     switch (flow.source) {
         .list => |ls| {
             const remaining = ls.items.len - ls.index;
-            if (remaining < 2) return null;
+            if (remaining < SPLIT_MIN) return false;
             const mid = ls.index + remaining / 2;
-            const left_items = ls.items[ls.index..mid];
-            const right_items = ls.items[mid..];
-            const left = gc.recycleAlloc(types.FeartFlow);
-            const right = gc.recycleAlloc(types.FeartFlow);
-            const left_source: types.Source = .{ .list = .{ .items = left_items, .index = 0 } };
-            const right_source: types.Source = .{ .list = .{ .items = right_items, .index = 0 } };
+            const left_source: types.Source = .{ .list = .{ .items = ls.items[ls.index..mid], .index = 0 } };
+            const right_source: types.Source = .{ .list = .{ .items = ls.items[mid..], .index = 0 } };
             retain_ops(flow);
             retain_ops(flow);
             left.* = .{
@@ -244,7 +260,7 @@ pub fn split_flow(flow: *types.FeartFlow) ?struct { left: *types.FeartFlow, righ
                 .is_finite = true,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
-            return .{ .left = left, .right = right };
+            return true;
         },
         .range_finite => |rs| {
             // Element count: ceil((end - current) / abs(step)). Same formula as
@@ -252,16 +268,14 @@ pub fn split_flow(flow: *types.FeartFlow) ?struct { left: *types.FeartFlow, righ
             // because we take the absolute step for the count and reuse the
             // signed step to compute the midpoint coordinate.
             const diff = if (rs.step > 0) rs.end - rs.current else rs.current - rs.end;
-            if (diff <= 0) return null;
+            if (diff <= 0) return false;
             const abs_step: i64 = if (rs.step > 0) rs.step else -rs.step;
             const count: i64 = @divTrunc(diff + abs_step - 1, abs_step);
-            if (count < 2) return null;
+            if (count < SPLIT_MIN) return false;
             // mid lands on an element boundary even for step != ±1 because we
             // multiply by a whole element index (count/2) before adding to
             // current. Half-open semantics: left = [current, mid), right = [mid, end).
             const mid = rs.current + @divTrunc(count, 2) * rs.step;
-            const left = gc.recycleAlloc(types.FeartFlow);
-            const right = gc.recycleAlloc(types.FeartFlow);
             retain_ops(flow);
             retain_ops(flow);
             left.* = .{
@@ -280,7 +294,7 @@ pub fn split_flow(flow: *types.FeartFlow) ?struct { left: *types.FeartFlow, righ
                 .is_finite = true,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
-            return .{ .left = left, .right = right };
+            return true;
         },
         .str => |ss| {
             // Split the live window `[index, bytes_len)` at the first unit
@@ -291,7 +305,7 @@ pub fn split_flow(flow: *types.FeartFlow) ?struct { left: *types.FeartFlow, righ
             // `owner`. Half-open: left = [start, mid), right = [mid, end).
             const abs_start = ss.index;
             const abs_end = ss.bytes_len;
-            if (abs_end - abs_start < 2) return null;
+            if (abs_end - abs_start < SPLIT_MIN) return false;
             const midpoint = abs_start + (abs_end - abs_start) / 2;
             const mid = switch (ss.mode) {
                 .codepoint => blk: {
@@ -301,9 +315,7 @@ pub fn split_flow(flow: *types.FeartFlow) ?struct { left: *types.FeartFlow, righ
                 },
                 .grapheme => native.frt_grapheme_boundary_after(ss.bytes_ptr, abs_end, midpoint),
             };
-            if (mid <= abs_start or mid >= abs_end) return null;
-            const left = gc.recycleAlloc(types.FeartFlow);
-            const right = gc.recycleAlloc(types.FeartFlow);
+            if (mid <= abs_start or mid >= abs_end) return false;
             retain_ops(flow);
             retain_ops(flow);
             left.* = .{
@@ -334,13 +346,29 @@ pub fn split_flow(flow: *types.FeartFlow) ?struct { left: *types.FeartFlow, righ
                 .is_finite = true,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
-            return .{ .left = left, .right = right };
+            return true;
         },
         // single (count<=1) and empty have nothing to split. range_infinite
         // can't produce two finite halves; the Java InfiniteRangeOp also
         // returns empty from split$mut.
-        else => return null,
+        else => return false,
     }
+}
+
+/// Copies `src` onto the heap, and takes one reference to everything it points at. The
+/// `box_fn` of a flow in a caller frame, which must leave that flow whole.
+pub fn copy_flow_body(src: *const types.FeartFlow) *types.FeartFlow {
+    const f = gc.recycleAlloc(types.FeartFlow);
+    retain_ops(src);
+    f.* = .{
+        .source = src.source,
+        .source_owner = retain_source(src.source, src.source_owner),
+        .ops = src.ops,
+        .ops_ref_count = src.ops_ref_count,
+        .is_finite = src.is_finite,
+        .ref_count = std.atomic.Value(u32).init(1),
+    };
+    return f;
 }
 
 // Immutable-slice append: allocate a fresh ops slice, one longer than the

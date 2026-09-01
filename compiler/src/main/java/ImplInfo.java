@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import codegen.MIR;
 import id.Id;
+import id.Mdf;
 import magic.Magic;
 import utils.IoErr;
 import utils.Mapper;
@@ -50,11 +51,17 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
   /// Whether the runtime implements the type is not here. That comes from the
   /// `base.RuntimeImplemented` marker, which `pkgInfo` keeps and `superDecIds` resolves.
   public record Entry(boolean sealed, boolean inlineDec, boolean singleton, boolean hasIdentity,
-                      List<String> impls) {
+                      List<String> impls, List<Forward> forwards) {
+    public Entry {
+      // A file written before this package counted forwards names none, which reads as a type
+      // that forwards nothing and so is never rewritten.
+      forwards = forwards == null ? List.of() : List.copyOf(forwards);
+    }
+
     public static Entry of(boolean sealed, boolean inlineDec, boolean singleton,
-                           boolean hasIdentity, Set<Id.DecId> impls) {
+                           boolean hasIdentity, Set<Id.DecId> impls, List<Forward> forwards) {
       return new Entry(sealed, inlineDec, singleton, hasIdentity,
-        impls.stream().map(Id.DecId::toString).toList());
+        impls.stream().map(Id.DecId::toString).toList(), forwards);
     }
 
     /// The implementations as names again. One a later compiler no longer parses is left out,
@@ -62,6 +69,28 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
     public List<Id.DecId> implIds() {
       return impls.stream().flatMap(name -> parseDecId(name).stream()).toList();
     }
+
+    /// What this type does with `name` under `mdf`, where that is a plain forward.
+    public Optional<Forward> forward(Id.MethName name, Mdf mdf) {
+      return forwards.stream()
+        .filter(f -> f.on.equals(name.toString()) && f.mdf.equals(mdf.toString()))
+        .findFirst();
+    }
+  }
+
+  /// A method a type answers by forwarding straight to a method of its own first parameter,
+  /// which is the shape every church encoded sum takes: `Opt` answers `.match` with `m.empty`,
+  /// and the literal `Opts#` writes answers it with `m.some(x)`.
+  ///
+  /// `on` is the method as its `Id.MethName` prints, `mdf` the receiver modifier it is written
+  /// for, `to` the method of that first parameter the body calls, and `args` the captures of
+  /// this type the forward passes to it, in order. A reader takes those off the receiver rather
+  /// than building the parameter at all.
+  public record Forward(String on, String mdf, String to, List<String> args) {
+    public Forward { args = args == null ? List.of() : List.copyOf(args); }
+
+    /// The forwarded method's name, or empty when a later compiler no longer parses it.
+    public Optional<Id.MethName> toName() { return parseMethName(to); }
   }
 
   public static String fileName(String backend) { return "implInfo." + backend + ".json"; }
@@ -78,13 +107,54 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
       .filter(value -> value.pkg().equals(pkgName))
       .collect(Collectors.toUnmodifiableSet());
     var singletons = singletonsOf(mir);
+    var forwards = forwardsOf(mir);
     return new ImplInfo(Mapper.of(out -> targetsOf(pkgName, program).forEach(target ->
       out.put(target, Entry.of(
         program.superDecIds(target).contains(Magic.Sealed),
         program.isInlineDec(target),
         singletons.contains(target),
         program.superDecIds(target).contains(Magic.HasIdentity),
-        implsOf(program, target, values))))));
+        implsOf(program, target, values),
+        forwards.getOrDefault(target, List.of()))))));
+  }
+
+  /// Every plain forward the lowered program holds, by the type that writes it.
+  ///
+  /// A forward is a method whose whole body is one call on its own first parameter, with every
+  /// argument a name the receiver already carries. Nothing else can be read off the receiver at
+  /// a call site, so nothing else is recorded.
+  private static Map<Id.DecId, List<Forward>> forwardsOf(MIR.Program mir) {
+    Map<Id.DecId, List<Forward>> out = new java.util.LinkedHashMap<>();
+    mir.pkgs().forEach(pkg -> pkg.funs().forEach(fun ->
+      forwardOf(fun).ifPresent(f ->
+        out.computeIfAbsent(fun.name().d(), _ -> new java.util.ArrayList<>()).add(f))));
+    return out;
+  }
+
+  /// `fun` as a forward, or empty where its body is anything else.
+  private static Optional<Forward> forwardOf(MIR.Fun fun) {
+    if (fun.args().isEmpty()) { return Optional.empty(); }
+    if (!(unwrap(fun.body()) instanceof MIR.MCall call)) { return Optional.empty(); }
+    // The call must be on this method's own first declared parameter: a fun takes its
+    // parameters, then its receiver, then its captures.
+    if (!(unwrap(call.recv()) instanceof MIR.X recv)) { return Optional.empty(); }
+    if (!recv.name().equals(fun.args().getFirst().name())) { return Optional.empty(); }
+    var args = new java.util.ArrayList<String>();
+    for (var arg : call.args()) {
+      if (!(unwrap(arg) instanceof MIR.X x)) { return Optional.empty(); }
+      args.add(x.name());
+    }
+    return Optional.of(new Forward(
+      fun.name().m().toString(), fun.name().mdf().toString(), call.name().toString(), args));
+  }
+
+  /// An expression with the wrappers a pass put around it removed.
+  private static MIR.E unwrap(MIR.E e) {
+    return switch (e) {
+      case MIR.Box box -> unwrap(box.inner());
+      case MIR.Block block -> unwrap(block.original());
+      default -> e;
+    };
   }
 
   /// The types the lowered program makes as an object literal capturing nothing. The runtime
@@ -170,6 +240,16 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
     Map<String, Entry> doc = IoErr.of(() -> JSON.readValue(file.toFile(), new TypeReference<>() {}));
     return new ImplInfo(Mapper.of(out -> doc.forEach((name, entry) ->
       parseDecId(name).ifPresent(target -> out.put(target, entry)))));
+  }
+
+  /// A method name this file wrote, of the form `name/arity`, or empty when the text is not one.
+  private static Optional<Id.MethName> parseMethName(String text) {
+    var slash = text.lastIndexOf('/');
+    if (slash <= 0) { return Optional.empty(); }
+    try {
+      return Optional.of(
+        new Id.MethName(text.substring(0, slash), Integer.parseInt(text.substring(slash + 1))));
+    } catch (NumberFormatException e) { return Optional.empty(); }
   }
 
   /// A name this file wrote, or empty when the text is not one.

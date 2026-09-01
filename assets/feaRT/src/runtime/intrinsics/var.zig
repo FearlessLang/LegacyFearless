@@ -30,7 +30,6 @@ pub fn make(value: FatPtr) FatPtr {
         .ref_count = std.atomic.Value(u32).init(1),
         .value = std.atomic.Value(*FatPtr).init(val_ptr),
     };
-    gc.recordRcAlloc();
     return .{
         .data = .{ .cell = cell },
         .vt = &VT_Var,
@@ -58,7 +57,6 @@ pub noinline fn release(cell: *VarCell, releasing_worker_id: u32) void {
     old_ptr.*.rc_decrement_as(releasing_worker_id);
     gc.recycleDestroy(FatPtr, old_ptr, .var_release);
     gc.recycleDestroy(VarCell, cell, .var_release);
-    gc.recordRcFree();
 }
 
 fn get(self: FatPtr) FatPtr {
@@ -146,18 +144,21 @@ test "Var get set and swap retain returned values and release overwritten storag
     var cell_fp = make(a.share());
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
 
-    var got = get(cell_fp.share());
+    // `get`, `set` and `swap` borrow their receiver: none of them releases it.
+    // Sharing it here would leave the cell with a reference no one gives back,
+    // so the release below would never reach zero and never free the value.
+    var got = get(cell_fp);
     try testing.expectEqual(@as(u32, 3), a.boxed_value().refCountForTest());
     got.rc_decrement();
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
 
-    var old = swap(cell_fp.share(), b.share());
+    var old = swap(cell_fp, b.share());
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
     try testing.expectEqual(@as(u32, 2), b.boxed_value().refCountForTest());
     old.rc_decrement();
     try testing.expectEqual(@as(u32, 1), a.boxed_value().refCountForTest());
 
-    _ = set(cell_fp.share(), c.share());
+    _ = set(cell_fp, c.share());
     try testing.expectEqual(@as(u32, 1), b.boxed_value().refCountForTest());
     try testing.expectEqual(@as(u32, 2), c.boxed_value().refCountForTest());
 

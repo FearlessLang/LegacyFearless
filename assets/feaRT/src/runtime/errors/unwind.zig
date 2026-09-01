@@ -96,7 +96,22 @@ pub fn ndPanicHandler(msg: []const u8, first_trace_addr: ?usize) noreturn {
     if (shadow_stack.getShadowCursor() == null) {
         std.debug.defaultPanic(msg, first_trace_addr);
     }
-    feart_unwind(error_rt.makeNd(buildInfo(msg)));
+    const fiber = fiber_mod.currentFiber();
+    // A panic raised while building the info of an earlier one cannot report
+    // through the boundary the first one is still on its way to, so it takes
+    // Zig's own handler, which prints and aborts.
+    if (fiber.in_panic) {
+        std.debug.defaultPanic(msg, first_trace_addr);
+    }
+    fiber.in_panic = true;
+    // `buildInfo` calls a generated method, and every one of those offers a
+    // promotion. Promoting here would run the frame that panicked a second time.
+    const vpf_was_enabled = fiber.vpf_enabled;
+    fiber.vpf_enabled = false;
+    const payload = error_rt.makeNd(buildInfo(msg));
+    fiber.vpf_enabled = vpf_was_enabled;
+    fiber.in_panic = false;
+    feart_unwind(payload);
 }
 
 /// Copies the message into GC memory so it outlives the panicking frame.

@@ -19,6 +19,11 @@ const worker_mod = @import("worker.zig");
 
 // FNV-1a 64-bit, evaluated at comptime.
 pub fn hash_signature(comptime str: []const u8) u64 {
+	// The loop below costs one branch per character, and every call in one
+	// comptime evaluation draws on the same quota. A call site can sit inside a
+	// deep chain of inline expansions, each with its own signatures to hash, so
+	// the total is a property of the generated program, not of any one signature.
+	@setEvalBranchQuota(1_000_000);
 	var hash: u64 = 14695981039346656037;
 	const prime: u64 = 1099511628211;
 
@@ -425,8 +430,8 @@ fn freeHeader(obj: *ObjectHeader, releasing_worker_id: u32) void {
 		const log = @import("log.zig");
 		log.trace_alloc_caching(.alloc_raw_free, alloc_size, @intFromEnum(log.RawFreeSource.rc_decrement), align_log2);
 		@import("destroyer.zig").submit(@ptrCast(bytes.ptr));
+		gc.recordRcFree(releasing_worker_id);
 	}
-	gc.recordRcFree();
 }
 
 pub const FearlessValue = extern union {
@@ -678,19 +683,23 @@ pub fn obj_k(
 	const Layout = GenObjectLayoutType(Captures);
 	const align_log2: u8 = @intFromEnum(std.mem.Alignment.of(Layout));
 
-	const MemorySlot = struct { ptr: *Layout, raw_size: usize };
-	const memory_slot: MemorySlot = if (alloc_recycler.pop(@sizeOf(Layout), align_log2)) |recycled|
-		.{ .ptr = @ptrCast(@alignCast(recycled.ptr)), .raw_size = recycled.real_size }
-	else blk: {
-		const fresh = allocator.create(Layout) catch @panic("OOM");
-		gc.recordRcAlloc();
-		break :blk .{ .ptr = fresh, .raw_size = @sizeOf(Layout) };
-	};
 	// The building worker owns the object and holds its first reference in the
 	// biased half. Generated code always runs on a fiber, so it always names a
 	// worker. `me == 0` only happens under `builtin.is_test`; such an object is
 	// born merged and takes the shared path for every operation.
 	const me = worker_mod.currentWorkerId();
+
+	const MemorySlot = struct { ptr: *Layout, raw_size: usize };
+	const memory_slot: MemorySlot = if (alloc_recycler.pop(@sizeOf(Layout), align_log2)) |recycled|
+		.{ .ptr = @ptrCast(@alignCast(recycled.ptr)), .raw_size = recycled.real_size }
+	else blk: {
+		// One block taken from the collector. Its counterpart is in `freeHeader`, which
+		// subtracts one where a block goes back. A block the recycling pool answers is
+		// already counted, and one the pool keeps is still held, so neither moves the
+		// count. See `rc_live`.
+		gc.recordRcAlloc(me);
+		break :blk .{ .ptr = allocator.create(Layout) catch @panic("OOM"), .raw_size = @sizeOf(Layout) };
+	};
 	memory_slot.ptr.* = .{
 			.header = .{
 				.shared = std.atomic.Value(u32).init(if (me == 0) UNIT | MERGED else 0),

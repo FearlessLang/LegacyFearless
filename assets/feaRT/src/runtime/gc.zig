@@ -4,6 +4,7 @@ const alloc_recycler = @import("alloc_recycler.zig");
 const log = @import("log.zig");
 const destroyer = @import("destroyer.zig");
 const process = @import("process_singletons.zig");
+const op_counters = @import("op_counters.zig");
 
 const libgc = @import("libgc");
 
@@ -15,9 +16,70 @@ pub fn set_allocs_out_path(path: ?[]const u8) void {
 }
 
 const TRACK_ALLOCS = @import("build_options").track_allocs;
-const DEFAULT_RC_COLLECTION_THRESHOLD: usize = 256;
+/// The least growth in the heap that starts a trace.
+///
+/// A trace is a backstop for reference cycles, not the way a program gets its memory
+/// back. Reference counting already reclaims everything acyclic as it dies, so this
+/// floor delays only cyclic garbage. It must therefore not run for a program that simply
+/// holds what it makes.
+///
+/// A block is one object, and a small object is near 64 bytes, so this floor lets a heap
+/// grow by tens of megabytes before a trace. That leaves every small program alone, and
+/// it bounds a leaked cycle to a size worth less than the trace that would find it. A
+/// full trace over a heap of some hundreds of megabytes costs tens of milliseconds, which
+/// is why the floor is not lower.
+const MIN_RC_COLLECTION_THRESHOLD: isize = 1_000_000;
 
-threadlocal var rc_delta: usize = 0;
+/// Growth reaches the held heap divided by this before a trace starts.
+///
+/// A trace walks the whole heap, so what it costs follows how much the heap holds, and a
+/// fixed threshold therefore charges more the larger a program gets. A share instead puts
+/// the traces of a growing program at geometric intervals: a program that grows to N
+/// blocks traces about log(N) times, and the mark work over the run stays a small
+/// multiple of one trace of the final heap.
+const RC_COLLECTION_GROWTH_SHARE: isize = 2;
+
+/// How many blocks a worker takes or gives back before it adds its count to the
+/// global one. It trades precision in the trigger for cost on the hot path: the global
+/// count trails the true one by less than this per worker, which a threshold of a
+/// million blocks absorbs.
+const RC_DELTA_BATCH: isize = 64;
+
+/// Slots for `rc_slots`, indexed by worker id. Ids run from 1, and 0 names "no
+/// worker", so the array holds one more than the workers a pool can have.
+const RC_SLOTS = 256;
+
+/// One worker's share of the net count, not yet published.
+///
+/// Padded to a cache line so two workers never share one: the counts are written
+/// on every refcounted allocation and release, and false sharing would put that
+/// traffic on the interconnect.
+const RcSlot = extern struct {
+	/// Plain, not atomic. Only the worker this slot names writes it, and slot 0
+	/// is reached only from a test, where one thread runs. See `bumpRc`.
+	delta: isize align(std.atomic.cache_line) = 0,
+	_pad: [std.atomic.cache_line - @sizeOf(isize)]u8 = @splat(0),
+};
+
+var rc_slots: [RC_SLOTS]RcSlot = @splat(.{});
+
+/// Blocks taken from the collector less those given back, across every thread, over the
+/// whole run. It is never reset, so it estimates what the heap holds now.
+///
+/// The trace this gates stops the world and walks the whole heap, so what gates it must
+/// measure the whole heap. A per-thread count cannot: one worker frees what another
+/// made, so the maker's count reads the transfer as growth while the releaser's loses
+/// it. A thread that only makes objects then reaches the threshold on its own, and
+/// starts a global trace for growth that never happened.
+///
+/// A trace that reclaims a cycle gives blocks back without a release, so this reads high
+/// after one. That raises the next threshold, which suits a backstop: it errs towards
+/// tracing less.
+var rc_live: std.atomic.Value(isize) = std.atomic.Value(isize).init(0);
+
+/// `rc_live` as the last collection left it. Growth since then is what the threshold
+/// measures.
+var rc_live_at_collection: std.atomic.Value(isize) = std.atomic.Value(isize).init(0);
 
 /// Starts false: glibc masks all signals inside `pthread_create`, so a
 /// stop-the-world during the spawn loop never gets its suspend signal
@@ -149,17 +211,14 @@ pub inline fn recycleDestroy(comptime T: type, ptr: *T, comptime source: log.Raw
     }
 }
 
-/// Mirror of `recycleDestroy`. Only the miss path bumps `rc_delta`: a pool hit
-/// reuses storage already counted at its first alloc.
+/// Mirror of `recycleDestroy`.
 pub inline fn recycleAlloc(comptime T: type) *T {
     comptime std.debug.assert(@sizeOf(T) >= @sizeOf(destroyer.Node));
     const align_log2: u8 = @intFromEnum(std.mem.Alignment.of(T));
     if (alloc_recycler.pop(@sizeOf(T), align_log2)) |recycled| {
         return @ptrCast(@alignCast(recycled.ptr));
     }
-    const fresh = allocator.create(T) catch @panic("OOM");
-    recordRcAlloc();
-    return fresh;
+    return allocator.create(T) catch @panic("OOM");
 }
 
 /// Slice flavour. The pool picks the smallest class >= the byte size, so a size
@@ -172,9 +231,7 @@ pub inline fn recycleAllocSlice(comptime T: type, n: usize) []T {
         const ptr: [*]T = @ptrCast(@alignCast(recycled.ptr));
         return ptr[0..n];
     }
-    const fresh = allocator.alloc(T, n) catch @panic("OOM");
-    recordRcAlloc();
-    return fresh;
+    return allocator.alloc(T, n) catch @panic("OOM");
 }
 
 /// Mirror of `recycleDestroy` for slices. `alloc_recycler.push` needs an exact
@@ -196,14 +253,36 @@ pub fn free(ptr: ?*anyopaque) void {
 	if (ptr) |p| destroyer.submit(p);
 }
 
-pub fn recordRcAlloc() void {
-	rc_delta += 1;
-	maybeCollectCycles();
+/// One block taken from the collector. Its counterpart is `recordRcFree`, and the two
+/// must agree on what they count: a block that crosses the boundary with the collector,
+/// never an object. The recycling pool answers most allocations and keeps most frees, so
+/// a charge on one side of it and not the other leaves a count that nothing cancels.
+///
+/// Only `obj_k` charges here. The recycling pool answers the bodies and cells that the
+/// flow and container intrinsics make, and a reference cycle is built from objects, so
+/// what a trace is a backstop for always shows up in this count.
+///
+/// `worker_id` names the slot to charge. A caller on a fiber passes
+/// `worker.currentWorkerId()`; one that may run off a fiber passes the id it was
+/// given, the way `freeHeader` passes `releasing_worker_id`. Never read the
+/// current worker from inside here: a masked stack pointer off a fiber stack
+/// lands on unrelated memory.
+pub inline fn recordRcAlloc(worker_id: u32) void {
+	bumpRc(worker_id, 1);
 }
 
-pub fn recordRcFree() void {
-	rc_delta = rc_delta -| 1;
-	maybeCollectCycles();
+pub inline fn recordRcFree(worker_id: u32) void {
+	bumpRc(worker_id, -1);
+}
+
+/// A thread-local would serve here, but Darwin resolves one through
+/// `__tls_get_addr` even in a static build, so a slot indexed by worker id is
+/// cheaper. This mirrors what biased reference counting already does.
+inline fn bumpRc(worker_id: u32, by: isize) void {
+	const slot = &rc_slots[worker_id % RC_SLOTS];
+	slot.delta += by;
+	if (slot.delta > -RC_DELTA_BATCH and slot.delta < RC_DELTA_BATCH) return;
+	publishRcDelta(slot);
 }
 
 pub fn enable_cycle_collection() void {
@@ -214,14 +293,27 @@ pub fn disable_cycle_collection() void {
 	isSafeToCollectCycles.store(false, .seq_cst);
 }
 
-pub fn maybeCollectCycles() void {
-	if (rc_delta < DEFAULT_RC_COLLECTION_THRESHOLD) return;
+/// Moves one worker's count into the global one, and traces if the heap has grown enough
+/// since the last collection. A block given back publishes on the same terms as one
+/// taken: what it cancels is what keeps a streaming program from tracing at all.
+noinline fn publishRcDelta(slot: *RcSlot) void {
+	const local = slot.delta;
+	slot.delta = 0;
+	const live = rc_live.fetchAdd(local, .monotonic) + local;
+	if (live <= 0) return;
+	const growth = live - rc_live_at_collection.load(.monotonic);
+	if (growth < collectionThreshold(live)) return;
 	if (!isSafeToCollectCycles.load(.seq_cst)) return;
 	collectCycles();
 }
 
+/// The growth that starts a trace, for a heap holding `live` blocks.
+inline fn collectionThreshold(live: isize) isize {
+	return @max(MIN_RC_COLLECTION_THRESHOLD, @divTrunc(live, RC_COLLECTION_GROWTH_SHARE));
+}
+
 fn collectCycles() void {
-	rc_delta = 0;
+	rc_live_at_collection.store(rc_live.load(.monotonic), .monotonic);
 	// One collector at a time. A loser skips: the winner picks up its garbage.
 	if (collect_pending.cmpxchgStrong(false, true, .seq_cst, .seq_cst) != null) return;
 	defer collect_pending.store(false, .seq_cst);
@@ -230,11 +322,23 @@ fn collectCycles() void {
 	while (switching_threads.load(.seq_cst) != 0) std.atomic.spinLoopHint();
 	libgc.GC_enable();
 	defer libgc.GC_disable();
+	op_counters.bump(.cycle_collection);
 	libgc.GC_gcollect();
 }
 
-pub fn rcDeltaForTest() usize {
-	return rc_delta;
+/// The net count the slot of `worker_id` has not published yet.
+pub fn rcDeltaForTest(worker_id: u32) isize {
+	return rc_slots[worker_id % RC_SLOTS].delta;
+}
+
+/// The net count every thread has published.
+pub fn rcLiveForTest() isize {
+	return rc_live.load(.monotonic);
+}
+
+/// The live count the last collection recorded as its baseline.
+pub fn rcLiveAtCollectionForTest() isize {
+	return rc_live_at_collection.load(.monotonic);
 }
 
 pub fn register_thread() void {
@@ -416,7 +520,8 @@ pub fn currentStackBase() *anyopaque {
 pub fn dump_rc_delta() void {
 	if (!TRACK_ALLOCS) return;
 	const tid = std.Thread.getCurrentId();
-	std.debug.print("[track_allocs] thread {d}: rc_delta={d}\n", .{ tid, rc_delta });
+	const id = @import("worker.zig").currentWorkerId();
+	std.debug.print("[track_allocs] thread {d}: rc_delta={d}\n", .{ tid, rc_slots[id % RC_SLOTS].delta });
 }
 
 /// Per-call-site allocation counts and bytes, as TSV. Needs
@@ -463,12 +568,59 @@ fn track_record(ret_addr: usize, len: usize) void {
 	gop.value_ptr.bytes += len;
 }
 
-test "explicit cycle collection resets thread-local RC delta" {
+test "a thread publishes its RC delta once the batch fills" {
 	const testing = std.testing;
 	init_gc();
-	const before = rcDeltaForTest();
-	recordRcAlloc();
-	try testing.expectEqual(before + 1, rcDeltaForTest());
+	rc_slots[0].delta = 0;
+	rc_live.store(0, .monotonic);
+	rc_live_at_collection.store(0, .monotonic);
+	recordRcAlloc(0);
+	try testing.expectEqual(@as(isize, 1), rcDeltaForTest(0));
+	try testing.expectEqual(@as(isize, 0), rcLiveForTest());
+	var i: isize = 1;
+	while (i < RC_DELTA_BATCH) : (i += 1) recordRcAlloc(0);
+	try testing.expectEqual(@as(isize, 0), rcDeltaForTest(0));
+	try testing.expectEqual(RC_DELTA_BATCH, rcLiveForTest());
+}
+
+test "a release cancels an alloc, so balanced traffic never publishes growth" {
+	const testing = std.testing;
+	init_gc();
+	rc_slots[0].delta = 0;
+	rc_live.store(0, .monotonic);
+	rc_live_at_collection.store(0, .monotonic);
+	var i: isize = 0;
+	while (i < RC_DELTA_BATCH * 4) : (i += 1) {
+		recordRcAlloc(0);
+		recordRcFree(0);
+	}
+	try testing.expectEqual(@as(isize, 0), rcDeltaForTest(0));
+	try testing.expectEqual(@as(isize, 0), rcLiveForTest());
+}
+
+test "a collection makes the live count the baseline the next one grows from" {
+	const testing = std.testing;
+	init_gc();
+	rc_slots[0].delta = 0;
+	rc_live.store(0, .monotonic);
+	rc_live_at_collection.store(0, .monotonic);
+	var i: isize = 0;
+	while (i < RC_DELTA_BATCH) : (i += 1) recordRcAlloc(0);
+	try testing.expectEqual(RC_DELTA_BATCH, rcLiveForTest());
 	collectCycles();
-	try testing.expectEqual(@as(usize, 0), rcDeltaForTest());
+	try testing.expectEqual(RC_DELTA_BATCH, rcLiveForTest());
+	try testing.expectEqual(RC_DELTA_BATCH, rcLiveAtCollectionForTest());
+}
+
+test "the threshold holds at the floor until a share of the live set passes it" {
+	const testing = std.testing;
+	// Below the floor the live set does not raise the threshold, so a small program
+	// keeps the one threshold however much of it is live.
+	try testing.expectEqual(MIN_RC_COLLECTION_THRESHOLD, collectionThreshold(0));
+	try testing.expectEqual(MIN_RC_COLLECTION_THRESHOLD, collectionThreshold(MIN_RC_COLLECTION_THRESHOLD));
+	// Past the crossing point the threshold follows the live set, which puts the
+	// traces of a growing program at geometric intervals.
+	const crossing = MIN_RC_COLLECTION_THRESHOLD * RC_COLLECTION_GROWTH_SHARE;
+	try testing.expectEqual(MIN_RC_COLLECTION_THRESHOLD, collectionThreshold(crossing));
+	try testing.expectEqual(MIN_RC_COLLECTION_THRESHOLD * 5, collectionThreshold(crossing * 5));
 }

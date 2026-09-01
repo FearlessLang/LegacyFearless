@@ -77,7 +77,7 @@ fn destroyerLoop() void {
     while (true) {
         const n = head.swap(null, .acquire);
         if (n == null) {
-            std.Io.sleep(process.runtime_io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+            process.idle(1);
             continue;
         }
         _ = libgc.GC_call_with_alloc_lock(freeChainLocked, n);

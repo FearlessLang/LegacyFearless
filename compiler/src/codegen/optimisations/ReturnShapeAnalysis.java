@@ -68,6 +68,11 @@ public final class ReturnShapeAnalysis {
     return calleeOf(g.concreteType(), g.original());
   }
 
+  /// As {@link #calleeOf(MIR.GuardedCall)}, for the second type the guard tests.
+  public Optional<MIR.Fun> calleeOfAlt(MIR.GuardedCall g) {
+    return g.altType().flatMap(alt -> calleeOf(alt, g.original()));
+  }
+
   private Optional<MIR.Fun> calleeOf(id.Id.DecId concreteType, MIR.MCall original) {
     var key = new MIR.FName(concreteType, original.name(), false, original.mdf());
     var cached = calleeCache.get(key);
@@ -213,6 +218,12 @@ public final class ReturnShapeAnalysis {
         armEscapes(b.then(), escaped);
         armEscapes(b.else_(), escaped);
       }
+      // An arm reads the receiver's captures and the virtual call behind the arms takes the
+      // operands as written, so both take the treatment of a call whose callee is not known.
+      case MIR.SumMatch m -> {
+        walkUnknownCall(m.original().recv(), m.original().args(), escaped);
+        m.arms().forEach(arm -> armEscapes(arm.arm(), escaped));
+      }
     }
   }
 
@@ -258,6 +269,7 @@ public final class ReturnShapeAnalysis {
       case MIR.Block block -> collectWanted(block.original());
       case MIR.CreateObj ignored -> {} // The method bodies are their own funs.
       case MIR.BoolExpr b -> collectWanted(b.condition());
+      case MIR.SumMatch m -> collectWanted(m.original());
       case MIR.MCall call -> {
         collectWanted(call.recv());
         call.args().forEach(this::collectWanted);

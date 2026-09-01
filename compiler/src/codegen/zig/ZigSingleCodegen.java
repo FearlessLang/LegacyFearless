@@ -2,7 +2,9 @@ package codegen.zig;
 
 import codegen.MIR;
 import codegen.ParentWalker;
+import codegen.optimisations.StandInSelfArms;
 import codegen.optimisations.RapidTypeAnalysis;
+import codegen.optimisations.RecursionHotness;
 import codegen.optimisations.RcFreeTypes;
 import codegen.optimisations.ReturnShapeAnalysis;
 import id.Id;
@@ -52,12 +54,25 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   private final VPFCodegen vpf;
   final Map<MIR.FName, Boolean> vpfBranchCache = new HashMap<>();
   final ReturnShapeAnalysis shapes;
+  private final RecursionHotness hotness;
+  private final StandInSelfArms standInArms;
+  /// The packages read back from a cache. Their code was written by an earlier compilation
+  /// and holds only the inline wrappers that compilation chose, so nothing here may name one.
+  private final Set<String> cachedPkg;
+  /// The function whose body is being emitted, which is what `hotness` asks about.
+  private MIR.FName currentFun;
   private final RcFreeTypes rcFree;
+  /// What every package read back from a cache counted about the types it declares. It is the
+  /// only account of an object literal such a package wrote: `pkgInfo` keeps method headers and
+  /// top level declarations, so an inline declaration never reaches the program read back here.
+  private final main.java.ImplInfo cachedImpls;
   private final Map<MIR.FName, Boolean> transientVariantCache = new HashMap<>();
 
   public ZigSingleCodegen(MIR.Program p, boolean vpfEnabled, RapidTypeAnalysis rta,
                           Set<String> cachedPkg, main.java.ImplInfo cachedImpls) {
     this.vpfEnabled = vpfEnabled;
+    this.cachedPkg = cachedPkg;
+    this.cachedImpls = cachedImpls;
     this.rcFree = new RcFreeTypes(rta, (ast.Program) p.p(), cachedPkg, cachedImpls);
     magic = new ZigMagicImpls(this, t -> "rt.FatPtr", p.p(), this::shareCode);
     sigBuilder = new ZigSigStringBuilder(p.p());
@@ -74,6 +89,8 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
     this.vpf = new VPFCodegen(this);
     this.shapes = new ReturnShapeAnalysis(p, this::isTransientCreateObj);
+    this.hotness = new RecursionHotness(p, shapes);
+    this.standInArms = new StandInSelfArms(p);
   }
 
   PackageState getOrCreatePackageState(String pkgName) {
@@ -91,7 +108,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   public String vtableRef(DecId objId, boolean transientVt) {
     var typeName = id.getSimpleName(objId);
     var vtName = "VT_" + typeName + (transientVt ? "_transient" : "");
-    var owningPkg = typeToPackage.get(objId);
+    var owningPkg = owningPackageOf(objId);
     if (owningPkg != null && !owningPkg.equals(emitTargetPkg)) {
       return "root.pkg_" + owningPkg.replace(".", "_") + "." + vtName;
     }
@@ -100,7 +117,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   public String capturesRef(DecId objId) {
     var typeName = id.getSimpleName(objId);
-    var owningPkg = typeToPackage.get(objId);
+    var owningPkg = owningPackageOf(objId);
     if (owningPkg != null && !owningPkg.equals(emitTargetPkg)) {
       return "root.pkg_" + owningPkg.replace(".", "_") + "." + typeName + "_Captures";
     }
@@ -109,7 +126,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   public String funRef(MIR.FName fName) {
     var zigName = id.getFName(fName);
-    var owningPkg = typeToPackage.get(fName.d());
+    var owningPkg = owningPackageOf(fName.d());
     if (owningPkg != null && !owningPkg.equals(emitTargetPkg)) {
       return "root.pkg_" + owningPkg.replace(".", "_") + "." + zigName;
     }
@@ -119,23 +136,98 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   /// The per-literal method wrapper of `objId`. It takes `(receiver, args...)`, so a caller
   /// needs no captures.
   public String methWrapperRef(DecId objId, String methName) {
-    var name = "MF_" + id.getSimpleName(objId) + "_" + methName;
-    var owningPkg = typeToPackage.get(objId);
+    return declOfType(objId, "MF_" + id.getSimpleName(objId) + "_" + methName);
+  }
+
+  /// The inline-only twin of the per-literal method wrapper. It exists so a hint reaches the
+  /// method body: a hint on the plain wrapper folds in the wrapper alone and leaves the call
+  /// to the body behind it, which costs a frame and buys nothing.
+  public String methInlineWrapperRef(DecId objId, String methName) {
+    return declOfType(objId, "MFI_" + id.getSimpleName(objId) + "_" + methName);
+  }
+
+  /// A declaration that belongs beside `objId`, qualified when that is another package.
+  private String declOfType(DecId objId, String name) {
+    var owningPkg = owningPackageOf(objId);
     if (owningPkg != null && !owningPkg.equals(emitTargetPkg)) {
       return "root.pkg_" + owningPkg.replace(".", "_") + "." + name;
     }
     return name;
   }
 
+  /// A call to the per-literal wrapper of `objId`, taking the inline-only wrapper when the
+  /// body being emitted is hot and the callee is not in the same component. That is the
+  /// hotness a profile would supply; LLVM holds every other part of the decision.
+  String methCallRef(DecId objId, String methName, MIR.FName callee, List<String> args) {
+    var argList = String.join(", ", args);
+    var plain = methWrapperRef(objId, methName) + "(" + argList + ")";
+    if (!hotness.inlineTarget(currentFun, callee)) { return plain; }
+    if (inlineHere(objId)) {
+      return methInlineWrapperRef(objId, methName) + "(" + argList + ")";
+    }
+    var owningPkg = owningPackageOf(objId);
+    if (owningPkg == null) { return plain; }
+    // A cached package published an inline wrapper only for the bodies it judged small enough,
+    // and a package built before this compilation published none at all. `@hasDecl` asks for
+    // one and takes the plain wrapper when there is none, so the hint never decides whether the
+    // program links.
+    var inlineName = "MFI_" + id.getSimpleName(objId) + "_" + methName;
+    var pkgRef = "root.pkg_" + owningPkg.replace(".", "_");
+    return "(if (@hasDecl(" + pkgRef + ", \"" + inlineName + "\")) "
+      + pkgRef + "." + inlineName + "(" + argList + ") else " + plain + ")";
+  }
+
+  /// Whether the package being emitted is cached and `f` is small enough to publish an inline
+  /// wrapper for. The wrapper is written whether or not this compilation calls it, because the
+  /// compilations that read this package back hold only the text it writes now.
+  private boolean publishesInlineWrapper(MIR.FName f) {
+    return emitTargetPkg != null && CompilationUnit.isCached(emitTargetPkg)
+      && hotness.fitsInlineBudget(f);
+  }
+
+  /// Whether this compilation writes the code of `objId`, which is what decides if it can
+  /// name an inline wrapper of that type. A cached package answers no.
+  private boolean inlineHere(DecId objId) {
+    var owningPkg = owningPackageOf(objId);
+    return owningPkg != null && !cachedPkg.contains(owningPkg);
+  }
+
+  /// A call straight to a generated function, with an inline hint under the same rule.
+  String callRef(MIR.FName callee, String target, List<String> args) {
+    var argList = String.join(", ", args);
+    if (callee == null || !inlineHere(callee.d()) || !hotness.inlineTarget(currentFun, callee)) {
+      return target + "(" + argList + ")";
+    }
+    return "@call(.always_inline, " + target + ", .{ " + argList + " })";
+  }
+
   /// The package that holds `objId`, or null when none declares it. An anonymous literal
   /// takes the package it is emitted into.
-  public String packageOf(DecId objId) { return typeToPackage.get(objId); }
+  public String packageOf(DecId objId) { return owningPackageOf(objId); }
+
+  /// The package that declares `objId`, or null where nothing this compilation holds says.
+  ///
+  /// The lowered program answers for every type it holds. A type only the implInfo of a cached
+  /// package names is absent from it, and the name of such a type carries the package that wrote
+  /// it, which is the package whose generated file holds its vtable and its wrappers.
+  String owningPackageOf(DecId objId) {
+    var known = typeToPackage.get(objId);
+    if (known != null) { return known; }
+    var pkg = objId.pkg();
+    return cachedPkg.contains(pkg) ? pkg : null;
+  }
 
   public boolean isLiteral(DecId d) {
     return id.getLiteral(p.p(), d).isPresent();
   }
 
   boolean hasIdentityType(DecId d) {
+    // A cached package keeps no declaration of an object literal it wrote, so asking the program
+    // about one raises `traitNotFound`. Its implInfo is the account that stands. A type that file
+    // does not name answers yes, which only ever costs a transient vtable test.
+    if (!typeToPackage.containsKey(d) && cachedPkg.contains(d.pkg())) {
+      return cachedImpls.get(d).map(main.java.ImplInfo.Entry::hasIdentity).orElse(true);
+    }
     return p.p().superDecIds(d).contains(Magic.HasIdentity);
   }
 
@@ -156,8 +248,24 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   boolean isRcFree(MIR.E e) { return rcStrategy(e) == RcFreeTypes.Strategy.NONE; }
 
-  String shareCode(String expr, MIR.MT t) {
-    return switch (rcStrategy(t)) {
+  /// The parameter slot `f` receives a stand-in receiver in, which only the general storage-mode
+  /// dispatch describes. See {@link StandInSelfArms}.
+  java.util.OptionalInt standInSelfSlot(MIR.FName f) { return standInArms.selfSlot(f); }
+
+  /// The strategy for the parameter at `index` of `f`. A branch arm receives a singleton standing
+  /// in for its literal, so that slot takes the general dispatch whatever the declared type of
+  /// the parameter says.
+  RcFreeTypes.Strategy paramStrategy(MIR.FName f, int index, MIR.MT t) {
+    var standIn = standInSelfSlot(f);
+    return standIn.isPresent() && standIn.getAsInt() == index
+      ? RcFreeTypes.Strategy.DYNAMIC
+      : rcStrategy(t);
+  }
+
+  String shareCode(String expr, MIR.MT t) { return shareCode(expr, rcStrategy(t)); }
+
+  String shareCode(String expr, RcFreeTypes.Strategy strategy) {
+    return switch (strategy) {
       case NONE -> expr;
       case HEAP -> expr + ".share_heap()";
       case HEAP_OR_TRANSIENT -> expr + ".share_heap_or_transient()";
@@ -176,7 +284,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   }
 
   String decrementAsCode(String expr, MIR.MT t, String releasingWorkerId) {
-    var method = switch (rcStrategy(t)) {
+    return decrementAsCode(expr, rcStrategy(t), releasingWorkerId);
+  }
+
+  String decrementAsCode(String expr, RcFreeTypes.Strategy strategy, String releasingWorkerId) {
+    var method = switch (strategy) {
       case NONE -> null;
       case HEAP -> "rc_decrement_heap_as";
       case HEAP_OR_TRANSIENT -> "rc_decrement_heap_or_transient_as";
@@ -403,6 +515,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       case MIR.X x -> isRcFree(x) ? x.accept(gen, checkMagic) : boxBorrowedCode(x.accept(gen, checkMagic), x.t());
       case MIR.CreateObj createObj -> boxCreateObj(createObj, gen, checkMagic);
       case MIR.BoolExpr boolExpr -> boxBoolExpr(boolExpr, gen, checkMagic);
+      case MIR.SumMatch ignored -> e.accept(gen, checkMagic);
       case MIR.MCall ignored -> e.accept(gen, checkMagic);
       case MIR.DirectCall ignored -> e.accept(gen, checkMagic);
       case MIR.GuardedCall ignored -> e.accept(gen, checkMagic);
@@ -438,8 +551,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       case MIR.DirectCall call -> {
         var ops = callOperands(call.original(), this, checkMagic);
         var methName = id.getMName(call.original().mdf(), call.original().name());
-        var target = methWrapperRef(call.concreteType(), methName);
-        yield tailCallStatements(ops, refs -> target + "(" + String.join(", ", refs) + ")", dropNames)
+        var callee = shapes.calleeOf(call).map(MIR.Fun::name).orElse(null);
+        yield tailCallStatements(ops,
+            refs -> methCallRef(call.concreteType(), methName, callee, refs), dropNames)
           .orElseGet(() -> valueTailStatements(boxExpr(e, this, checkMagic), dropNames));
       }
       case MIR.MCall call when operandWantsSlot(call, Optional.empty())
@@ -652,6 +766,66 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return Optional.of(funRef(fName) + "(" + String.join(", ", args) + ")");
   }
 
+  /// The arms of a `SumMatch` as a chain of vtable tests, with the call as written behind them.
+  ///
+  /// The receiver binds to a name first: every arm reads it, and the test that selects an arm
+  /// reads it again, so a bare expression would be built more than once.
+  String sumMatch(MIR.SumMatch expr, MIRVisitor<String> gen, boolean checkMagic) {
+    // The receiver takes the path it takes at any other call site, which is what gives it its
+    // temporary and the drop that retires it. Reading it here without that leaks every value the
+    // call was given.
+    var prelude = new ArrayList<String>();
+    var recvName = receiverOperand(expr.receiver(), gen, checkMagic, prelude);
+    var block = "fear_blk_" + blockCounter++;
+    var sb = new StringBuilder(block + ": {\n");
+    sb.append("break :").append(block).append(" ");
+    for (var arm : expr.arms()) {
+      sb.append("if (").append(guardTest(recvName, arm.impl())).append(") ")
+        .append(sumArmCall(recvName, arm, gen, checkMagic))
+        .append(" else ");
+    }
+    sb.append(sumMatchFallback(recvName, expr, gen, checkMagic));
+    sb.append(";\n}");
+    return withTransientPrelude(prelude, sb.toString());
+  }
+
+  /// The arm's own call: the matcher method the receiver's implementation forwards to.
+  ///
+  /// An arm's args are [parameters..., self, captures...]. The parameters are what the forward
+  /// passes, which it takes off the receiver, so they are read from the receiver's capture
+  /// struct here. Nothing reads the self param, because an arm that captures self is never made
+  /// into an arm, so a singleton stands in for the matcher that is never built. The captures are
+  /// the same `MIR.X`s as in the enclosing scope, lent rather than given, exactly as a
+  /// `BoolExpr` arm takes them.
+  private String sumArmCall(String recvName, MIR.SumArm arm, MIRVisitor<String> gen,
+                            boolean checkMagic) {
+    var fun = funMap.get(arm.arm());
+    var arity = arm.arm().m().num();
+    var args = new ArrayList<String>();
+    for (var i = 0; i < arm.captures().size(); i++) {
+      var read = "rt.deref(" + capturesRef(arm.impl()) + ", " + recvName + ")."
+        + id.varName(arm.captures().get(i));
+      // The arm owns what it is given, so the capture is shared out of the receiver. The
+      // parameter it fills is written at this call site, so its declared type is known here and
+      // names a strategy narrower than the general storage-mode dispatch.
+      args.add(shareCode(read, rcStrategy(fun.args().get(i).t())));
+    }
+    args.add("rt.obj_k_singleton(&" + vtableRef(new DecId("base.True", 0)) + ")");
+    fun.args().stream().skip(arity + 1).forEach(x -> args.add(x.accept(gen, checkMagic)));
+    return callRef(arm.arm(), funRef(arm.arm()), args);
+  }
+
+  /// The call as written, for a receiver no arm tests. The matcher is built here and only here.
+  private String sumMatchFallback(String recvName, MIR.SumMatch expr, MIRVisitor<String> gen,
+                                  boolean checkMagic) {
+    var original = expr.original();
+    var sig = new MIR.Sig(original.name(),
+      original.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
+      original.originalRet());
+    return "rt.call(" + recvName + ", " + sigBuilder.inlineHash(sig) + ", .{ "
+      + expr.matcher().accept(gen, checkMagic) + " }, @src())";
+  }
+
   private String boxBoolExpr(MIR.BoolExpr expr, MIRVisitor<String> gen, boolean checkMagic) {
     String recv = expr.condition().accept(gen, checkMagic);
 
@@ -846,6 +1020,17 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
           + "return " + fRef + "(" + String.join(", ", simpleArgs) + ");\n"
           + "}");
 
+        // A call site of this compilation asked for it, or this package is cached and a later
+        // compilation may ask: it cannot see this body, so the size is judged here.
+        if (hotness.inlineWanted(meth.fName().get()) || publishesInlineWrapper(meth.fName().get())) {
+          currentState().functions.add("pub inline fn MFI_" + typeName + "_" + methName
+            + "(" + paramStr + ") rt.FatPtr {\n"
+            + paramDiscard
+            + tracePush
+            + "return @call(.always_inline, " + fRef + ", .{ " + String.join(", ", simpleArgs) + " });\n"
+            + "}");
+        }
+
         // The `_transient` wrapper: the same capture plumbing, with the caller slot passed
         // through.
         if (hasTransientVariant(meth.fName().get())) {
@@ -887,6 +1072,12 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     if (owningPkg != null) {
       var state = packageStates.get(owningPkg);
       if (state != null) { return state.captureStructs.containsKey(objId); }
+    }
+    // A cached package writes no state here, so its implInfo answers. A value that captures
+    // nothing is the one the runtime gives a static header, which is what `singleton` reports,
+    // so anything else carries a capture struct and a transient vtable beside its heap one.
+    if (cachedPkg.contains(objId.pkg())) {
+      return cachedImpls.get(objId).map(entry -> !entry.singleton()).orElse(false);
     }
     return false;
   }
@@ -1005,6 +1196,12 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   }
 
   public void visitFun(MIR.Fun fun) {
+    var savedFun = currentFun;
+    currentFun = fun.name();
+    try { emitFun(fun); } finally { currentFun = savedFun; }
+  }
+
+  private void emitFun(MIR.Fun fun) {
     var name = id.getFName(fun.name());
     var paramNames = fun.args().stream()
       .map(x -> id.varName(x.name()))
@@ -1372,8 +1569,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var all = new ArrayList<String>();
     all.add(ops.recv());
     all.addAll(ops.args());
+    var callee = shapes.calleeOf(call).map(MIR.Fun::name).orElse(null);
     return withTransientPrelude(ops.prelude(),
-      methWrapperRef(call.concreteType(), methName) + "(" + String.join(", ", all) + ")");
+      methCallRef(call.concreteType(), methName, callee, all));
   }
 
   @Override
@@ -1412,8 +1610,14 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var methName = id.getMName(original.mdf(), original.name());
     sb.append("break :").append(block)
       .append(" if (").append(guardTest(recvName, call.concreteType())).append(") ")
-      .append(methWrapperRef(call.concreteType(), methName)).append("(").append(String.join(", ", names)).append(")")
-      .append(" else rt.call(").append(recvName).append(", ").append(hashExpr).append(", ")
+      .append(methCallRef(call.concreteType(), methName,
+        shapes.calleeOf(call).map(MIR.Fun::name).orElse(null), names));
+    // The second arm of a type with two implementations. The virtual call stays behind it, so
+    // the arm only ever removes a dispatch and never decides one.
+    call.altType().ifPresent(alt -> sb.append(" else if (").append(guardTest(recvName, alt))
+      .append(") ").append(methCallRef(alt, methName,
+        shapes.calleeOfAlt(call).map(MIR.Fun::name).orElse(null), names)));
+    sb.append(" else rt.call(").append(recvName).append(", ").append(hashExpr).append(", ")
       .append(argsTuple).append(", @src());\n}");
     return withTransientPrelude(ops.prelude(), sb.toString());
   }
@@ -1468,6 +1672,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   }
 
   @Override
+  public String visitSumMatch(MIR.SumMatch expr, boolean checkMagic) {
+    return sumMatch(expr, this, checkMagic);
+  }
+
+  @Override
   public String visitBox(MIR.Box box, boolean checkMagic) {
     return boxExpr(box.inner(), this, checkMagic);
   }
@@ -1485,7 +1694,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var fRef = funRef(call.fun());
     var prelude = new ArrayList<String>();
     var args = staticCallArgs(call, this, checkMagic, prelude, true);
-    return withTransientPrelude(prelude, fRef + "(" + String.join(", ", args) + ")");
+    return withTransientPrelude(prelude, callRef(call.fun(), fRef, args));
   }
 
 

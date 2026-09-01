@@ -1,0 +1,25 @@
+package bench
+
+/// One heap object per element. The trigger of the cycle collector reads the live
+/// set, so only a benchmark that holds its elements reaches the part of that trigger
+/// which scales with the set. Every other benchmark here streams, and keeps a live
+/// set that a fixed threshold and a proportional one treat alike.
+Cell: {
+  .value: Int,
+  }
+
+Cells: {
+  #(v: Int): Cell -> {.value -> v},
+  }
+
+Accumulate: {
+  .n: Int -> +4000000,
+
+  /// The list holds every element until the fold below reads it, so the live set
+  /// grows with `n`.
+  .cells: mut List[Cell] -> Flow.range(+0, this.n).map[Cell]{i -> Cells#i}.list,
+
+  .total(cells: mut List[Cell]): Int -> cells.flow.fold[Int]({+0}, {acc, c -> acc + (c.value)}),
+  }
+
+Test: Main {sys -> sys.io.println(Accumulate.total(Accumulate.cells).str)}

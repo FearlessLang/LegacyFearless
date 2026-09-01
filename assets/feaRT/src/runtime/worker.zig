@@ -564,7 +564,7 @@ fn workerLoop(worker: *Worker) void {
 
 		// 3. Nothing to do. Sleep a little rather than burn the CPU.
 		std.atomic.spinLoopHint();
-		std.Io.sleep(process.runtime_io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+		process.idle(1);
 	}
 
 	gc.dump_rc_delta();

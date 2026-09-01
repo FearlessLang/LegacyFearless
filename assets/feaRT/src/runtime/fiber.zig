@@ -140,6 +140,11 @@ pub const Fiber = struct {
 	/// past its last frame, and the pseudo-fiber backing the recovery stack.
 	vpf_enabled: bool = false,
 
+	/// True while a panic on this fiber is being turned into a Fearless error.
+	/// That conversion runs generated code, which can promote and can panic
+	/// again, and a second panic has no way to report itself through the first.
+	in_panic: bool = false,
+
 	/// The cancellation scope active on this fiber's stack. A thief fiber seeds
 	/// it from the promoter's scope.
 	saved_scope: ?*scope_mod.Scope = null,

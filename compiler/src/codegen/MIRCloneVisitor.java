@@ -4,6 +4,7 @@ import utils.Mapper;
 import visitors.MIRVisitor;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.EnumSet;
 import java.util.stream.Collectors;
 
@@ -89,6 +90,31 @@ public interface MIRCloneVisitor extends MIRVisitor<MIR.E> {
     );
   }
 
+  /// The call this holds is rebuilt from its visited parts rather than visited itself, so a
+  /// later pass cannot devirtualise it. The arms already replace the dispatch, and a guard in
+  /// front of the call behind them would test a receiver no arm had claimed.
+  ///
+  /// A pass that rewrites the matcher into something other than a literal takes the call as it
+  /// was written: the arms name methods of the literal, so there is nothing to run without it.
+  @Override default MIR.E visitSumMatch(MIR.SumMatch expr, boolean checkMagic) {
+    var call = expr.original();
+    var receiver = expr.receiver().accept(this, checkMagic);
+    var matcher = expr.matcher().accept(this, checkMagic);
+    if (!(matcher instanceof MIR.CreateObj literal)) {
+      return call.accept(this, checkMagic);
+    }
+    var original = new MIR.MCall(
+      receiver,
+      call.name(),
+      List.of(literal),
+      this.visitMT(call.t()),
+      this.visitMT(call.originalRet()),
+      call.mdf(),
+      this.visitCallVariant(call.variant())
+    );
+    return new MIR.SumMatch(original, receiver, literal, expr.arms());
+  }
+
   @Override default MIR.E visitBoolExpr(MIR.BoolExpr expr, boolean checkMagic) {
     return new MIR.BoolExpr(
       expr.original().accept(this, checkMagic),
@@ -126,7 +152,7 @@ public interface MIRCloneVisitor extends MIRVisitor<MIR.E> {
   @Override default MIR.E visitGuardedCall(MIR.GuardedCall call, boolean checkMagic) {
     var original = call.original().accept(this, checkMagic);
     if (original instanceof MIR.MCall mCall) {
-      return new MIR.GuardedCall(mCall, call.concreteType());
+      return new MIR.GuardedCall(mCall, call.concreteType(), call.altType());
     }
     return original;
   }

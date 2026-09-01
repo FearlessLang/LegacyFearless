@@ -147,6 +147,36 @@ public sealed interface MIR {
     }
   }
 
+  /// A call whose receiver has a closed set of implementations, each of which answers the call by
+  /// forwarding it straight to a method of the matcher literal written at the call site.
+  ///
+  /// Every church encoded sum in Fearless takes this shape. `Opt` answers `.match` with
+  /// `m.empty`, and the literal `Opts#` writes answers it with `m.some(x)`. Naming the arm each
+  /// implementation selects turns the call into a test on the receiver, so no matcher object is
+  /// built and neither dispatch runs.
+  ///
+  /// The virtual call in `original` stays behind the arms: `arms` names the implementations this
+  /// compilation can see, and a receiver none of them tests takes the call as written.
+  record SumMatch(MCall original, E receiver, CreateObj matcher, List<SumArm> arms) implements E {
+    public SumMatch {
+      assert !arms.isEmpty();
+      arms = List.copyOf(arms);
+    }
+    @Override public MT t() { return original.t(); }
+    @Override public <R> R accept(MIRVisitor<R> v, boolean checkMagic) {
+      return v.visitSumMatch(this, checkMagic);
+    }
+  }
+
+  /// One implementation of the receiver's type, and what running the call on it comes to.
+  ///
+  /// `arm` is the method of the matcher literal that `impl` forwards to. `captures` names the
+  /// fields of `impl` that become its arguments, in the order the forward passes them, so a
+  /// reader takes them off the receiver rather than off a matcher object that is never built.
+  record SumArm(Id.DecId impl, FName arm, List<String> captures) {
+    public SumArm { captures = List.copyOf(captures); }
+  }
+
   record Block(E original, Collection<BlockStmt> stmts, MT expectedT) implements E {
     public sealed interface BlockStmt {
       E e();
@@ -218,7 +248,17 @@ public sealed interface MIR {
   /// Unlike a {@link DirectCall}, the target is a guess. The guess comes from the packages the
   /// compiler read, so a package it did not read can hold another implementation and the test
   /// fails for it. The fallback makes that correct, and no whole program analysis is needed.
-  record GuardedCall(MCall original, Id.DecId concreteType) implements E {
+  /// A call that tests the receiver against a guessed type and calls that type's wrapper, and
+  /// otherwise falls back to a virtual call.
+  ///
+  /// `altType` names a second type worth testing, which a type with two implementations has.
+  /// It carries no obligation: the virtual fallback covers every receiver either arm misses, so
+  /// a consumer that reads `concreteType` alone still emits correct code.
+  record GuardedCall(MCall original, Id.DecId concreteType, Optional<Id.DecId> altType) implements E {
+    public GuardedCall(MCall original, Id.DecId concreteType) {
+      this(original, concreteType, Optional.empty());
+    }
+
     @Override public MT t() { return original.t(); }
 
     @Override public <R> R accept(MIRVisitor<R> v, boolean checkMagic) {

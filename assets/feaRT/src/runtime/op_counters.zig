@@ -80,6 +80,11 @@ pub const Op = enum {
     /// Bumps a contended atomic on the hottest path in the program. Read it for
     /// structure, never for timing.
     token_granted,
+    /// A full-heap stop-the-world trace that ran. The trigger counter is
+    /// per-thread but the trace it starts is global, so read this against the
+    /// worker count: if it scales with the number of workers, the threshold is
+    /// being reached independently on each one.
+    cycle_collection,
 };
 
 const COUNT = @typeInfo(Op).@"enum".fields.len;

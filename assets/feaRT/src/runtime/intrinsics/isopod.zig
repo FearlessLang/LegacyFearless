@@ -30,7 +30,6 @@ pub fn make(value: FatPtr) FatPtr {
         .ref_count = std.atomic.Value(u32).init(1),
         .value = std.atomic.Value(?*FatPtr).init(val_ptr),
     };
-    gc.recordRcAlloc();
     return .{
         .data = .{ .iso_cell = cell },
         .vt = &VT_IsoPod,
@@ -59,7 +58,6 @@ pub noinline fn release(cell: *IsoCell, releasing_worker_id: u32) void {
         gc.recycleDestroy(FatPtr, old_ptr, .isopod_release);
     }
     gc.recycleDestroy(IsoCell, cell, .isopod_release);
-    gc.recordRcFree();
 }
 
 fn is_alive(self: FatPtr) FatPtr {
@@ -164,14 +162,17 @@ test "IsoPod consume transfers exactly once and next releases overwritten value"
     var pod = make(a.share());
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
 
-    var consumed = consume(pod.share());
+    // `consume` and `next` borrow their receiver: neither releases it. Sharing it
+    // here would leave the pod with a reference no one gives back, so the release
+    // below would never reach zero and never free the value.
+    var consumed = consume(pod);
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
     consumed.rc_decrement();
     try testing.expectEqual(@as(u32, 1), a.boxed_value().refCountForTest());
 
-    _ = next(pod.share(), b.share());
+    _ = next(pod, b.share());
     try testing.expectEqual(@as(u32, 2), b.boxed_value().refCountForTest());
-    _ = next(pod.share(), c.share());
+    _ = next(pod, c.share());
     try testing.expectEqual(@as(u32, 1), b.boxed_value().refCountForTest());
     try testing.expectEqual(@as(u32, 2), c.boxed_value().refCountForTest());
 

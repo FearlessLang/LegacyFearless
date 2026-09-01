@@ -11,6 +11,7 @@ import main.java.ImplInfo;
 
 import java.util.HashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -35,7 +36,13 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
   /// Every declaration the compiler read: the types a package writes, and the object literals written
   /// inside their bodies.
   private final Set<Id.DecId> candidates = new LinkedHashSet<>();
-  private final Map<Id.DecId, Optional<Id.DecId>> soleImpl = new HashMap<>();
+  /// The implementations the join found per type, cut short once the count passes what a guard
+  /// can test.
+  private final Map<Id.DecId, List<Id.DecId>> impls = new HashMap<>();
+  /// How many types one guard may test before the virtual call behind it. Two covers the shape
+  /// that dominates Fearless: a sealed type with two implementations, as `Bool` and every
+  /// church encoded sum type have.
+  private static final int MAX_GUARD_ARMS = 2;
   private final Map<Id.DecId, MIR.TypeDef> defs = new HashMap<>();
   /// Every method that has a body, as (owner, name, receiver modifier).
   private final Set<String> bodies = new LinkedHashSet<>();
@@ -68,7 +75,7 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
 
   @Override public MIR.Program visitProgram(MIR.Program p) {
     this.ast = p.p();
-    this.soleImpl.clear();
+    this.impls.clear();
     this.defs.clear();
     this.bodies.clear();
     this.candidates.clear();
@@ -122,15 +129,29 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
 
     var declared = rewritten.recv().t().name();
     if (declared.isEmpty()) { return visited; }
-    var target = soleImplOf(declared.get());
-    if (target.isEmpty() || !callable(target.get(), rewritten)) { return visited; }
-    targets.add(target.get());
-    if (canDirectCall(declared.get())) {
+    var found = implsOf(declared.get());
+    if (found.isEmpty() || found.size() > MAX_GUARD_ARMS) { return visited; }
+    // More than one implementation earns a guard only where the declaration closes the set. The
+    // arms are then every implementation there is, so each one removes a dispatch and the
+    // virtual call behind them never runs. On an open type the count is what this compilation
+    // happens to hold, a third implementation is free to arrive, and a missed guess would pay a
+    // compare in front of the virtual call it failed to replace.
+    if (found.size() > 1 && !isFinal(declared.get())) { return visited; }
+    // An implementation whose wrapper this call cannot name is dropped rather than guarded. The
+    // virtual call behind the guard is what serves the receivers no arm names.
+    var armed = found.stream().filter(impl -> callable(impl, rewritten)).toList();
+    if (armed.isEmpty()) { return visited; }
+    var target = armed.getFirst();
+    targets.add(target);
+    // Only the sole implementation of a final type may go without a test.
+    if (found.size() == 1 && canDirectCall(declared.get())) {
       directCalls++;
-      return new MIR.DirectCall(rewritten, target.get());
+      return new MIR.DirectCall(rewritten, target);
     }
     guardedCalls++;
-    return new MIR.GuardedCall(rewritten, target.get());
+    var alt = armed.size() > 1 ? Optional.of(armed.get(1)) : Optional.<Id.DecId>empty();
+    alt.ifPresent(targets::add);
+    return new MIR.GuardedCall(rewritten, target, alt);
   }
 
   /// Whether this call may name its one implementation with no test in front of it. Both grounds
@@ -220,8 +241,8 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
   /// The join is what makes a type effectively final. Where a package declares a type and one
   /// other package implements it, the count is one and the implementation is named, whichever
   /// package each sits in.
-  private Optional<Id.DecId> soleImplOf(Id.DecId declared) {
-    return soleImpl.computeIfAbsent(declared, d -> {
+  private List<Id.DecId> implsOf(Id.DecId declared) {
+    return impls.computeIfAbsent(declared, d -> {
       var found = new LinkedHashSet<Id.DecId>();
       cachedImpls.get(d).ifPresent(known -> found.addAll(known.implIds()));
       for (var candidate : candidates) {
@@ -232,10 +253,16 @@ public class DevirtualiseGuarded implements MIRCloneVisitor {
         if (!candidate.equals(d) && !ast.superDecIds(candidate).contains(d)) { continue; }
         if (!hasOwnBody(candidate)) { continue; }
         found.add(candidate);
-        if (found.size() > 1) { return Optional.empty(); }
+        // One past the arm limit is enough to know the count is too high to guard.
+        if (found.size() > MAX_GUARD_ARMS) { break; }
       }
-      return found.size() == 1 ? Optional.of(found.iterator().next()) : Optional.empty();
+      return List.copyOf(found);
     });
+  }
+
+  private Optional<Id.DecId> soleImplOf(Id.DecId declared) {
+    var found = implsOf(declared);
+    return found.size() == 1 ? Optional.of(found.getFirst()) : Optional.empty();
   }
 
   /// Whether a declaration gives a body to every method it writes. A declaration with an

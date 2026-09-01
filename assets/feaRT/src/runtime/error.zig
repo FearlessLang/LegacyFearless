@@ -49,7 +49,6 @@ fn makeCell(info: FatPtr, comptime vt: *const objs.VTable) FatPtr {
         .info = box,
         .trace = trace.captureTrace(),
     };
-    gc.recordRcAlloc();
     return .{ .data = .{ .err_cell = cell }, .vt = vt };
 }
 
@@ -89,7 +88,6 @@ pub noinline fn release(cell: *ErrorCell, releasing_worker_id: u32) void {
     cell.info.*.rc_decrement_as(releasing_worker_id);
     gc.recycleDestroy(FatPtr, cell.info, .error_release);
     gc.recycleDestroy(ErrorCell, cell, .error_release);
-    gc.recordRcFree();
 }
 
 test "error payloads tag correctly and release their boxed info" {

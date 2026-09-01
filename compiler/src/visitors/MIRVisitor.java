@@ -11,6 +11,9 @@ public interface MIRVisitor<R> {
   default R visitBoolExpr(MIR.BoolExpr expr, boolean checkMagic) {
     return expr.original().accept(this, checkMagic);
   }
+  default R visitSumMatch(MIR.SumMatch expr, boolean checkMagic) {
+    return expr.original().accept(this, checkMagic);
+  }
   default R visitBlockExpr(MIR.Block expr, boolean checkMagic) {
     return expr.original().accept(this, checkMagic);
   }

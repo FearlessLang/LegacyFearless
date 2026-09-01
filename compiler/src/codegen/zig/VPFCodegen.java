@@ -1,11 +1,13 @@
 package codegen.zig;
 
 import codegen.MIR;
+import codegen.optimisations.RcFreeTypes;
 import id.Id.DecId;
 import visitors.MIRVisitor;
 
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 /// VPF (Very Parallel Fearless) codegen: finds the VPF-eligible calls of a function body
 /// and emits thief functions with shadow-frame instrumentation.
@@ -118,7 +120,7 @@ class VPFCodegen {
       new DecId(localsName, 0),
       "const " + localsName + " = extern struct {\n" + localsFields + "};"
     );
-    emitLocalsHooks(localsName, fun.args());
+    emitLocalsHooks(localsName, fun);
 
     var remaining = frameAddingExprs.subList(1, frameAddingExprs.size());
     if (remaining.size() >= 2 && canDeepenVPF(fun, 1)) {
@@ -311,7 +313,7 @@ class VPFCodegen {
       new DecId(innerLocalsName, 0),
       "const " + innerLocalsName + " = extern struct {\n" + innerFields + "};"
     );
-    emitLocalsHooks(innerLocalsName, fun.args());
+    emitLocalsHooks(innerLocalsName, fun);
 
     var innerRemaining = remainingFrameAdding.subList(1, remainingFrameAdding.size());
     if (innerRemaining.size() >= 2 && canDeepenVPF(fun, newForwardedFields.size())) {
@@ -365,13 +367,23 @@ class VPFCodegen {
     parent.currentState().functions.add(sb.toString());
   }
 
-  /// The retain and drop hooks a thief runs over a stolen frame's locals. A field whose
-  /// static type carries no reference count is left out of both: it can be neither transient
-  /// nor counted, so the plain struct copy already transfers it correctly.
-  private void emitLocalsHooks(String localsName, List<MIR.X> args) {
-    var fatPtrFields = args.stream()
-      .filter(x -> !parent.isRcFree(x))
-      .map(x -> new ZigSingleCodegen.Drop(parent.id.varName(x.name()), x.t()))
+  /// A locals field that carries a reference count, with the storage-mode strategy its
+  /// reference-count operations take.
+  private record LocalsField(String name, RcFreeTypes.Strategy strategy) {}
+
+  /// The retain and drop hooks a thief runs over a stolen frame's locals. A field that
+  /// carries no reference count is left out of both: it can be neither transient nor
+  /// counted, so the plain struct copy already transfers it correctly.
+  ///
+  /// The strategy comes from {@link ZigSingleCodegen#paramStrategy}, not from the field type
+  /// alone, because the receiver of a `BoolExpr` arm holds a stand-in singleton rather than a
+  /// value of its declared type.
+  private void emitLocalsHooks(String localsName, MIR.Fun fun) {
+    var args = fun.args();
+    var fatPtrFields = IntStream.range(0, args.size())
+      .mapToObj(i -> new LocalsField(parent.id.varName(args.get(i).name()),
+        parent.paramStrategy(fun.name(), i, args.get(i).t())))
+      .filter(field -> field.strategy() != RcFreeTypes.Strategy.NONE)
       .toList();
     var retain = new StringBuilder();
     retain.append("fn ").append(localsName).append("_retain(copy_ptr: *anyopaque, parent_ptr: *anyopaque) void {\n");
@@ -382,7 +394,7 @@ class VPFCodegen {
     } else {
       for (var field : fatPtrFields) {
         retain.append("if (parent.").append(field.name()).append(".is_transient()) parent.").append(field.name()).append(" = parent.").append(field.name()).append(".box_transient();\n");
-        retain.append("copy.").append(field.name()).append(" = ").append(parent.shareCode("parent." + field.name(), field.t())).append(";\n");
+        retain.append("copy.").append(field.name()).append(" = ").append(parent.shareCode("parent." + field.name(), field.strategy())).append(";\n");
       }
     }
     retain.append("}");
@@ -399,7 +411,7 @@ class VPFCodegen {
       drop.append("_ = releasing_worker_id;\n");
     } else {
       for (var field : fatPtrFields) {
-        drop.append(parent.decrementAsCode("locals." + field.name(), field.t(), "releasing_worker_id")).append(";\n");
+        drop.append(parent.decrementAsCode("locals." + field.name(), field.strategy(), "releasing_worker_id")).append(";\n");
       }
     }
     drop.append("}");

@@ -71,9 +71,12 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
     var guarded = new codegen.optimisations.DevirtualiseGuarded(
       magic, cachedImplInfo(), cachedPkg());
     var selfRec = new codegen.optimisations.DirectSelfRecursion();
+    var sums = new codegen.optimisations.SumMatchOptimisation(
+      magic, cachedImplInfo(), cachedPkg());
     var res = new OptimisationBuilder(magic)
       .withBoolIfOptimisation()
       .withBoolShortCircuitOptimisation()
+      .withOptimisation(sums)
       .withBoxingOptimisation()
       .withOptimisation(selfRec)
       .withOptimisation(guarded)
@@ -81,6 +84,7 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
     setLoweredProgram(res);
     if (verbosity().printCodegen()) {
       System.err.println("[selfrec] " + selfRec.rewrittenCalls() + " recursive call sites");
+      System.err.println("[sums] " + sums.rewrittenCalls() + " matcher call sites");
       System.err.println("[guarded] " + guarded.guardedCalls()
         + " call sites, over " + guarded.targets().size() + " concrete types");
     }

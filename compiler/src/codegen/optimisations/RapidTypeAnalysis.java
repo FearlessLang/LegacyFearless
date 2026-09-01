@@ -120,6 +120,7 @@ public final class RapidTypeAnalysis {
         // the same reason a direct call does.
         case MIR.GuardedCall call -> {
           directCallTargets.add(call.concreteType());
+          call.altType().ifPresent(directCallTargets::add);
           work.add(call.original());
         }
         case MIR.StaticCall call -> {
@@ -135,6 +136,13 @@ public final class RapidTypeAnalysis {
         case MIR.BoolExpr expr -> {
           work.add(expr.original());
           work.add(expr.condition());
+        }
+        // An arm tests the vtable of the implementation it names and reads that implementation's
+        // captures, so each one needs its literal emitted for the same reason a direct call does.
+        case MIR.SumMatch expr -> {
+          expr.arms().forEach(arm -> directCallTargets.add(arm.impl()));
+          work.add(expr.original());
+          work.add(expr.receiver());
         }
       }
     }
