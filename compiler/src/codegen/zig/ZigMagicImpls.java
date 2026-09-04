@@ -19,7 +19,7 @@ public record ZigMagicImpls(
     MIRVisitor<String> gen,
     Function<MIR.MT, String> getTName,
     ast.Program p,
-    java.util.function.BiFunction<String, MIR.MT, String> shareCode) implements magic.MagicImpls<String> {
+    java.util.function.BiFunction<String, MIR.MT, String> generateShare) implements magic.MagicImpls<String> {
 
   private static final MagicTrait<MIR.E, String> EMPTY = new MagicTrait<>() {
     @Override public Optional<String> instantiate() { return Optional.empty(); }
@@ -196,7 +196,7 @@ public record ZigMagicImpls(
 
   private String ownedArg(MIR.E e) {
     if (e instanceof MIR.X) {
-      return shareCode.apply(e.accept(gen, true), e.t());
+      return generateShare.apply(e.accept(gen, true), e.t());
     }
     return e.accept(gen, true);
   }

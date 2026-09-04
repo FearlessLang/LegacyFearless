@@ -1,0 +1,40 @@
+package bench
+
+/// A node holding a list that is made to hold the node back. Reference counting
+/// alone can never reclaim the pair: each half keeps the other's count above
+/// zero, so only a cycle collection gives the two back.
+Node: { mut .cell: mut UList[mut Node] }
+
+/// Builds cyclic garbage, with ordinary arithmetic between one cycle and the
+/// next, and answers a checksum over that arithmetic.
+///
+/// Nothing outside a cycle names either half once `.one` returns, so what the
+/// process holds at its peak is the measurement: a run that collects cycles
+/// stays flat, and one that does not grows by the whole count.
+Cycles: {
+  .mid(lo: Nat, hi: Nat): Nat -> lo + ((hi - lo) / 2),
+
+  /// A binary split of the rounds `[lo, hi)`. Fearless does not tail-call this,
+  /// so one flat recursion over the whole count would overflow the stack.
+  .rounds(lo: Nat, hi: Nat): Nat -> (lo >= hi).if[Nat]{
+    .then -> 0,
+    .else -> ((hi - lo) <= 1).if[Nat]{
+      .then -> this.one(lo),
+      .else -> this.rounds(lo, this.mid(lo, hi))
+        + (this.rounds(this.mid(lo, hi), hi)),
+      },
+    },
+
+  /// One cycle, built and dropped, plus a little work that is not allocation.
+  .one(seed: Nat): Nat -> Block#[Nat]
+    .let[mut UList[mut Node]] cell = {UList#[mut Node]}
+    .do { cell.add(mut Node{.cell -> cell}) }
+    .return { this.work(seed, 0, 8) },
+
+  .work(seed: Nat, acc: Nat, n: Nat): Nat -> (n <= 0).if[Nat]{
+    .then -> acc.bitwiseAnd(1),
+    .else -> this.work(seed, ((acc * 31) + seed).bitwiseAnd(65535), n - 1),
+    },
+  }
+
+Test: Main {sys -> sys.io.println(Cycles.rounds(0, 4000000).str)}

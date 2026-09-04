@@ -4,12 +4,16 @@ import codegen.MIR;
 import id.Id;
 import magic.LiteralKind;
 import magic.Magic;
+import magic.MagicImpls;
 import main.java.ImplInfo;
 
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /// The reference-count operation that the possible run-time storage modes require.
 ///
@@ -54,6 +58,14 @@ public final class RcFreeTypes {
   /// What every cached package recorded about the types it declares, joined.
   private final ImplInfo cachedImpls;
   private final Map<Id.DecId, Strategy> cache = new HashMap<>();
+  /// Every declared type a value the runtime makes itself can flow into.
+  ///
+  /// No implementation list holds such a value: {@link RapidTypeAnalysis} has no object literal
+  /// to record for it, and {@link ImplInfo} counts object literals alone. Both tiers would
+  /// therefore answer from the Fearless implementations only, and a runtime storage mode the
+  /// Fearless ones do not use, such as the `primitiveContainer` of `base.Var`, would break the
+  /// specialised operation the answer picked.
+  private final Set<Id.DecId> runtimeSupplied;
 
   public RcFreeTypes(RapidTypeAnalysis rta, ast.Program program, Set<String> erasedPkgs) {
     this(rta, program, erasedPkgs, ImplInfo.EMPTY);
@@ -65,6 +77,21 @@ public final class RcFreeTypes {
     this.program = program;
     this.erasedPkgs = Set.copyOf(erasedPkgs);
     this.cachedImpls = cachedImpls;
+    this.runtimeSupplied = runtimeSuppliedSupers(program);
+  }
+
+  /// The supertypes of every declaration the runtime implements without an object literal: the
+  /// traits of {@link MagicImpls#MAGIC_DECS} and everything carrying {@link Magic#RuntimeImplemented}.
+  private static Set<Id.DecId> runtimeSuppliedSupers(ast.Program program) {
+    var supplied = new HashSet<>(MagicImpls.MAGIC_DECS);
+    Stream.concat(program.ds().keySet().stream(), program.inlineDs().keySet().stream())
+      .filter(d -> program.superDecIds(d).contains(Magic.RuntimeImplemented))
+      .forEach(supplied::add);
+    return supplied.stream()
+      // `superDecIds` needs a declaration, which a program that never imports the type lacks.
+      .filter(d -> program.ds().containsKey(d) || program.inlineDs().containsKey(d))
+      .flatMap(d -> program.superDecIds(d).stream())
+      .collect(Collectors.toUnmodifiableSet());
   }
 
   public Strategy strategy(MIR.MT t) {
@@ -118,6 +145,7 @@ public final class RcFreeTypes {
 
   private Strategy compute(Id.DecId declared) {
     if (isPrimitive(declared)) { return Strategy.NONE; }
+    if (runtimeSupplied.contains(declared)) { return Strategy.DYNAMIC; }
     var concretes = erasedPkgs.contains(declared.pkg())
       ? cachedImpls.get(declared).map(ImplInfo.Entry::implIds).orElse(List.of())
       : List.copyOf(rta.implsOf(declared));

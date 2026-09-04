@@ -15,8 +15,6 @@ pub const STACK_SIZE = 2 * 1024 * 1024;
 /// One page: 4KB on x86_64, 16KB on macOS ARM.
 const GUARD_SIZE = std.heap.page_size_min;
 
-const gc = @import("gc.zig");
-
 /// Stamped into every `Fiber` header so `currentFiber` can tell a real fiber
 /// mapping from whatever a masked stack pointer lands on. Cleared before the
 /// mapping goes away, which catches a use after destroy.
@@ -181,9 +179,6 @@ pub const Fiber = struct {
 	/// fiber is what makes that list unbounded with no buffer to retire.
 	shared_ready_next: ?*Fiber = null,
 
-	/// Slot in the GC's live-fiber registry, so `destroy` clears it in constant
-	/// time. See gc.zig for why stacks are scanned through `push_other_roots`.
-	registry_slot: gc.RegSlot = .{},
 
 	pub const State = enum {
 		Fresh,
@@ -333,10 +328,6 @@ pub const Fiber = struct {
 			else => @compileError("Unsupported architecture"),
 		}
 
-		// Only now that `sp` points at the prepared frame: the mark hook scans
-		// `sp`..stack top and may run the instant the slot goes live.
-		fiber.registry_slot = gc.registerFiber(@ptrCast(fiber));
-
 		return fiber;
 	}
 
@@ -350,10 +341,6 @@ pub const Fiber = struct {
 		// Catches a destroy of a worker's scheduler fiber, which owns no mapping.
 		std.debug.assert(self.hasMappedStack());
 
-		// Strictly before the unmap: the mark hook scans whatever a live slot
-		// points at, and an unmapped stack faults.
-		gc.unregisterFiber(self.registry_slot);
-
 		// Before the mapping can go away, so a second destroy or a `currentFiber` on
 		// a stale stack pointer fails the magic assert instead of using a dead header.
 		self.magic = 0;
@@ -365,34 +352,17 @@ pub const Fiber = struct {
 extern fn fiber_entry() void;
 pub extern fn switchTo(from: *Fiber, to: *Fiber) void;
 
-/// Switch fibers, updating the GC's stack bounds.
+/// Switch fibers.
 ///
 /// The shadow stack, tokens and scope live in the incoming fiber's header, so
 /// they arrive with the stack pointer. There is nothing to swap and no window in
 /// which the heartbeat could see a mismatched pair.
 pub fn switchFiber(from: *Fiber, to: *Fiber) void {
-	// mem_base and the stack pointer disagree from the setStackBottom below
-	// until the landing side's endStackSwitch, so block cycle collection.
-	gc.beginStackSwitch();
-
-	if (to.hasMappedStack()) {
-		gc.setStackBottom(to.stackTop());
-	}
-
 	switchTo(from, to);
-
-	// Back on `from`: restore the GC stack bounds.
-	if (!from.hasMappedStack()) {
-		// The scheduler runs on the OS stack, so let the GC re-detect it.
-		gc.setStackBottom(gc.currentStackBase());
-	}
-	gc.endStackSwitch();
 }
 
 /// Called from the assembly `fiber_entry`. Exported as a C symbol.
 export fn fiber_trampoline(fiber: *Fiber) callconv(.c) noreturn {
-	// Landing side of the switch that started this fiber.
-	gc.endStackSwitch();
 	fiber.state = .Running;
 	if (fiber.entry_fn) |entry| {
 		entry(fiber);
@@ -402,11 +372,6 @@ export fn fiber_trampoline(fiber: *Fiber) callconv(.c) noreturn {
 
 	const worker_mod = @import("worker.zig");
 	const worker = worker_mod.getCurrentWorker().?;
-
-	// mem_base points at the OS stack while the stack pointer is still on this
-	// fiber's; the scheduler ends the window after its switchFiber returns.
-	gc.beginStackSwitch();
-	gc.setStackBottom(gc.currentStackBase());
 
 	switchTo(fiber, &worker.scheduler_fiber);
 	unreachable;

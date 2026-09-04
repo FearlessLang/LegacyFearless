@@ -5,9 +5,8 @@ const std = @import("std");
 pub var runtime_io: std.Io = undefined;
 
 /// Whether `runtime_io` holds an interface yet. It starts `undefined`, so a read
-/// before `main` publishes one faults, and a test binary runs no `main` at all
-/// while still starting the destroyer thread through `recycleDestroy`. Threads
-/// that idle must ask this first; see `idle`.
+/// before `main` publishes one faults, and a test binary runs no `main` at all.
+/// Threads that idle must ask this first; see `idle`.
 var runtime_io_set: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 /// Set by `main` from `init.minimal.args.vector`: the process argv (argv[0] is

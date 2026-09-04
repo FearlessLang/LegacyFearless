@@ -5,10 +5,12 @@ import codegen.ParentWalker;
 import codegen.optimisations.StandInSelfArms;
 import codegen.optimisations.RapidTypeAnalysis;
 import codegen.optimisations.RecursionHotness;
+import codegen.optimisations.AcyclicTypes;
 import codegen.optimisations.RcFreeTypes;
 import codegen.optimisations.ReturnShapeAnalysis;
 import id.Id;
 import id.Id.DecId;
+import id.Mdf;
 import magic.Magic;
 import main.CompilationUnit;
 import utils.Bug;
@@ -36,6 +38,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
     // Recorded at CreateObj emission: the box hook needs the exact set, in order.
     final LinkedHashMap<DecId, SortedSet<MIR.X>> captureLists = new LinkedHashMap<>();
+    /// The captures of each type that the type system proved `imm`, by the name they carry in
+    /// `captureLists`. See {@link codegen.optimisations.AcyclicTypes}.
+    final LinkedHashMap<DecId, Set<String>> immCaptures = new LinkedHashMap<>();
 
     PackageState(String packageName) { this.packageName = packageName; }
   }
@@ -62,6 +67,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   /// The function whose body is being emitted, which is what `hotness` asks about.
   private MIR.FName currentFun;
   private final RcFreeTypes rcFree;
+  private final AcyclicTypes acyclic;
   /// What every package read back from a cache counted about the types it declares. It is the
   /// only account of an object literal such a package wrote: `pkgInfo` keeps method headers and
   /// top level declarations, so an inline declaration never reaches the program read back here.
@@ -74,7 +80,8 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     this.cachedPkg = cachedPkg;
     this.cachedImpls = cachedImpls;
     this.rcFree = new RcFreeTypes(rta, (ast.Program) p.p(), cachedPkg, cachedImpls);
-    magic = new ZigMagicImpls(this, t -> "rt.FatPtr", p.p(), this::shareCode);
+    this.acyclic = new AcyclicTypes(this.rcFree);
+    magic = new ZigMagicImpls(this, t -> "rt.FatPtr", p.p(), this::generateShare);
     sigBuilder = new ZigSigStringBuilder(p.p());
     this.p = p;
     this.funMap = p.pkgs().stream()
@@ -146,6 +153,108 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return declOfType(objId, "MFI_" + id.getSimpleName(objId) + "_" + methName);
   }
 
+  /// The Zig scalar a primitive travels as, with the intrinsic module that boxes and unboxes it.
+  record Scalar(String zigType, String rtModule) {
+    /// The bytes the scalar takes in an `extern struct`, which is also its alignment there.
+    int bytes() { return zigType.equals("u8") ? 1 : 8; }
+  }
+
+  private static final Map<DecId, Scalar> SCALARS = Map.of(
+    Magic.Nat, new Scalar("u64", "nat_rt"),
+    Magic.Int, new Scalar("i64", "int_rt"),
+    Magic.Float, new Scalar("f64", "float_rt"),
+    Magic.Byte, new Scalar("u8", "byte_rt"));
+
+  private Optional<Scalar> scalarOf(MIR.MT t) {
+    return t.name().flatMap(d -> Optional.ofNullable(SCALARS.get(d)));
+  }
+
+  /// How each declared parameter of the wrapper `MF_<objId>_<methName>` travels: a scalar where
+  /// the parameter's declared type is one of the primitives the runtime keeps inside the
+  /// `FatPtr`, and empty where it stays a `FatPtr`.
+  ///
+  /// A `FatPtr` is two machine words, so a five-parameter method overflows the six-register
+  /// argument budget and the caller writes the rest to the outgoing argument area on every call.
+  /// Passing the primitives as bare scalars keeps the call in registers. The body still sees
+  /// `FatPtr`s: the `make` this adds is inline and folds against the `deref` at the call site.
+  ///
+  /// This is keyed on the wrapper's own identity rather than on a resolved callee, and the
+  /// definition, the dispatch thunk and every call site all read it through this one method.
+  /// A caller that resolves the callee differently from the definition -- or fails to resolve it
+  /// at all, which `ReturnShapeAnalysis.calleeOf` reports as empty -- therefore still agrees
+  /// about the shape. Deriving it twice would let a call pass `FatPtr`s to a wrapper declared
+  /// with scalars, which Zig refuses to compile: a Fearless program that type-checks would fail
+  /// to build.
+  ///
+  /// The body keeps the boxed shape, so a promoted frame still copies its locals as `FatPtr`s
+  /// and `VPFCodegen` needs no separate agreement; its combining call reads the shape from here
+  /// like every other call site.
+  private WrapperShape wrapperShape(DecId objId, Id.MethName mName, Mdf mdf) {
+    return shapeCache.computeIfAbsent(new WrapperKey(objId, mName, mdf),
+      k -> new WrapperShape(singletonReceiver(k.objId()),
+        shapeOf(findFun(k.objId(), k.mName(), k.mdf(), typeDefOf(k.objId())))));
+  }
+
+  /// How a wrapper takes its arguments: whether the receiver is left out of the signature
+  /// altogether, and the scalar each declared parameter travels as.
+  private record WrapperShape(boolean elideRecv, List<Optional<Scalar>> params) {}
+
+  /// Whether the receiver of a wrapper on `objId` carries no information. An object literal
+  /// that captures nothing is one value the runtime gives a static header, so the wrapper
+  /// rebuilds it from its vtable alone and no caller has to pass it.
+  ///
+  /// The answer comes from the lowered program and from the implInfo of a cached package, both
+  /// of which read the same as {@link main.java.ImplInfo} does. Reading it off the capture
+  /// structs this compilation has emitted so far would instead depend on emission order, and a
+  /// call site emitted before the literal would then disagree with the wrapper.
+  private boolean singletonReceiver(DecId objId) {
+    // The text of a cached package is written once and read by later compilations, and the
+    // reader has no source to derive the receiver decision from. Such a wrapper keeps the
+    // receiver it was published with.
+    var owningPkg = owningPackageOf(objId);
+    var pkg = owningPkg != null ? owningPkg : emitTargetPkg;
+    if (pkg == null || CompilationUnit.isCached(pkg)) { return false; }
+    var typeDef = typeDefOf(objId);
+    if (typeDef != null) {
+      return typeDef.singletonInstance().filter(k -> k.captures().isEmpty()).isPresent();
+    }
+    return false;
+  }
+
+  /// The wrapper a call to `methName` on `objId` reaches, identified the way the emitted name is.
+  private record WrapperKey(DecId objId, Id.MethName mName, Mdf mdf) {}
+
+  private final Map<WrapperKey, WrapperShape> shapeCache = new HashMap<>();
+
+  /// The shape the declared parameter types of `f` give, with no unboxing at all where `f` is
+  /// unknown or has a transient variant -- three further sites assemble a transient call's
+  /// arguments themselves.
+  private List<Optional<Scalar>> shapeOf(MIR.FName f) {
+    if (f == null) { return List.of(); }
+    var fun = funMap.get(f);
+    if (fun == null || hasTransientVariant(f)) { return List.of(); }
+    int arity = f.m().num();
+    if (arity > fun.args().size()) { return List.of(); }
+    var res = fun.args().subList(0, arity).stream().map(x -> scalarOf(x.t())).toList();
+    return res.stream().anyMatch(Optional::isPresent) ? res : List.of();
+  }
+
+  /// The type `objId` names, where any loaded package holds it.
+  private MIR.TypeDef typeDefOf(DecId objId) {
+    return p.pkgs().stream()
+      .filter(pkg -> pkg.defs().containsKey(objId))
+      .map(pkg -> pkg.defs().get(objId))
+      .findFirst()
+      .orElse(null);
+  }
+
+  /// The declared type of parameter `i` as it is written in a signature.
+  private String paramType(List<Optional<Scalar>> unboxed, int i) {
+    return i < unboxed.size() && unboxed.get(i).isPresent()
+      ? unboxed.get(i).orElseThrow().zigType()
+      : "rt.FatPtr";
+  }
+
   /// A declaration that belongs beside `objId`, qualified when that is another package.
   private String declOfType(DecId objId, String name) {
     var owningPkg = owningPackageOf(objId);
@@ -155,10 +264,101 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return name;
   }
 
+  /// `args` in the wrapper's own order -- receiver first, then the declared parameters -- with
+  /// each parameter the wrapper takes as a scalar unboxed.
+  ///
+  /// Every site that builds a wrapper call goes through here, so a call cannot disagree with the
+  /// signature [`wrapperShape`] gave the wrapper.
+  List<String> unboxArgs(DecId objId, Id.MethName mName, Mdf mdf, List<String> args) {
+    var shape = wrapperShape(objId, mName, mdf);
+    var unboxed = shape.params();
+    var scalarArgs = new ArrayList<>(args);
+    for (int i = 0; i < unboxed.size() && i + 1 < scalarArgs.size(); i++) {
+      int at = i + 1;
+      unboxed.get(i).ifPresent(sc ->
+        scalarArgs.set(at, sc.rtModule() + ".deref(" + scalarArgs.get(at) + ")"));
+    }
+    if (shape.elideRecv() && !scalarArgs.isEmpty()) { scalarArgs.removeFirst(); }
+    return scalarArgs;
+  }
+
+  /// How one argument of a generated function travels: left out where the function rebuilds the
+  /// value from nothing, unboxed where a primitive travels as a bare scalar, and a `FatPtr`
+  /// otherwise.
+  record ArgSlot(boolean elided, Optional<Scalar> scalar) {
+    static final ArgSlot BOXED = new ArgSlot(false, Optional.empty());
+    static final ArgSlot ELIDED = new ArgSlot(true, Optional.empty());
+    boolean isBoxed() { return !elided && scalar.isEmpty(); }
+    /// The bytes this argument takes as a field of an `extern struct`, and its alignment there.
+    int bytes() { return scalar.map(Scalar::bytes).orElse(16); }
+    int align() { return scalar.map(Scalar::bytes).orElse(8); }
+  }
+
+  /// How the generated function `f` takes each of its arguments, index-parallel to `args()`.
+  ///
+  /// A function takes its declared parameters, then its receiver, then its captures. The
+  /// declared parameters stay boxed: they are owned, they drop, and the wrapper in front of the
+  /// function is where their marshalling is decided. From the receiver onwards every argument is
+  /// lent, so the function may take a primitive as a bare scalar and box it back with the inline
+  /// `make`, which folds against the caller's `deref`.
+  ///
+  /// A receiver slot that {@link StandInSelfArms} reports is left out altogether: the arm is
+  /// reached only from a branch that passes a singleton it never reads.
+  ///
+  /// Every definition and every call site reads the shape from here, so a call cannot disagree
+  /// with the signature the function was emitted with.
+  List<ArgSlot> funShape(MIR.FName f) {
+    return funShapeCache.computeIfAbsent(f, this::computeFunShape);
+  }
+
+  private final Map<MIR.FName, List<ArgSlot>> funShapeCache = new HashMap<>();
+
+  private List<ArgSlot> computeFunShape(MIR.FName f) {
+    var fun = funMap.get(f);
+    if (fun == null) { return List.of(); }
+    var selfIdx = selfArgIndex(fun);
+    var standIn = standInSelfSlot(f);
+    var slots = new ArrayList<ArgSlot>();
+    for (int i = 0; i < fun.args().size(); i++) {
+      if (i < selfIdx) { slots.add(ArgSlot.BOXED); continue; }
+      if (i == selfIdx && standIn.isPresent() && standIn.getAsInt() == i) {
+        slots.add(ArgSlot.ELIDED);
+        continue;
+      }
+      slots.add(scalarOf(fun.args().get(i).t())
+        .map(sc -> new ArgSlot(false, Optional.of(sc)))
+        .orElse(ArgSlot.BOXED));
+    }
+    return slots;
+  }
+
+  /// `args`, index-parallel to the arguments of `f`, marshalled the way `f` takes them: an
+  /// elided argument drops out and an unboxed one takes the `deref` that names its scalar.
+  List<String> shapeArgs(MIR.FName f, List<String> args) {
+    var shape = funShape(f);
+    if (shape.size() != args.size()) { return args; }
+    var res = new ArrayList<String>();
+    for (int i = 0; i < args.size(); i++) {
+      var slot = shape.get(i);
+      if (slot.elided()) { continue; }
+      var arg = args.get(i);
+      res.add(slot.scalar().map(sc -> sc.rtModule() + ".deref(" + arg + ")").orElse(arg));
+    }
+    return res;
+  }
+
+  /// The singleton a caller passes where an arm's receiver would go, which is also what the arm
+  /// rebuilds in that slot when the slot is left out of its signature.
+  String standInSelf() {
+    return "rt.obj_k_singleton(&" + vtableRef(new DecId("base.True", 0)) + ")";
+  }
+
   /// A call to the per-literal wrapper of `objId`, taking the inline-only wrapper when the
   /// body being emitted is hot and the callee is not in the same component. That is the
   /// hotness a profile would supply; LLVM holds every other part of the decision.
-  String methCallRef(DecId objId, String methName, MIR.FName callee, List<String> args) {
+  String methCallRef(DecId objId, MIR.MCall original, MIR.FName callee, List<String> args) {
+    var methName = id.getMName(original.mdf(), original.name());
+    args = unboxArgs(objId, original.name(), original.mdf(), args);
     var argList = String.join(", ", args);
     var plain = methWrapperRef(objId, methName) + "(" + argList + ")";
     if (!hotness.inlineTarget(currentFun, callee)) { return plain; }
@@ -262,9 +462,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       : rcStrategy(t);
   }
 
-  String shareCode(String expr, MIR.MT t) { return shareCode(expr, rcStrategy(t)); }
+  String generateShare(String expr, MIR.MT t) { return generateShare(expr, rcStrategy(t)); }
 
-  String shareCode(String expr, RcFreeTypes.Strategy strategy) {
+  String generateShare(String expr, RcFreeTypes.Strategy strategy) {
     return switch (strategy) {
       case NONE -> expr;
       case HEAP -> expr + ".share_heap()";
@@ -273,7 +473,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     };
   }
 
-  String decrementCode(String expr, MIR.MT t) {
+  String generateDecrement(String expr, MIR.MT t) {
     var method = switch (rcStrategy(t)) {
       case NONE -> null;
       case HEAP -> "rc_decrement_heap";
@@ -283,11 +483,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return method == null ? "" : expr + "." + method + "()";
   }
 
-  String decrementAsCode(String expr, MIR.MT t, String releasingWorkerId) {
-    return decrementAsCode(expr, rcStrategy(t), releasingWorkerId);
+  String generateDecrementAs(String expr, MIR.MT t, String releasingWorkerId) {
+    return generateDecrementAs(expr, rcStrategy(t), releasingWorkerId);
   }
 
-  String decrementAsCode(String expr, RcFreeTypes.Strategy strategy, String releasingWorkerId) {
+  String generateDecrementAs(String expr, RcFreeTypes.Strategy strategy, String releasingWorkerId) {
     var method = switch (strategy) {
       case NONE -> null;
       case HEAP -> "rc_decrement_heap_as";
@@ -386,8 +586,10 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       target = methWrapperRef(d.concreteType(), id.getMName(original.mdf(), original.name())) + "_transient";
       var ops = slottedCallOperands(original, gen, checkMagic, callee);
       operandPrelude.addAll(ops.prelude());
-      operands.add(ops.recv());
-      operands.addAll(ops.args());
+      var recvAndArgs = new ArrayList<String>();
+      recvAndArgs.add(ops.recv());
+      recvAndArgs.addAll(ops.args());
+      operands.addAll(unboxArgs(d.concreteType(), original.name(), original.mdf(), recvAndArgs));
     } else if (e instanceof MIR.GuardedCall g) {
       var callee = shapes.calleeOf(g).filter(f -> hasTransientVariant(f.name()));
       if (System.getenv("FEART_DBG_SLOT") != null) {
@@ -416,9 +618,14 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
         original.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
         original.originalRet());
       var slotVarName = "fear_slot_" + transientCounter++;
+      var hotOperands = new ArrayList<String>();
+      hotOperands.add(recvName);
+      hotOperands.addAll(argNames);
+      var hotArgs = String.join(", ",
+        unboxArgs(g.concreteType(), original.name(), original.mdf(), hotOperands));
       var hot = methWrapperRef(g.concreteType(), id.getMName(original.mdf(), original.name()))
-        + "_transient(&" + slotVarName + "_obj, " + recvName
-        + (argNames.isEmpty() ? "" : ", " + String.join(", ", argNames)) + ")";
+        + "_transient(&" + slotVarName + "_obj"
+        + (hotArgs.isEmpty() ? "" : ", " + hotArgs) + ")";
       var argsTuple = argNames.isEmpty() ? ".{}" : ".{ " + String.join(", ", argNames) + " }";
       var ownedName = slotVarName + "_owned";
       var coldBlock = "fear_blk_" + blockCounter++;
@@ -432,7 +639,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       return Optional.of(new SlotPieces(slotVarName, guardedCaps, operandPrelude,
         "if (" + takenName + ") " + hot + " else " + cold,
         "if (" + takenName + ") rt.drop_transient_obj(" + guardedCaps + ", &" + slotVarName
-          + "_obj) else " + decrementCode(ownedName, e.t()),
+          + "_obj) else " + generateDecrement(ownedName, e.t()),
         "var " + takenName + ": bool = false;\nvar " + ownedName + ": rt.FatPtr = undefined;\n"));
     } else if (e instanceof MIR.StaticCall s && funMap.containsKey(s.fun()) && hasTransientVariant(s.fun())) {
       summaryObj = shapes.freshObj(s.fun()).orElseThrow();
@@ -484,7 +691,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   String ownedExpr(MIR.E e, MIRVisitor<String> gen, boolean checkMagic) {
     if (e instanceof MIR.X) {
       var code = e.accept(gen, checkMagic);
-      return shareCode(code, e.t());
+      return generateShare(code, e.t());
     }
     if (e instanceof MIR.BoolExpr b) {
       return boolExpr(b, gen, checkMagic, true);
@@ -495,7 +702,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   String returnExpr(MIR.E e, boolean checkMagic) {
     if (e instanceof MIR.X x) {
       var code = visitX(x, checkMagic);
-      return shareCode(code, x.t());
+      return generateShare(code, x.t());
     }
     if (e instanceof MIR.BoolExpr b) {
       return boolExpr(b, this, checkMagic, true);
@@ -512,7 +719,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   String boxExpr(MIR.E e, MIRVisitor<String> gen, boolean checkMagic) {
     return switch (e) {
       case MIR.Box box -> boxExpr(box.inner(), gen, checkMagic);
-      case MIR.X x -> isRcFree(x) ? x.accept(gen, checkMagic) : boxBorrowedCode(x.accept(gen, checkMagic), x.t());
+      case MIR.X x -> isRcFree(x) ? x.accept(gen, checkMagic) : generateBoxBorrowed(x.accept(gen, checkMagic), x.t());
       case MIR.CreateObj createObj -> boxCreateObj(createObj, gen, checkMagic);
       case MIR.BoolExpr boolExpr -> boxBoolExpr(boolExpr, gen, checkMagic);
       case MIR.SumMatch ignored -> e.accept(gen, checkMagic);
@@ -520,8 +727,8 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       case MIR.DirectCall ignored -> e.accept(gen, checkMagic);
       case MIR.GuardedCall ignored -> e.accept(gen, checkMagic);
       case MIR.StaticCall ignored -> e.accept(gen, checkMagic);
-      case MIR.UpdatableListAsIdFnCall ignored -> boxOwnedCode(e.accept(gen, checkMagic));
-      case MIR.Block ignored -> boxOwnedCode(e.accept(gen, checkMagic));
+      case MIR.UpdatableListAsIdFnCall ignored -> generateBoxOwned(e.accept(gen, checkMagic));
+      case MIR.Block ignored -> generateBoxOwned(e.accept(gen, checkMagic));
     };
   }
 
@@ -550,10 +757,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
         valueTailStatements(boxExpr(e, this, checkMagic), dropNames);
       case MIR.DirectCall call -> {
         var ops = callOperands(call.original(), this, checkMagic);
-        var methName = id.getMName(call.original().mdf(), call.original().name());
         var callee = shapes.calleeOf(call).map(MIR.Fun::name).orElse(null);
         yield tailCallStatements(ops,
-            refs -> methCallRef(call.concreteType(), methName, callee, refs), dropNames)
+            refs -> methCallRef(call.concreteType(), call.original(), callee, refs), dropNames)
           .orElseGet(() -> valueTailStatements(boxExpr(e, this, checkMagic), dropNames));
       }
       case MIR.MCall call when operandWantsSlot(call, Optional.empty())
@@ -607,9 +813,19 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       sb.append("const ").append(tmp).append(" = ").append(operand).append(";\n");
       refs.add(tmp);
     }
+    var call = build.apply(refs);
+    appendUnusedOperandDiscards(sb, refs, call);
     appendDrops(sb, dropNames.stream().filter(drop -> !moved.cancelled().contains(drop)).toList());
-    sb.append("return ").append(build.apply(refs)).append(";\n");
+    sb.append("return ").append(call).append(";\n");
     return Optional.of(sb.toString());
+  }
+
+  /// Discards each operand temporary the emitted call does not name. A shaped call leaves out
+  /// the arguments the callee rebuilds for itself, and Zig refuses a local nothing reads.
+  private void appendUnusedOperandDiscards(StringBuilder sb, List<String> refs, String call) {
+    var unused = refs.stream().filter(ref -> !call.contains(ref)).toList();
+    if (unused.isEmpty()) { return; }
+    sb.append("_ = .{ ").append(String.join(", ", unused)).append(" };\n");
   }
 
   /// The operands with each cancelled share rewritten, and the names whose drop that retires.
@@ -635,7 +851,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var cancelled = new LinkedHashSet<Drop>();
     for (var drop : dropNames) {
       var name = drop.name();
-      var share = shareCode(name, drop.t());
+      var share = generateShare(name, drop.t());
       var uses = 0;
       var shares = 0;
       var lastIdx = -1;
@@ -693,15 +909,15 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   private void appendDrops(StringBuilder sb, List<Drop> dropNames) {
     for (var drop : dropNames) {
-      sb.append(decrementCode(drop.name(), drop.t())).append(";\n");
+      sb.append(generateDecrement(drop.name(), drop.t())).append(";\n");
     }
   }
 
-  private String boxBorrowedCode(String expr, MIR.MT t) {
-    return boxOwnedCode(shareCode(expr, t));
+  private String generateBoxBorrowed(String expr, MIR.MT t) {
+    return generateBoxOwned(generateShare(expr, t));
   }
 
-  private String boxOwnedCode(String expr) {
+  private String generateBoxOwned(String expr) {
     var label = "fear_blk_" + blockCounter++;
     var tmp = "fear_box_" + blockCounter++;
     return label + ": {\nconst " + tmp + " = " + expr + ";\nbreak :" + label + " " + tmp + ".box_transient();\n}";
@@ -711,7 +927,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var magicImpl = magic.get(createObj);
     if (checkMagic && magicImpl.isPresent()) {
       var res = magicImpl.get().instantiate();
-      if (res.isPresent()) { return boxOwnedCode(res.get()); }
+      if (res.isPresent()) { return generateBoxOwned(res.get()); }
     }
 
     var objId = createObj.concreteT().id();
@@ -734,9 +950,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
         continue;
       }
       var tmp = field + "_boxed";
-      prelude.add("const " + field + "_shared = " + shareCode(x.accept(gen, checkMagic), x.t()) + ";");
+      prelude.add("const " + field + "_shared = " + generateShare(x.accept(gen, checkMagic), x.t()) + ";");
       prelude.add("const " + tmp + " = " + field + "_shared.box_transient();");
-      prelude.add("defer " + decrementCode(tmp, x.t()) + ";");
+      prelude.add("defer " + generateDecrement(tmp, x.t()) + ";");
       boxedFields.add("." + field + " = " + tmp);
     }
     return withTransientPrelude(prelude,
@@ -759,11 +975,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     // captures are the same `MIR.X`s as in the enclosing scope, which is what makes the
     // inlining correct, so they emit correctly here.
     var args = new ArrayList<String>();
-    args.add("rt.obj_k_singleton(&" + vtableRef(new DecId("base.True", 0)) + ")");
+    args.add(standInSelf());
     // Lent, not given, the same as every other capture: the arm reads the enclosing scope's
     // own names, which stay alive across the call, and the arm does not drop them.
     fun.args().stream().skip(1).forEach(x -> args.add(x.accept(gen, checkMagic)));
-    return Optional.of(funRef(fName) + "(" + String.join(", ", args) + ")");
+    return Optional.of(funRef(fName) + "(" + String.join(", ", shapeArgs(fName, args)) + ")");
   }
 
   /// The arms of a `SumMatch` as a chain of vtable tests, with the call as written behind them.
@@ -808,11 +1024,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       // The arm owns what it is given, so the capture is shared out of the receiver. The
       // parameter it fills is written at this call site, so its declared type is known here and
       // names a strategy narrower than the general storage-mode dispatch.
-      args.add(shareCode(read, rcStrategy(fun.args().get(i).t())));
+      args.add(generateShare(read, rcStrategy(fun.args().get(i).t())));
     }
-    args.add("rt.obj_k_singleton(&" + vtableRef(new DecId("base.True", 0)) + ")");
+    args.add(standInSelf());
     fun.args().stream().skip(arity + 1).forEach(x -> args.add(x.accept(gen, checkMagic)));
-    return callRef(arm.arm(), funRef(arm.arm()), args);
+    return callRef(arm.arm(), funRef(arm.arm()), shapeArgs(arm.arm(), args));
   }
 
   /// The call as written, for a receiver no arm tests. The matcher is built here and only here.
@@ -830,13 +1046,13 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     String recv = expr.condition().accept(gen, checkMagic);
 
     String thenBody = deInlinedBranch(expr.then(), gen, checkMagic)
-      .map(this::boxOwnedCode)
+      .map(this::generateBoxOwned)
       .orElseGet(() -> switch (this.funMap.get(expr.then()).body()) {
         case MIR.Block b -> boxExpr(b.original(), gen, checkMagic);
         case MIR.E e -> boxExpr(e, gen, checkMagic);
       });
     String elseBody = deInlinedBranch(expr.else_(), gen, checkMagic)
-      .map(this::boxOwnedCode)
+      .map(this::generateBoxOwned)
       .orElseGet(() -> switch (this.funMap.get(expr.else_()).body()) {
         case MIR.Block b -> boxExpr(b.original(), gen, checkMagic);
         case MIR.E e -> boxExpr(e, gen, checkMagic);
@@ -922,6 +1138,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
         "pub const " + id.getSimpleName(objId) + "_Captures = extern struct {\n"
         + fields + "\n" + rcFreeFieldsDecl(createObj.captures()) + "};");
       currentState().captureLists.put(objId, createObj.captures());
+      currentState().immCaptures.put(objId, createObj.immCaptures());
     }
 
     for (var meth : createObj.meths()) {
@@ -958,13 +1175,21 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   }
 
   private MIR.FName findFunForSig(DecId objId, MIR.Sig sig, MIR.TypeDef typeDef) {
+    return findFun(objId, sig.name(), sig.mdf(), typeDef);
+  }
+
+  /// The function the wrapper of `mName` on `objId` calls: the literal's own first, then up the
+  /// inheritance chain. `wrapperShape` reads the parameter shape off this, so every site that
+  /// names the wrapper agrees with the signature it was emitted with.
+  private MIR.FName findFun(DecId objId, Id.MethName mName, Mdf mdf, MIR.TypeDef typeDef) {
     for (boolean capturesSelf : new boolean[]{false, true}) {
-      var fName = new MIR.FName(objId, sig.name(), capturesSelf, sig.mdf());
+      var fName = new MIR.FName(objId, mName, capturesSelf, mdf);
       if (funMap.containsKey(fName)) { return fName; }
     }
+    if (typeDef == null) { return null; }
     for (var parent : ParentWalker.of(p, typeDef).skip(1).toList()) {
       for (boolean capturesSelf : new boolean[]{false, true}) {
-        var fName = new MIR.FName(parent.name(), sig.name(), capturesSelf, sig.mdf());
+        var fName = new MIR.FName(parent.name(), mName, capturesSelf, mdf);
         if (funMap.containsKey(fName)) { return fName; }
       }
     }
@@ -980,14 +1205,28 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var mfName = "MF_" + typeName + "_" + methName;
     var tName = "T_" + typeName + "_" + methName;
 
+    var shape = wrapperShape(objId, sig.name(), sig.mdf());
+    var unboxed = shape.params();
     var params = new ArrayList<String>();
-    params.add("self_m: rt.FatPtr");
-    for (var x : sig.xs()) {
-      params.add(id.varName(x.name()) + ": rt.FatPtr");
+    // A literal that captures nothing has a receiver the wrapper rebuilds from its vtable, so
+    // no caller has to pass it. The dispatch thunk still takes one: every vtable slot has the
+    // one all-`FatPtr` type.
+    if (!shape.elideRecv()) { params.add("self_m: rt.FatPtr"); }
+    for (int i = 0; i < sig.xs().size(); i++) {
+      params.add(id.varName(sig.xs().get(i).name()) + ": " + paramType(unboxed, i));
     }
     var paramStr = String.join(", ", params);
+    var recvDecl = shape.elideRecv()
+      ? "const self_m = rt.obj_k_singleton(&" + vtableRef(objId) + ");\n"
+      : "";
 
-    var paramDiscard = "_ = .{ " + params.stream().map(p -> p.split(":")[0].trim()).collect(Collectors.joining(", ")) + " };\n";
+    var paramNames = params.stream().map(p -> p.split(":")[0].trim()).collect(Collectors.toCollection(ArrayList::new));
+    var paramDiscard = paramNames.isEmpty() ? "" : "_ = .{ " + String.join(", ", paramNames) + " };\n";
+    // The rebuilt receiver is a local, so it joins the discard the parameters take. A wrapper
+    // that only ever traps declares none of it.
+    var bodyNames = new ArrayList<>(paramNames);
+    if (shape.elideRecv()) { bodyNames.add("self_m"); }
+    var bodyDiscard = "_ = .{ " + String.join(", ", bodyNames) + " };\n";
     if (isUnreachable || meth.fName().isEmpty()) {
       currentState().functions.add("pub fn " + mfName + "(" + paramStr + ") callconv(.c) rt.FatPtr {\n"
         + paramDiscard
@@ -998,8 +1237,11 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       var fun = funMap.get(meth.fName().get());
       if (fun != null) {
         var simpleArgs = new ArrayList<String>();
-        for (var x : sig.xs()) {
-          simpleArgs.add(id.varName(x.name()));
+        for (int i = 0; i < sig.xs().size(); i++) {
+          var n = id.varName(sig.xs().get(i).name());
+          simpleArgs.add(i < unboxed.size() && unboxed.get(i).isPresent()
+            ? unboxed.get(i).orElseThrow().rtModule() + ".make(" + n + ")"
+            : n);
         }
         simpleArgs.add("self_m");
         for (var capture : meth.captures()) {
@@ -1013,11 +1255,13 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
         var tracePush = "shadow_stack_mod.tracePush(&" + vtableRef(objId) + ", " + sigBuilder.inlineHash(sig) + ");\n"
           + "defer shadow_stack_mod.tracePop();\n";
+        var forwarded = String.join(", ", shapeArgs(meth.fName().get(), simpleArgs));
 
         currentState().functions.add("pub fn " + mfName + "(" + paramStr + ") callconv(.c) rt.FatPtr {\n"
-          + paramDiscard
+          + recvDecl
+          + bodyDiscard
           + tracePush
-          + "return " + fRef + "(" + String.join(", ", simpleArgs) + ");\n"
+          + "return " + fRef + "(" + forwarded + ");\n"
           + "}");
 
         // A call site of this compilation asked for it, or this package is cached and a later
@@ -1025,9 +1269,10 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
         if (hotness.inlineWanted(meth.fName().get()) || publishesInlineWrapper(meth.fName().get())) {
           currentState().functions.add("pub inline fn MFI_" + typeName + "_" + methName
             + "(" + paramStr + ") rt.FatPtr {\n"
-            + paramDiscard
+            + recvDecl
+            + bodyDiscard
             + tracePush
-            + "return @call(.always_inline, " + fRef + ", .{ " + String.join(", ", simpleArgs) + " });\n"
+            + "return @call(.always_inline, " + fRef + ", .{ " + forwarded + " });\n"
             + "}");
         }
 
@@ -1037,15 +1282,18 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
           var summaryObj = shapes.freshObj(meth.fName().get()).orElseThrow();
           emitCreateObj(summaryObj, true);
           var caps = capturesRef(summaryObj.concreteT().id());
-          currentState().functions.add("pub fn " + mfName + "_transient(fear_out: *rt.GenObjectLayoutType(" + caps + "), " + paramStr + ") callconv(.c) rt.FatPtr {\n"
-            + paramDiscard
+          currentState().functions.add("pub fn " + mfName + "_transient(fear_out: *rt.GenObjectLayoutType(" + caps + ")"
+            + (paramStr.isEmpty() ? "" : ", " + paramStr) + ") callconv(.c) rt.FatPtr {\n"
+            + recvDecl
+            + bodyDiscard
             + tracePush
-            + "return " + fRef + "_transient(fear_out, " + String.join(", ", simpleArgs) + ");\n"
+            + "return " + fRef + "_transient(fear_out"
+            + (forwarded.isEmpty() ? "" : ", " + forwarded) + ");\n"
             + "}");
         }
       } else {
         currentState().functions.add("pub fn " + mfName + "(" + paramStr + ") callconv(.c) rt.FatPtr {\n"
-          + "_ = .{ " + params.stream().map(p -> p.split(":")[0].trim()).collect(Collectors.joining(", ")) + " };\n"
+          + paramDiscard
           + "unreachable;\n"
           + "}");
       }
@@ -1057,14 +1305,59 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       thunkParams.add(id.varName(x.name()) + ": rt.FatPtr");
     }
     var thunkCallArgs = new ArrayList<String>();
-    thunkCallArgs.add("self_m");
-    for (var x : sig.xs()) {
-      thunkCallArgs.add(id.varName(x.name()));
+    if (!shape.elideRecv()) { thunkCallArgs.add("self_m"); }
+    for (int i = 0; i < sig.xs().size(); i++) {
+      var name = id.varName(sig.xs().get(i).name());
+      thunkCallArgs.add(i < unboxed.size() && unboxed.get(i).isPresent()
+        ? unboxed.get(i).orElseThrow().rtModule() + ".deref(" + name + ")"
+        : name);
     }
 
     currentState().functions.add("fn " + tName + "(" + String.join(", ", thunkParams) + ") callconv(.c) rt.FatPtr {\n"
+      + (shape.elideRecv() ? "_ = .{ self_m };\n" : "")
       + "return " + mfName + "(" + String.join(", ", thunkCallArgs) + ");\n"
       + "}");
+  }
+
+  /// Whether the object literal `objId` names is acyclic by construction.
+  ///
+  /// The capture list is read back from the package that owns the type, the way
+  /// {@link #createObjHasCaptures} reads the capture struct: a vtable may be
+  /// emitted while a different package is the emit target.
+  private boolean isGreenType(DecId objId) {
+    var captures = captureListFor(objId);
+    if (captures == null) {
+      // No capture list to read. An object literal that captures nothing holds
+      // no reference at all, so nothing can lead from it back to itself; an
+      // object whose captures this compilation cannot read is one green cannot
+      // be proved for, and an unproved green leaks every cycle through it.
+      return !createObjHasCaptures(objId);
+    }
+    return acyclic.isGreen(captures, immCapturesFor(objId));
+  }
+
+  /// What the type system proved `imm` about the captures of `objId`, read back from the
+  /// package that owns the type the way {@link #captureListFor} reads the capture list.
+  private Set<String> immCapturesFor(DecId objId) {
+    var owningPkg = typeToPackage.get(objId);
+    if (owningPkg != null) {
+      var state = packageStates.get(owningPkg);
+      if (state != null && state.immCaptures.containsKey(objId)) {
+        return state.immCaptures.get(objId);
+      }
+    }
+    return currentState().immCaptures.getOrDefault(objId, Set.of());
+  }
+
+  private SortedSet<MIR.X> captureListFor(DecId objId) {
+    var owningPkg = typeToPackage.get(objId);
+    if (owningPkg != null) {
+      var state = packageStates.get(owningPkg);
+      if (state != null && state.captureLists.containsKey(objId)) {
+        return state.captureLists.get(objId);
+      }
+    }
+    return currentState().captureLists.get(objId);
   }
 
   private boolean createObjHasCaptures(DecId objId) {
@@ -1147,6 +1440,14 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       ? ".storage_mode = .transient,\n"
       : isSingletonType(objId) ? ".storage_mode = .singleton,\n" : "";
     var boxLine = isTransient ? ".box_fn = &box_" + typeName + ",\n" : "";
+    // The cycle collector enumerates an object literal's captures from the same
+    // comptime type its drop hook uses, so an object with no captures needs no
+    // hook and gets none.
+    var traceLine = createObjHasCaptures(objId)
+      ? ".trace_fn = rt.captureTraceFn(" + capturesRef(objId) + "),\n" : "";
+    // An object whose captures are all `imm` is acyclic by construction, so it
+    // is never a candidate cycle root. See AcyclicTypes.
+    var greenLine = isGreenType(objId) ? ".green = true,\n" : "";
 
     var vtKey = typeName + (isTransient ? "_transient" : "");
     currentState().vtableDefs.put(vtKey,
@@ -1157,6 +1458,8 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       + ".method_names = " + methodNamesStr + ",\n"
       + storageModeLine
       + boxLine
+      + traceLine
+      + greenLine
       + "};");
   }
 
@@ -1184,9 +1487,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
         boxedFields.add("." + field + " = captures." + field);
         continue;
       }
-      sb.append("const ").append(field).append("_shared = ").append(shareCode("captures." + field, x.t())).append(";\n");
+      sb.append("const ").append(field).append("_shared = ").append(generateShare("captures." + field, x.t())).append(";\n");
       sb.append("const ").append(field).append("_boxed = ").append(field).append("_shared.box_transient();\n");
-      sb.append("defer ").append(decrementCode(field + "_boxed", x.t())).append(";\n");
+      sb.append("defer ").append(generateDecrement(field + "_boxed", x.t())).append(";\n");
       boxedFields.add("." + field + " = " + field + "_boxed");
     }
     sb.append("return rt.obj_k(").append(capturesName).append(", &").append(vtableRef(objId)).append(", .{ ")
@@ -1203,9 +1506,6 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   private void emitFun(MIR.Fun fun) {
     var name = id.getFName(fun.name());
-    var paramNames = fun.args().stream()
-      .map(x -> id.varName(x.name()))
-      .toList();
     // Only the declared params are owned, so only they drop. Everything from the receiver
     // onwards is lent: the receiver by its caller (see `receiverOperand`), and each capture
     // by the receiver that holds it. Captures are final, so a lent capture cannot be
@@ -1217,18 +1517,18 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       .filter(x -> !isRcFree(x))
       .map(x -> new Drop(id.varName(x.name()), x.t()))
       .toList();
-    var params = fun.args().stream()
-      .map(x -> id.varName(x.name()) + ": rt.FatPtr")
-      .collect(Collectors.joining(", "));
+    var signature = funSignature(fun);
+    var paramNames = signature.discardNames();
+    var params = signature.params();
 
     var vpfCodegen = new VPFCodegen(this);
     var vpfInfo = vpfEnabled ? vpfCodegen.findVPFCall(fun.body()) : null;
-    int topLevelLocalsSize = (fun.args().size() + 1) * 16;
+    int topLevelLocalsSize = vpfCodegen.localsSize(fun, 0);
     if (vpfInfo != null && topLevelLocalsSize <= VPFCodegen.LOCALS_COPY_LIMIT) {
-      vpfCodegen.emitVPFFun(fun, name, paramNames, dropNames, params, vpfInfo);
+      vpfCodegen.emitVPFFun(fun, name, signature, dropNames, vpfInfo);
       // The variant is the plain sequential shape of the body, so a slot-filling call site
       // takes the sequential path.
-      emitTransientVariant(fun, name, paramNames, dropNames, params);
+      emitTransientVariant(fun, name, signature, dropNames);
       return;
     }
 
@@ -1238,13 +1538,14 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     } else {
       var body = returnExpr(fun.body(), true);
       for (var drop : dropNames) {
-        statements.append("defer ").append(decrementCode(drop.name(), drop.t())).append(";\n");
+        statements.append("defer ").append(generateDecrement(drop.name(), drop.t())).append(";\n");
       }
       statements.append(body.equals("unreachable") ? "unreachable;\n" : "return " + body + ";\n");
     }
 
     var sb = new StringBuilder();
     sb.append("pub fn ").append(name).append("(").append(params).append(") callconv(.c) rt.FatPtr {\n");
+    sb.append(signature.prologue());
     if (!paramNames.isEmpty()) {
       sb.append("_ = .{ ");
       sb.append(String.join(", ", paramNames));
@@ -1255,7 +1556,48 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     sb.append("}");
     currentState().functions.add(sb.toString());
 
-    emitTransientVariant(fun, name, paramNames, dropNames, params);
+    emitTransientVariant(fun, name, signature, dropNames);
+  }
+
+  /// The emitted signature of a generated function: the parameter list as it is written, the
+  /// declarations that give the body every argument back as a `FatPtr`, and the names the
+  /// leading discard must cover.
+  record FunSignature(String params, String prologue, List<String> discardNames,
+                      List<String> scalarNames) {}
+
+  /// The signature `fun` is emitted with, following {@link #funShape}. An argument the shape
+  /// leaves out is rebuilt in the prologue, and one it unboxes arrives under its own scalar name
+  /// and is boxed back there. The body therefore reads `FatPtr`s throughout.
+  FunSignature funSignature(MIR.Fun fun) {
+    var shape = funShape(fun.name());
+    var params = new ArrayList<String>();
+    var discardNames = new ArrayList<String>();
+    var scalarNames = new ArrayList<String>();
+    var prologue = new StringBuilder();
+    for (int i = 0; i < fun.args().size(); i++) {
+      var n = id.varName(fun.args().get(i).name());
+      var slot = i < shape.size() ? shape.get(i) : ArgSlot.BOXED;
+      if (slot.elided()) {
+        prologue.append("const ").append(n).append(" = ").append(standInSelf()).append(";\n");
+        discardNames.add(n);
+        scalarNames.add(null);
+        continue;
+      }
+      if (slot.scalar().isPresent()) {
+        var sc = slot.scalar().orElseThrow();
+        params.add(n + "_s: " + sc.zigType());
+        prologue.append("const ").append(n).append(" = ").append(sc.rtModule())
+          .append(".make(").append(n).append("_s);\n");
+        discardNames.add(n);
+        scalarNames.add(n + "_s");
+        continue;
+      }
+      params.add(n + ": rt.FatPtr");
+      discardNames.add(n);
+      scalarNames.add(n);
+    }
+    return new FunSignature(String.join(", ", params), prologue.toString(),
+      List.copyOf(discardNames), scalarNames);
   }
 
   /// The callee-fills-caller-slot variant, `<name>_transient(fear_out, params...)`. The caller
@@ -1263,17 +1605,20 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   /// generated function whose return value is a transient. It must stay unreachable from every
   /// vtable entry and plain `MF_` wrapper: only a slot-owning call site and the `_transient`
   /// wrapper may name it, or the transient escapes its frame.
-  private void emitTransientVariant(MIR.Fun fun, String name, List<String> paramNames,
-                                    List<Drop> dropNames, String params) {
+  private void emitTransientVariant(MIR.Fun fun, String name, FunSignature signature,
+                                    List<Drop> dropNames) {
     if (!hasTransientVariant(fun.name())) { return; }
     var summaryObj = shapes.freshObj(fun.name()).orElseThrow();
     emitCreateObj(summaryObj, true);
     var caps = capturesRef(summaryObj.concreteT().id());
+    var params = signature.params();
+    var paramNames = signature.discardNames();
 
     var sb = new StringBuilder();
     sb.append("pub fn ").append(name).append("_transient(fear_out: *rt.GenObjectLayoutType(")
       .append(caps).append(")").append(params.isEmpty() ? "" : ", " + params)
       .append(") callconv(.c) rt.FatPtr {\n");
+    sb.append(signature.prologue());
     if (!paramNames.isEmpty()) {
       sb.append("_ = .{ ").append(String.join(", ", paramNames)).append(" };\n");
     }
@@ -1296,7 +1641,12 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
         var original = d.original();
         var ops = callOperands(original, this, true);
         var target = methWrapperRef(d.concreteType(), id.getMName(original.mdf(), original.name())) + "_transient";
-        appendTailForward(sb, ops, target, dropNames, !dropsBorrowedRecv(original, dropNames));
+        var operands = new ArrayList<String>();
+        operands.add(ops.recv());
+        operands.addAll(ops.args());
+        var shaped = new CallOperands(null,
+          unboxArgs(d.concreteType(), original.name(), original.mdf(), operands), ops.prelude());
+        appendTailForward(sb, shaped, target, dropNames, !dropsBorrowedRecv(original, dropNames));
       }
       case MIR.StaticCall s -> {
         var prelude = new ArrayList<String>();
@@ -1329,6 +1679,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var call = new StringBuilder(target).append("(fear_out");
     for (var ref : refs) { call.append(", ").append(ref); }
     call.append(")");
+    appendUnusedOperandDiscards(sb, refs, call.toString());
     if (hoistDrops) {
       appendDrops(sb, dropNames);
       sb.append("return ").append(call).append(";\n");
@@ -1414,7 +1765,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     }
     var tmp = "fear_recv_" + blockCounter++;
     prelude.add("const " + tmp + " = " + ownedExpr(e, gen, checkMagic) + ";");
-    prelude.add("defer " + decrementCode(tmp, e.t()) + ";");
+    prelude.add("defer " + generateDecrement(tmp, e.t()) + ";");
     return tmp;
   }
 
@@ -1530,12 +1881,19 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
                                       List<String> prelude, boolean allowSlots) {
     var callee = funMap.get(call.fun());
     var selfIdx = call.fun().m().num();
+    var shape = funShape(call.fun());
     var args = new ArrayList<String>();
     for (int i = 0; i < call.args().size(); i++) {
+      // A slot the callee leaves out of its signature is never built: the callee rebuilds the
+      // value it stands for, so the expression written here has nothing to fill.
+      if (i < shape.size() && shape.get(i).elided()) { continue; }
       // The callee borrows the receiver and the captures, so each takes the path a receiver
       // takes in `slottedCallOperands`.
       if (i >= selfIdx) {
-        args.add(receiverOperand(call.args().get(i), gen, checkMagic, prelude));
+        var recv = receiverOperand(call.args().get(i), gen, checkMagic, prelude);
+        args.add(i < shape.size()
+          ? shape.get(i).scalar().map(sc -> sc.rtModule() + ".deref(" + recv + ")").orElse(recv)
+          : recv);
         continue;
       }
       var slotOk = allowSlots && callee != null && callee.args().size() == call.args().size()
@@ -1565,13 +1923,12 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   String emitDirectCall(MIR.DirectCall call, MIRVisitor<String> gen, boolean checkMagic) {
     var original = call.original();
     var ops = slottedCallOperands(original, gen, checkMagic, shapes.calleeOf(call));
-    var methName = id.getMName(original.mdf(), original.name());
     var all = new ArrayList<String>();
     all.add(ops.recv());
     all.addAll(ops.args());
     var callee = shapes.calleeOf(call).map(MIR.Fun::name).orElse(null);
     return withTransientPrelude(ops.prelude(),
-      methCallRef(call.concreteType(), methName, callee, all));
+      methCallRef(call.concreteType(), original, callee, all));
   }
 
   @Override
@@ -1607,15 +1964,14 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     }
     var argNames = names.subList(1, names.size());
     var argsTuple = argNames.isEmpty() ? ".{}" : ".{ " + String.join(", ", argNames) + " }";
-    var methName = id.getMName(original.mdf(), original.name());
     sb.append("break :").append(block)
       .append(" if (").append(guardTest(recvName, call.concreteType())).append(") ")
-      .append(methCallRef(call.concreteType(), methName,
+      .append(methCallRef(call.concreteType(), original,
         shapes.calleeOf(call).map(MIR.Fun::name).orElse(null), names));
     // The second arm of a type with two implementations. The virtual call stays behind it, so
     // the arm only ever removes a dispatch and never decides one.
     call.altType().ifPresent(alt -> sb.append(" else if (").append(guardTest(recvName, alt))
-      .append(") ").append(methCallRef(alt, methName,
+      .append(") ").append(methCallRef(alt, original,
         shapes.calleeOfAlt(call).map(MIR.Fun::name).orElse(null), names)));
     sb.append(" else rt.call(").append(recvName).append(", ").append(hashExpr).append(", ")
       .append(argsTuple).append(", @src());\n}");

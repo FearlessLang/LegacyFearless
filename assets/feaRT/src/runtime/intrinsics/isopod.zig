@@ -1,6 +1,8 @@
 const std = @import("std");
 const objs = @import("../objs.zig");
 const gc = @import("../gc.zig");
+const cycles = @import("../cycles.zig");
+const worker_mod = @import("../worker.zig");
 const str_rt = @import("strings/index.zig");
 const bool_intrinsics = @import("bool.zig");
 const root = @import("root");
@@ -10,9 +12,15 @@ const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
 
 pub const IsoCell = extern struct {
-    ref_count: std.atomic.Value(u32),
+    header: objs.RcCellHeader,
     value: std.atomic.Value(?*FatPtr),
 };
+
+/// Enumerates the one reference the pod holds, for the cycle collector.
+fn isopod_trace(node: *anyopaque, visit: objs.VisitFn, ctx: *anyopaque) callconv(.c) void {
+    const cell: *IsoCell = @ptrCast(@alignCast(node));
+    if (cell.value.load(.monotonic)) |box| visit(ctx, box.*);
+}
 
 pub const VT_IsoPod: objs.VTable = .{
     .type_name = "<rt impl for base.IsoPod/1>",
@@ -20,6 +28,7 @@ pub const VT_IsoPod: objs.VTable = .{
     .methods = &.{},
     .method_names = &.{},
     .storage_mode = .primitiveContainer,
+    .trace_fn = isopod_trace,
 };
 
 pub fn make(value: FatPtr) FatPtr {
@@ -27,36 +36,22 @@ pub fn make(value: FatPtr) FatPtr {
     val_ptr.* = value;
     const cell = gc.allocator.create(IsoCell) catch @panic("OOM");
     cell.* = .{
-        .ref_count = std.atomic.Value(u32).init(1),
+        .header = .born,
         .value = std.atomic.Value(?*FatPtr).init(val_ptr),
     };
-    return .{
-        .data = .{ .iso_cell = cell },
-        .vt = &VT_IsoPod,
-    };
+    return .{ .data = .{ .iso_cell = cell }, .vt = &VT_IsoPod };
 }
 
-pub fn retain(cell: *IsoCell) void {
-    const count = cell.ref_count.fetchAdd(1, .monotonic);
-    const referencer_limit = std.math.maxInt(u32) - 4096;
-    if (count >= referencer_limit) {
-        @branchHint(.unlikely);
-        @panic("Too many references");
-    }
+/// Releases the one reference a dead pod holds. Part of the collector's
+/// `Release`, which runs as soon as the count reaches zero.
+pub fn drop_children(cell: *IsoCell, releasing_worker_id: u32) void {
+    if (cell.value.load(.monotonic)) |box| box.*.rc_decrement_as(releasing_worker_id);
 }
 
-/// `releasing_worker_id` is the worker on whose behalf this release runs. It
-/// travels down from the start of the drop chain.
-pub noinline fn release(cell: *IsoCell, releasing_worker_id: u32) void {
-    const old_count = cell.ref_count.fetchSub(1, .release);
-    if (std.debug.runtime_safety) std.debug.assert(old_count != 0);
-    if (old_count != 1) return;
-
-    _ = cell.ref_count.load(.acquire);
-    if (cell.value.swap(null, .monotonic)) |old_ptr| {
-        old_ptr.*.rc_decrement_as(releasing_worker_id);
-        gc.recycleDestroy(FatPtr, old_ptr, .isopod_release);
-    }
+/// Gives a dead pod's storage back. Part of the collector's `Free`.
+pub fn free_cell(cell: *IsoCell, releasing_worker_id: u32) void {
+    _ = releasing_worker_id;
+    if (cell.value.swap(null, .monotonic)) |box| gc.recycleDestroy(FatPtr, box, .isopod_release);
     gc.recycleDestroy(IsoCell, cell, .isopod_release);
 }
 
@@ -96,6 +91,7 @@ fn consume(self: FatPtr) FatPtr {
 }
 
 fn next(self: FatPtr, new_value: FatPtr) FatPtr {
+    cycles.noteStore(self, new_value);
     const cell = self.data.iso_cell;
     const new_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
     new_ptr.* = new_value;

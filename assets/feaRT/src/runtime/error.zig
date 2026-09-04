@@ -1,22 +1,32 @@
 const std = @import("std");
 const objs = @import("objs.zig");
 const gc = @import("gc.zig");
+const worker_mod = @import("worker.zig");
 const trace = @import("errors/trace.zig");
 
 const FatPtr = objs.FatPtr;
 
-/// Immutable error payload cell. `ref_count` sits at offset 0 so a
+/// Immutable error payload cell. The common cell header sits at offset 0 so a
 /// `.primitiveContainer` FatPtr can be retained through the uniform container
-/// path in `objs.zig`. Nothing after `ref_count` is ever written again.
+/// path in `objs.zig`. Nothing after the header is ever written again.
 pub const ErrorCell = extern struct {
-    ref_count: std.atomic.Value(u32),
+    header: objs.RcCellHeader,
     info: *FatPtr,
     /// Rendered on an uncaught crash. Null when `trace_frames` is off.
     trace: ?*trace.TraceSnapshot = null,
 };
 
 comptime {
-    std.debug.assert(@offsetOf(ErrorCell, "ref_count") == 0);
+    std.debug.assert(@offsetOf(ErrorCell, "header") == 0);
+}
+
+/// Enumerates the one reference the cell holds, for the cycle collector.
+///
+/// The contents are fixed at construction and the cell holds a reference to
+/// them, so the visitor's retain needs no lock.
+fn error_trace(node: *anyopaque, visit: objs.VisitFn, ctx: *anyopaque) callconv(.c) void {
+    const cell: *ErrorCell = @ptrCast(@alignCast(node));
+    visit(ctx, cell.info.*);
 }
 
 /// Deterministic error payload (`Error!`). Caught by `Try` and `CapTry`.
@@ -26,6 +36,7 @@ pub const VT_RuntimeError: objs.VTable = .{
     .methods = &.{},
     .method_names = &.{},
     .storage_mode = .primitiveContainer,
+    .trace_fn = error_trace,
 };
 
 /// Non-deterministic error payload (panic / hardware fault). Caught only by
@@ -36,6 +47,7 @@ pub const VT_RuntimeNdError: objs.VTable = .{
     .methods = &.{},
     .method_names = &.{},
     .storage_mode = .primitiveContainer,
+    .trace_fn = error_trace,
 };
 
 pub const ErrorTag = enum { none, deterministic, nd };
@@ -45,7 +57,7 @@ fn makeCell(info: FatPtr, comptime vt: *const objs.VTable) FatPtr {
     box.* = info;
     const cell = gc.allocator.create(ErrorCell) catch @panic("OOM");
     cell.* = .{
-        .ref_count = std.atomic.Value(u32).init(1),
+        .header = .born,
         .info = box,
         .trace = trace.captureTrace(),
     };
@@ -77,15 +89,15 @@ pub fn traceOf(p: FatPtr) ?*trace.TraceSnapshot {
     return p.data.err_cell.trace;
 }
 
-/// RC drop hook, routed from `objs.rc_decrement_as`'s `.primitiveContainer`
-/// branch. `releasing_worker_id` is the identity releasing the cell.
-pub noinline fn release(cell: *ErrorCell, releasing_worker_id: u32) void {
-    const old_count = cell.ref_count.fetchSub(1, .release);
-    if (std.debug.runtime_safety) std.debug.assert(old_count != 0);
-    if (old_count != 1) return;
-
-    _ = cell.ref_count.load(.acquire);
+/// Releases the one reference a dead cell holds. Part of the collector's
+/// `Release`, which runs as soon as the count reaches zero.
+pub fn drop_children(cell: *ErrorCell, releasing_worker_id: u32) void {
     cell.info.*.rc_decrement_as(releasing_worker_id);
+}
+
+/// Gives a dead cell's storage back. Part of the collector's `Free`.
+pub fn free_cell(cell: *ErrorCell, releasing_worker_id: u32) void {
+    _ = releasing_worker_id;
     gc.recycleDestroy(FatPtr, cell.info, .error_release);
     gc.recycleDestroy(ErrorCell, cell, .error_release);
 }

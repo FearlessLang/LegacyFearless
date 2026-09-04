@@ -44,9 +44,21 @@ public sealed interface MIR {
   record Fun(FName name, List<X> args, MT ret, E body) implements MIR {
     public Fun withBody(E body) { return new Fun(name, args, ret, body); }
   }
-  record CreateObj(MT t, String selfName, List<Meth> meths, List<Meth> unreachableMs, SortedSet<X> captures) implements E {
+  /// `immCaptures` names the captures the type system proved `imm`, by the name the capture
+  /// carries in {@link #captures}. Lowering erases a generic to its use-site modifier, which
+  /// loses the bound that makes `X` in `A[X]` an `imm` type, so the answer is taken where the
+  /// bounds are still in scope and travels here. A capture left out of the set is one no
+  /// answer was found for, never one that was answered "no": a missing name costs an
+  /// optimisation, never correctness.
+  record CreateObj(MT t, String selfName, List<Meth> meths, List<Meth> unreachableMs, SortedSet<X> captures,
+                   Set<String> immCaptures) implements E {
     public CreateObj {
       captures = Collections.unmodifiableSortedSet(captures);
+      immCaptures = Set.copyOf(immCaptures);
+    }
+
+    public CreateObj(MT t, String selfName, List<Meth> meths, List<Meth> unreachableMs, SortedSet<X> captures) {
+      this(t, selfName, meths, unreachableMs, captures, Set.of());
     }
 
     public MT.Plain concreteT() {

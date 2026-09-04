@@ -7,6 +7,8 @@ const JoinObligation = @import("sync/join_obligation.zig").JoinObligation;
 const MpmcBoundedQueue = @import("sync/mpmc.zig").MpmcBoundedQueue;
 const ChaseLevDeque = @import("sync/chase_lev.zig").ChaseLevDeque;
 const gc = @import("gc.zig");
+const safepoint = @import("safepoint.zig");
+const heap = @import("heap.zig");
 const process = @import("process_singletons.zig");
 const log = @import("log.zig");
 const scope_mod = @import("scope.zig");
@@ -160,14 +162,20 @@ pub const Worker = struct {
 		return @intCast(self.id + 1);
 	}
 
-	/// Fold the biased half of every object handed back to this worker into its
-	/// shared half. One relaxed load when there is nothing to do.
+	/// The point between fiber slices where this worker answers the rest of the
+	/// runtime: it folds the biased half of every object a foreign worker handed
+	/// back, and it parks if a cycle collection is waiting for the world to stop.
 	///
-	/// The scheduler loop calls this off a fiber stack, so the drain carries the
-	/// worker rather than reading it off the stack pointer.
-	pub inline fn drainMergeQueue(self: *Worker) void {
-		if (self.merge_queue_head.load(.monotonic) == null) return;
-		objs.drainMergeQueue(&self.merge_queue_head, self.workerId());
+	/// Both are one relaxed load when there is nothing to do, which is every
+	/// scheduler turn of a program that makes no cycles.
+	///
+	/// The scheduler loop calls this off a fiber stack, so the checkpoint carries
+	/// the worker rather than reading it off the stack pointer.
+	pub inline fn checkpoint(self: *Worker) void {
+		if (self.merge_queue_head.load(.monotonic) != null) {
+			objs.drainMergeQueue(&self.merge_queue_head, self.workerId());
+		}
+		safepoint.poll(self.workerId());
 	}
 
 	/// Set the fiber state to Parked and switch to the scheduler.
@@ -206,14 +214,14 @@ pub noinline fn getCurrentWorker() ?*Worker {
 ///
 /// VALID ONLY ON A FIBER STACK. Masking any other stack pointer lands on
 /// unrelated memory, and a value read from there would put a biased reference
-/// count in the hands of a thread it does not belong to. The scheduler
-/// loop reaches reference counting through `Worker.drainMergeQueue` and
+/// count in the hands of a thread it does not belong to. The scheduler loop
+/// reaches reference counting through `Worker.checkpoint` and
 /// `Worker.recycleTask`, both of which pass `Worker.workerId` down instead.
 ///
 /// A unit test runs on the test runner's own stack, which is no fiber, so the
-/// test build answers 0. That is the value an object with no biased half carries,
-/// and it sends every operation down the shared path, which is what the reference
-/// counts a test reads through `ObjectHeader.refCountForTest` assume.
+/// test build answers 0. That is the value an object with no biased half
+/// carries, and it sends every operation down the shared path, which is what the
+/// reference counts a test reads through `ObjectHeader.refCountForTest` assume.
 pub inline fn currentWorkerId() u32 {
 	if (builtin.is_test) return 0;
 	return fiber_mod.currentFiber().worker_id;
@@ -272,6 +280,10 @@ pub const WorkerPool = struct {
 	num_workers: usize,
 
 	pub fn init(num_workers: usize) !*WorkerPool {
+		// Every worker owns one heap, and a heap is found by indexing an array
+		// with the worker's id. Ids run from 1, so the last one must still be a
+		// slot that array has.
+		if (num_workers + 1 >= heap.MAX_HEAPS) return error.TooManyWorkers;
 		const workers = try gc.allocator.alloc(Worker, num_workers);
 		for (workers, 0..) |*w, i| {
 			w.* = .{
@@ -476,21 +488,22 @@ fn findTask(worker: *Worker) ?*StolenTask {
 }
 
 fn workerLoop(worker: *Worker) void {
-	if (worker.id != 0) {
-		gc.register_thread();
-	}
-
 	tls_current_worker = worker;
+	gc.tls_heap_id = worker.workerId();
 	log.tls_trace_buffer = &worker.trace_buf;
+	// A collection waits on this slot from here until the loop gives it back.
+	safepoint.enlist(worker.workerId());
 
 	// The signal alt stack and recovery stack are what make a fiber stack
 	// overflow on this worker a catchable ND error.
 	signals.initThreadSignalStacks(worker.workerId());
 
 	while (!global_done.load(.monotonic)) {
-		// 0. Release the objects foreign workers handed back. Nothing else may
-		// touch their biased counts, so a scheduler turn is where this belongs.
-		worker.drainMergeQueue();
+		// 0. Release the objects foreign workers handed back, and answer a
+		// collection waiting for the world to stop. A scheduler turn is the point
+		// every worker reaches, which is what makes stopping the world something
+		// a collection can wait for.
+		worker.checkpoint();
 
 		// 1. A runnable fiber.
 		if (findFiber(worker)) |fiber| {
@@ -567,9 +580,8 @@ fn workerLoop(worker: *Worker) void {
 		process.idle(1);
 	}
 
+	// Nothing waits on this worker after the slot goes back.
+	safepoint.retire(worker.workerId());
 	gc.dump_rc_delta();
 	signals.deinitThreadSignalStacks();
-	if (worker.id != 0) {
-		gc.unregister_thread();
-	}
 }

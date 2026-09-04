@@ -4,7 +4,7 @@ const assert = std.debug.assert;
 
 const gc = @import("gc.zig");
 const allocator = gc.allocator;
-const alloc_recycler = @import("alloc_recycler.zig");
+const heap = @import("heap.zig");
 
 const nat_rt = @import("intrinsics/nat.zig");
 const int_rt = @import("intrinsics/int.zig");
@@ -12,10 +12,13 @@ const float_rt = @import("intrinsics/float.zig");
 const byte_rt = @import("intrinsics/byte.zig");
 const var_rt = @import("intrinsics/var.zig");
 const list_rt = @import("intrinsics/list.zig");
+const list_storage = @import("intrinsics/lists/storage.zig");
+const flow_ops = @import("intrinsics/flows/ops_node.zig");
 const isopod_rt = @import("intrinsics/isopod.zig");
 const error_rt = @import("error.zig");
 const op_counters = @import("op_counters.zig");
 const worker_mod = @import("worker.zig");
+const cycles = @import("cycles.zig");
 
 // FNV-1a 64-bit, evaluated at comptime.
 pub fn hash_signature(comptime str: []const u8) u64 {
@@ -48,16 +51,31 @@ pub const ObjectHeader = extern struct {
 	shared: std.atomic.Value(u32),
 	/// References held for the worker named by `biased_worker_id`. No other thread
 	/// may touch it.
+	///
+	/// A collection folds this half into `shared` for every node it reaches and
+	/// then uses the word as that node's cyclic reference count. See [`nodeRef`]:
+	/// there is no room for a field of its own inside a header this size, and a
+	/// folded half is dead for the rest of the object's life.
 	biased: u32,
 	drop_fn: ?DropFn,
-	alloc_size: usize,
 	/// The worker whose `biased` half covers references, as its id plus one, or 0
 	/// when no worker holds a biased reference. Atomic because other workers read
 	/// it while this one clears it, but `.monotonic` is enough: only a thread that
 	/// reads its own id can take a biased path, and every other reader sees a
 	/// foreign id or 0 and takes the shared path.
 	biased_worker_id: std.atomic.Value(u32),
-	alloc_align_log2: u8,
+	/// A [`Colour`], as its integer value. It lives in the tail padding the
+	/// fields above leave, so it costs nothing.
+	colour: u8 = 0,
+	/// True while the candidate-root buffer of the cycle collector holds this
+	/// object. It keeps one node out of the buffer twice, and it holds `Release`
+	/// back from freeing a node the buffer still names.
+	buffered: bool = false,
+	/// A [`Green`], as its integer value. Written once by the thread that builds
+	/// the object, before any other thread can name it, and never written again:
+	/// a reader reached this object through a publication that already ordered
+	/// the write, so it needs no atomic.
+	green: u8 = 0,
 
 	/// The reference count as seen by a thread with no biased half. A unit test
 	/// binds no worker, so every operation takes the shared path and this is the
@@ -68,9 +86,10 @@ pub const ObjectHeader = extern struct {
 };
 
 comptime {
-	// The recycler matches exact size classes, so a bigger header would push
-	// every object into the next class.
-	assert(@sizeOf(ObjectHeader) == 32);
+	// Size classes step by 8 bytes over the range object bodies fall in, so the
+	// header decides which class an object lands in. A body is the header plus
+	// one word per capture, and this size keeps that sum on a class boundary.
+	assert(@sizeOf(ObjectHeader) == 24);
 }
 
 /// Releases the reference-counted captures of a dying object. The second
@@ -107,10 +126,61 @@ inline fn isQueued(word: u32) bool {
 	return word & QUEUED != 0;
 }
 
+/// The colour lattice of Bacon and Rajan. The collector runs the algorithm; the
+/// value lives in a node header, which is why the enum is declared here.
+///
+/// `black` is zero, so a fresh header is born black with no initialiser.
+pub const Colour = enum(u8) {
+	/// In use, or already reclaimed.
+	black = 0,
+	/// Under trial deletion: a possible member of a cycle.
+	grey = 1,
+	/// A proposed member of a garbage cycle.
+	white = 2,
+	/// A possible root of a cycle, held by the Roots buffer.
+	purple = 3,
+	/// A member of a garbage cycle that a collection is taking apart.
+	red = 5,
+};
+
+/// Whether an object can take part in a reference cycle.
+///
+/// A cycle needs a mutable container, and an object that cannot reach one cannot
+/// be in one, whatever its reference capability. Green is therefore per
+/// *instance* and not per type: with generics erased, one vtable serves
+/// `Opt[Nat]` and `Opt[mut Var]` alike, and only the captures an instance was
+/// actually built with answer the question.
+///
+/// `unset` is zero, so a header path that does not answer reads as `not_green`,
+/// which costs a collection pass over an object that never needed one and never
+/// loses a cycle.
+pub const Green = enum(u8) { unset = 0, green = 1, not_green = 2 };
+
+/// Called once for every reference a node holds.
+pub const VisitFn = *const fn (ctx: *anyopaque, edge: FatPtr) callconv(.c) void;
+
+/// Enumerates the references a node holds. `node` is the node header: an
+/// [`ObjectHeader`] for a `.heap` object, the cell itself for a
+/// `.primitiveContainer`.
+///
+/// A vtable with no `trace_fn` reads as a leaf. That loses collection through
+/// such a node and never costs correctness: fewer edges means fewer trial
+/// decrements, so a node can only look more live than it is.
+pub const TraceFn = *const fn (node: *anyopaque, visit: VisitFn, ctx: *anyopaque) callconv(.c) void;
+
+/// Gives back what a node holds that is not reference counted: a boxed value, a
+/// list buffer, a hash table.
+///
+/// This is the paper's `Free(S)`, and it is separate from the drop hook because
+/// `Release(S)` decrements a node's children as soon as its count reaches zero
+/// but must leave the node itself standing while the candidate-root buffer holds
+/// it. `MarkRoots` frees it later.
+pub const FreeFn = *const fn (node: *anyopaque, releasing_worker_id: u32) callconv(.c) void;
+
 pub const StorageMode = enum(u8) {
 	/// No ObjectHeader: `data` is the value.
 	primitive,
-	/// Heap header, refcounted, freed through the recycler or GC_free.
+	/// Heap header, refcounted, freed back to its size class.
 	heap,
 	/// Static header, skipped on share and rc_decrement. The immortal reference
 	/// count these carry is padding: the fast path tests `storage_mode`.
@@ -133,6 +203,13 @@ pub const VTable = struct {
 	storage_mode: StorageMode = .heap,
 	drop_fn: ?DropFn = null,
 	box_fn: ?BoxFn = null,
+	trace_fn: ?TraceFn = null,
+	free_fn: ?FreeFn = null,
+	/// True when the compiler proved that every instance of this object literal
+	/// is green, whatever it was built with. It is the fast path over
+	/// [`Green`]: an instance whose vtable answers here needs no per-capture
+	/// read at construction.
+	green: bool = false,
 
 	pub fn method_name(self: *const VTable, hash: u64) ?[]const u8 {
 		for (self.method_names, self.hashes) |name, h| {
@@ -164,7 +241,7 @@ pub const FatPtr = extern struct {
 		switch (ptr.vt.storage_mode) {
 			.primitive, .singleton, .transient => return copy,
 			.primitiveContainer => {
-				containerRetain(@ptrCast(ptr.data.cell));
+				containerRetain(cellHeader(copy));
 				return copy;
 			},
 			.heap => {
@@ -173,6 +250,17 @@ pub const FatPtr = extern struct {
 				return copy;
 			},
 		}
+	}
+
+	/// [`share`] for a caller that carries the worker identity rather than
+	/// reading it off the stack pointer.
+	///
+	/// Biased reference counting reads the identity itself, off the stack
+	/// pointer, so the two differ only in what they cost a caller that already
+	/// holds one.
+	pub fn share_as(ptr: *const FatPtr, acquiring_worker_id: u32) FatPtr {
+		_ = acquiring_worker_id;
+		return ptr.share();
 	}
 
 	/// Take one reference where the static type admits `.heap` alone, so the count goes up with
@@ -204,8 +292,9 @@ pub const FatPtr = extern struct {
 	pub fn rc_decrement(ptr: *const FatPtr) void {
 		switch (ptr.vt.storage_mode) {
 			.primitive, .singleton, .transient => return,
-			.heap, .primitiveContainer =>
-				ptr.rc_decrement_as(worker_mod.currentWorkerId()),
+			.primitiveContainer =>
+				containerRelease(ptr.*, worker_mod.currentWorkerId()),
+			.heap => rc_decrement_slow(ptr.*, worker_mod.currentWorkerId()),
 		}
 	}
 
@@ -216,14 +305,8 @@ pub const FatPtr = extern struct {
 	pub fn rc_decrement_as(ptr: *const FatPtr, releasing_worker_id: u32) void {
 		switch (ptr.vt.storage_mode) {
 			.primitive, .singleton, .transient => return,
-			.primitiveContainer =>
-				if (ptr.vt == &var_rt.VT_Var)
-					var_rt.release(ptr.data.cell, releasing_worker_id)
-				else if (ptr.vt == &isopod_rt.VT_IsoPod)
-					isopod_rt.release(ptr.data.iso_cell, releasing_worker_id)
-				else if (ptr.vt == &error_rt.VT_RuntimeError or ptr.vt == &error_rt.VT_RuntimeNdError)
-					error_rt.release(ptr.data.err_cell, releasing_worker_id),
-			.heap => rc_decrement_slow(ptr, releasing_worker_id),
+			.primitiveContainer => containerRelease(ptr.*, releasing_worker_id),
+			.heap => rc_decrement_slow(ptr.*, releasing_worker_id),
 		}
 	}
 
@@ -231,14 +314,14 @@ pub const FatPtr = extern struct {
 	/// [`share_heap`].
 	pub inline fn rc_decrement_heap(ptr: *const FatPtr) void {
 		if (std.debug.runtime_safety) assert(ptr.vt.storage_mode == .heap);
-		rc_decrement_slow(ptr, worker_mod.currentWorkerId());
+		rc_decrement_slow(ptr.*, worker_mod.currentWorkerId());
 	}
 
 	/// [`rc_decrement_heap`] for a caller that carries the identity rather than reading it off the
 	/// stack pointer.
 	pub inline fn rc_decrement_heap_as(ptr: *const FatPtr, releasing_worker_id: u32) void {
 		if (std.debug.runtime_safety) assert(ptr.vt.storage_mode == .heap);
-		rc_decrement_slow(ptr, releasing_worker_id);
+		rc_decrement_slow(ptr.*, releasing_worker_id);
 	}
 
 	/// Release one reference where the static type admits `.heap` and `.transient` only. The
@@ -246,7 +329,7 @@ pub const FatPtr = extern struct {
 	/// only the heap arm reads it.
 	pub inline fn rc_decrement_heap_or_transient(ptr: *const FatPtr) void {
 		if (ptr.vt.storage_mode == .heap) {
-			rc_decrement_slow(ptr, worker_mod.currentWorkerId());
+			rc_decrement_slow(ptr.*, worker_mod.currentWorkerId());
 		} else if (std.debug.runtime_safety) assert(ptr.vt.storage_mode == .transient);
 	}
 
@@ -254,18 +337,18 @@ pub const FatPtr = extern struct {
 	/// reading it off the stack pointer.
 	pub inline fn rc_decrement_heap_or_transient_as(ptr: *const FatPtr, releasing_worker_id: u32) void {
 		if (ptr.vt.storage_mode == .heap) {
-			rc_decrement_slow(ptr, releasing_worker_id);
+			rc_decrement_slow(ptr.*, releasing_worker_id);
 		} else if (std.debug.runtime_safety) assert(ptr.vt.storage_mode == .transient);
 	}
 
-	noinline fn rc_decrement_slow(ptr: *const FatPtr, releasing_worker_id: u32) void {
+	noinline fn rc_decrement_slow(node: FatPtr, releasing_worker_id: u32) void {
 		op_counters.bump(.rc_decrement);
-		const obj = ptr.boxed_value();
+		const obj = node.boxed_value();
 		if (releasing_worker_id != 0 and obj.biased_worker_id.load(.monotonic) == releasing_worker_id) {
-			biasedDecRef(obj, releasing_worker_id);
+			biasedDecRef(node, obj, releasing_worker_id);
 			return;
 		}
-		sharedDecRef(obj, releasing_worker_id);
+		sharedDecRef(node, obj, releasing_worker_id);
 	}
 
 	pub fn is_primitive(ptr: *const FatPtr) bool {
@@ -309,15 +392,25 @@ noinline fn sharedIncRef(obj: *ObjectHeader) void {
 	}
 }
 
+/// Fast direct teardown for a heap object reaching count zero.
+noinline fn freeHeapObject(obj: *ObjectHeader, vt: *const VTable, releasing_worker_id: u32) void {
+	if (std.debug.runtime_safety) assert(!obj.buffered);
+	if (obj.drop_fn) |drop| drop(@ptrCast(obj), releasing_worker_id);
+	if (vt.free_fn) |f| f(@ptrCast(obj), releasing_worker_id);
+	heap.free(releasing_worker_id, @ptrCast(obj));
+}
+
 /// The worker holding the biased half is its only writer, so this needs no atomic
 /// until the last biased reference goes. The object then clears
 /// `biased_worker_id` and merges the two halves, and that merge is what discovers
 /// whether it is dead.
-fn biasedDecRef(obj: *ObjectHeader, releasing_worker_id: u32) void {
+fn biasedDecRef(node: FatPtr, obj: *ObjectHeader, releasing_worker_id: u32) void {
 	const biased = obj.biased;
 	if (std.debug.runtime_safety) assert(biased != 0);
 	obj.biased = biased - 1;
-	if (biased != 1) return;
+	if (biased != 1) {
+		return;
+	}
 
 	obj.biased_worker_id.store(0, .monotonic);
 	op_counters.bump(.rc_merge);
@@ -325,7 +418,10 @@ fn biasedDecRef(obj: *ObjectHeader, releasing_worker_id: u32) void {
 	// With the biased half at zero the shared count is the whole count, so a
 	// negative value means a thread released a reference it never held.
 	if (std.debug.runtime_safety) assert(sharedCount(old) >= 0);
-	if (sharedCount(old) == 0) freeHeader(obj, releasing_worker_id);
+	if (sharedCount(old) == 0) {
+		freeHeapObject(obj, node.vt, releasing_worker_id);
+		return;
+	}
 }
 
 /// Release one reference from a thread that holds no biased half.
@@ -338,14 +434,14 @@ fn biasedDecRef(obj: *ObjectHeader, releasing_worker_id: u32) void {
 ///   * the shared count would go below zero, so the biased half still covers this
 ///     reference. Hand the object to the worker holding it. The queue entry
 ///     takes over the reference, which is why the count does not move.
-fn sharedDecRef(obj: *ObjectHeader, releasing_worker_id: u32) void {
+fn sharedDecRef(node: FatPtr, obj: *ObjectHeader, releasing_worker_id: u32) void {
 	op_counters.bump(.rc_shared_decrement);
 	while (true) {
 		const word = obj.shared.load(.monotonic);
 		const biased_worker_id = obj.biased_worker_id.load(.monotonic);
 		if (!isMerged(word) and !isQueued(word) and sharedCount(word) <= 0) {
 			if (obj.shared.cmpxchgWeak(word, word | QUEUED, .acq_rel, .monotonic) != null) continue;
-			queueForMerge(obj, biased_worker_id);
+			queueForMerge(node, biased_worker_id);
 			return;
 		}
 		if (obj.shared.cmpxchgWeak(word, word -% UNIT, .release, .monotonic) != null) continue;
@@ -355,7 +451,8 @@ fn sharedDecRef(obj: *ObjectHeader, releasing_worker_id: u32) void {
 			// Acquire the release sequence from prior decrements before the drop
 			// hooks run.
 			_ = obj.shared.load(.acquire);
-			freeHeader(obj, releasing_worker_id);
+			freeHeapObject(obj, node.vt, releasing_worker_id);
+			return;
 		}
 		return;
 	}
@@ -366,23 +463,23 @@ fn sharedDecRef(obj: *ObjectHeader, releasing_worker_id: u32) void {
 /// drains the queue.
 pub const MergeNode = extern struct {
 	next: ?*MergeNode,
-	obj: *ObjectHeader,
+	node: FatPtr,
 };
 
 pub const MergeQueue = std.atomic.Value(?*MergeNode);
 
-/// Treiber stack push, the same shape as the destroyer's backlog.
-fn queueForMerge(obj: *ObjectHeader, biased_worker_id: u32) void {
+/// Treiber stack push.
+fn queueForMerge(node: FatPtr, biased_worker_id: u32) void {
 	op_counters.bump(.rc_queue_push);
 	// A negative shared count means a biased half covers a reference, so the object
 	// names a worker and that worker has a queue.
 	const head = worker_mod.mergeQueueFor(biased_worker_id) orelse @panic("Merge of an object with no owning worker");
-	const node = gc.recycleAlloc(MergeNode);
-	node.obj = obj;
+	const entry = gc.recycleAlloc(MergeNode);
+	entry.node = node;
 	var old = head.load(.monotonic);
 	while (true) {
-		node.next = old;
-		if (head.cmpxchgWeak(old, node, .release, .monotonic)) |observed| {
+		entry.next = old;
+		if (head.cmpxchgWeak(old, entry, .release, .monotonic)) |observed| {
 			old = observed;
 		} else return;
 	}
@@ -390,48 +487,208 @@ fn queueForMerge(obj: *ObjectHeader, biased_worker_id: u32) void {
 
 /// Runs on the owning worker, the only thread allowed to read `biased`.
 ///
-/// The worker is passed in because the scheduler loop
-/// drains off a fiber stack.
+/// The worker is passed in because the scheduler loop drains off a fiber stack.
 pub fn drainMergeQueue(head: *MergeQueue, releasing_worker_id: u32) void {
-	var node = head.swap(null, .acquire) orelse return;
+	var entry = head.swap(null, .acquire) orelse return;
 	while (true) {
-		const next = node.next;
-		mergeAndRelease(node.obj, releasing_worker_id);
-		gc.recycleDestroy(MergeNode, node, .rc_merge_node);
-		node = next orelse return;
+		const next = entry.next;
+		const node = entry.node;
+		gc.recycleDestroy(MergeNode, entry, .rc_merge_node);
+		mergeAndRelease(node, releasing_worker_id);
+		entry = next orelse return;
 	}
 }
 
-fn mergeAndRelease(obj: *ObjectHeader, releasing_worker_id: u32) void {
-	if (obj.biased_worker_id.load(.monotonic) != 0) {
-		op_counters.bump(.rc_merge);
-		const biased = obj.biased;
-		obj.biased = 0;
-		obj.biased_worker_id.store(0, .monotonic);
-		// The entry's own reference is one of the biased ones, so the shared
-		// count stays above zero between these two updates and no other thread
-		// can decide the object is dead inside the gap.
-		if (biased != 0) _ = obj.shared.fetchAdd(biased *% UNIT, .monotonic);
-		_ = obj.shared.fetchOr(MERGED, .acq_rel);
-	}
-	sharedDecRef(obj, releasing_worker_id);
+fn mergeAndRelease(node: FatPtr, releasing_worker_id: u32) void {
+	const obj = node.data.obj;
+	// The entry's own reference is one of the biased ones, so the shared count
+	// stays above zero across the fold and no other thread can decide the object
+	// is dead inside it.
+	foldBiased(obj);
+	sharedDecRef(node, obj, releasing_worker_id);
 }
 
-/// The caller has already established that the last reference is gone.
-fn freeHeader(obj: *ObjectHeader, releasing_worker_id: u32) void {
-	if (obj.drop_fn) |drop| drop(@ptrCast(obj), releasing_worker_id);
-	const bytes = @as([*]u8, @ptrCast(obj))[0..obj.alloc_size];
-	const alloc_size = obj.alloc_size;
-	const align_log2 = obj.alloc_align_log2;
-	// Pool slots live on the GC heap, so leftover pointer-shaped bytes would
-	// conservatively pin the children this call just RC-decremented.
-	@memset(bytes[@sizeOf(ObjectHeader)..], 0);
-	if (!alloc_recycler.push(bytes.ptr, alloc_size, align_log2)) {
-		const log = @import("log.zig");
-		log.trace_alloc_caching(.alloc_raw_free, alloc_size, @intFromEnum(log.RawFreeSource.rc_decrement), align_log2);
-		@import("destroyer.zig").submit(@ptrCast(bytes.ptr));
-		gc.recordRcFree(releasing_worker_id);
+/// Folds the biased half of a heap object into its shared half, and leaves the
+/// object shared-only for the rest of its life.
+fn foldBiased(obj: *ObjectHeader) void {
+	if (obj.biased_worker_id.load(.monotonic) == 0) return;
+	op_counters.bump(.rc_merge);
+	const biased = obj.biased;
+	obj.biased = 0;
+	obj.biased_worker_id.store(0, .monotonic);
+	if (biased != 0) _ = obj.shared.fetchAdd(biased *% UNIT, .monotonic);
+	_ = obj.shared.fetchOr(MERGED, .acq_rel);
+}
+
+/// `Release(S)`: the last reference is gone, so every reference the node holds
+/// goes with it, and the node's own storage follows.
+///
+/// A candidate cycle root holds a reference of its own while the candidate set
+/// names it (see `cycles.noteStore`), so a node that reaches zero here is never
+/// one the collector still has to look at.
+noinline fn releaseNode(node: FatPtr, releasing_worker_id: u32) void {
+	releaseChildren(node, releasing_worker_id);
+	freeNode(node, releasing_worker_id);
+}
+
+/// The `for T in children(S) Decrement(T)` of `Release`. It enumerates exactly
+/// the references a node owns, which is the same set `children` traces.
+pub fn releaseChildren(node: FatPtr, id: u32) void {
+	switch (node.vt.storage_mode) {
+		.heap => {
+			const obj = node.data.obj;
+			if (obj.drop_fn) |drop| drop(@ptrCast(obj), id);
+		},
+		.primitiveContainer => {
+			if (node.vt == &var_rt.VT_Var) return var_rt.drop_children(node.data.cell, id);
+			if (node.vt == &isopod_rt.VT_IsoPod) return isopod_rt.drop_children(node.data.iso_cell, id);
+			if (node.vt == &error_rt.VT_RuntimeError or node.vt == &error_rt.VT_RuntimeNdError)
+				return error_rt.drop_children(node.data.err_cell, id);
+			if (node.vt == &list_storage.VT_ListStorage)
+				return list_storage.drop_children(list_storage.storageOfEdge(node), id);
+			if (node.vt == &flow_ops.VT_FlowOps)
+				return flow_ops.drop_children(flow_ops.opsOfEdge(node), id);
+			unreachable;
+		},
+		.primitive, .singleton, .transient => unreachable,
 	}
+}
+
+/// `Free(S)`: the node's own storage goes back, and nothing else. Its children
+/// were released when its count reached zero.
+pub fn freeNode(node: FatPtr, id: u32) void {
+	// A buffered node is named by the candidate-root buffer, and freeing it
+	// there would leave that buffer holding dead memory. Whoever frees it must
+	// take it out of the buffer first.
+	if (std.debug.runtime_safety) assert(!nodeMark(node).buffered.*);
+	switch (node.vt.storage_mode) {
+		.heap => {
+			const obj = node.data.obj;
+			if (node.vt.free_fn) |f| f(@ptrCast(obj), id);
+			heap.free(id, @ptrCast(obj));
+		},
+		.primitiveContainer => {
+			if (node.vt == &var_rt.VT_Var) return var_rt.free_cell(node.data.cell, id);
+			if (node.vt == &isopod_rt.VT_IsoPod) return isopod_rt.free_cell(node.data.iso_cell, id);
+			if (node.vt == &error_rt.VT_RuntimeError or node.vt == &error_rt.VT_RuntimeNdError)
+				return error_rt.free_cell(node.data.err_cell, id);
+			if (node.vt == &list_storage.VT_ListStorage)
+				return list_storage.free_storage(list_storage.storageOfEdge(node), id);
+			if (node.vt == &flow_ops.VT_FlowOps)
+				return flow_ops.free_ops(flow_ops.opsOfEdge(node), id);
+			unreachable;
+		},
+		.primitive, .singleton, .transient => unreachable,
+	}
+}
+
+/// The [`Green`] an object header holds.
+pub inline fn greenOf(obj: *const ObjectHeader) Green {
+	return @enumFromInt(obj.green);
+}
+
+/// Whether `v` can be part of a cycle. See [`Green`].
+pub inline fn valueIsGreen(v: FatPtr) bool {
+	if (v.vt.green) return true;
+	return switch (v.vt.storage_mode) {
+		// A primitive is no object at all, and a singleton captures nothing,
+		// which is what makes it one.
+		.primitive, .singleton => true,
+		.heap, .transient => greenOf(v.data.obj) == .green,
+		// Every one of these is a cell the program can store into.
+		.primitiveContainer => false,
+	};
+}
+
+/// Whether the collector should never treat this node as a candidate cycle root,
+/// and whether a store of it can close a cycle.
+///
+/// A node with no `trace_fn` holds no edge a traversal can follow, so it can
+/// reach nothing and close nothing. Any runtime type that holds an edge MUST
+/// declare a trace hook, or it will read as a leaf here.
+pub inline fn isAcyclic(node: FatPtr) bool {
+	return valueIsGreen(node) or node.vt.trace_fn == null;
+}
+
+/// `children(S)`. A node with no hook holds no edge the collector can follow.
+pub inline fn children(node: FatPtr, visit: VisitFn, ctx: *anyopaque) void {
+	const trace = node.vt.trace_fn orelse return;
+	switch (node.vt.storage_mode) {
+		.heap => trace(@ptrCast(node.data.obj), visit, ctx),
+		.primitiveContainer => trace(@ptrCast(node.data.raw_cell), visit, ctx),
+		.primitive, .singleton, .transient => {},
+	}
+}
+
+/// The colour and buffer state of a node, whichever header shape it has. The
+/// two shapes agree on what they hold and not on where, so a caller reaches
+/// them through this rather than through a cast.
+///
+/// This is what the mutator paths use. Neither field needs the counts, so
+/// nothing here touches the biased half.
+pub const NodeMark = struct {
+	colour: *u8,
+	buffered: *bool,
+};
+
+pub inline fn nodeMark(node: FatPtr) NodeMark {
+	switch (node.vt.storage_mode) {
+		.heap => {
+			const obj = node.data.obj;
+			return .{ .colour = &obj.colour, .buffered = &obj.buffered };
+		},
+		.primitiveContainer => {
+			const cell = cellHeader(node);
+			return .{ .colour = &cell.colour, .buffered = &cell.buffered };
+		},
+		.primitive, .singleton, .transient => unreachable,
+	}
+}
+
+/// [`NodeMark`] with the two counts a cycle pass reads.
+///
+/// `rc` is the whole count and `crc` the cyclic one. A `.heap` node keeps no
+/// field for the cyclic count: its header has no room for a fifth word, so this
+/// folds the biased half into the shared one and uses the word the fold leaves
+/// dead. That fold is only sound with the world stopped, which is where every
+/// caller of this runs.
+pub const NodeRef = struct {
+	rc: i32,
+	crc: *i32,
+	colour: *u8,
+	buffered: *bool,
+};
+
+pub fn nodeRef(node: FatPtr) NodeRef {
+	switch (node.vt.storage_mode) {
+		.heap => {
+			const obj = node.data.obj;
+			foldBiased(obj);
+			return .{
+				.rc = sharedCount(obj.shared.load(.monotonic)),
+				.crc = @ptrCast(&obj.biased),
+				.colour = &obj.colour,
+				.buffered = &obj.buffered,
+			};
+		},
+		.primitiveContainer => {
+			const cell = cellHeader(node);
+			return .{
+				.rc = @intCast(cell.ref_count.load(.monotonic)),
+				.crc = &cell.crc,
+				.colour = &cell.colour,
+				.buffered = &cell.buffered,
+			};
+		},
+		.primitive, .singleton, .transient => unreachable,
+	}
+}
+
+/// True for a value the collector counts. Everything else is a primitive held
+/// inside the `FatPtr`, or immortal.
+pub inline fn isNode(node: FatPtr) bool {
+	const mode = node.vt.storage_mode;
+	return mode == .heap or mode == .primitiveContainer;
 }
 
 pub const FearlessValue = extern union {
@@ -443,26 +700,76 @@ pub const FearlessValue = extern union {
 	cell: *var_rt.VarCell,
 	iso_cell: *isopod_rt.IsoCell,
 	err_cell: *error_rt.ErrorCell,
+	/// A node that no program value names: a `ListStorage`, or the op chain of
+	/// a flow. Only the cycle collector builds a `FatPtr` over this member, and
+	/// it pairs it with a vtable that exists for that purpose alone.
+	raw_cell: *anyopaque,
 };
 
-/// Common prefix of `var_rt.VarCell` and `isopod_rt.IsoCell`. Both keep an
-/// atomic `ref_count` at offset 0, so a `.primitiveContainer` FatPtr retains
-/// uniformly through a `@ptrCast` to this header. The asserts below lock that.
-const RcCellHeader = extern struct { ref_count: std.atomic.Value(u32) };
+/// Common prefix of every reference-counted cell: `var_rt.VarCell`,
+/// `isopod_rt.IsoCell`, `error_rt.ErrorCell`, `storage.ListStorage` and
+/// `ops_node.FlowOps`. Each begins with one of these, so a
+/// `.primitiveContainer` FatPtr retains uniformly through a `@ptrCast` to it,
+/// and the cycle collector reads a colour through the same cast. The asserts
+/// below lock that.
+///
+/// A cell is shared between wrappers rather than owned by one worker, so the
+/// count is a plain atomic with no biased half.
+pub const RcCellHeader = extern struct {
+	ref_count: std.atomic.Value(u32),
+	/// The cyclic reference count. See [`NodeRef`].
+	crc: i32 = 0,
+	/// A [`Colour`], as its integer value.
+	colour: u8 = 0,
+	/// True while the candidate-root buffer of the cycle collector holds this
+	/// cell.
+	buffered: bool = false,
+
+	/// A cell its maker has just built, holding the one reference the maker took.
+	pub const born: RcCellHeader = .{ .ref_count = std.atomic.Value(u32).init(1) };
+};
 
 comptime {
-	assert(@offsetOf(var_rt.VarCell, "ref_count") == 0);
-	assert(@offsetOf(isopod_rt.IsoCell, "ref_count") == 0);
+	// One count, one cyclic count and two bytes of state. A cell is small, so
+	// this is what decides its size class.
+	assert(@sizeOf(RcCellHeader) == 12);
+	assert(@offsetOf(var_rt.VarCell, "header") == 0);
+	assert(@offsetOf(isopod_rt.IsoCell, "header") == 0);
+	assert(@offsetOf(error_rt.ErrorCell, "header") == 0);
+}
+
+/// The common header of the cell a `.primitiveContainer` FatPtr names.
+pub inline fn cellHeader(ptr: FatPtr) *RcCellHeader {
+	if (std.debug.runtime_safety) assert(ptr.vt.storage_mode == .primitiveContainer);
+	return @ptrCast(@alignCast(ptr.data.raw_cell));
 }
 
 /// Uniform retain for `.primitiveContainer` cells.
-inline fn containerRetain(cell: *RcCellHeader) void {
+///
+/// `noinline` because this is cold and holds an atomic. Inlined, the atomic fetch-add
+/// and register spills land in every caller of share() where the storage mode is not statically known.
+noinline fn containerRetain(cell: *RcCellHeader) void {
 	const count = cell.ref_count.fetchAdd(1, .monotonic);
-	const referencer_limit = std.math.maxInt(u32) - 4096;
-	if (count >= referencer_limit) {
+	if (count >= BIASED_LIMIT) {
 		@branchHint(.unlikely);
 		@panic("Too many references");
 	}
+}
+
+/// Uniform release for `.primitiveContainer` cells.
+///
+/// `noinline` because this is cold and holds an atomic. Inlined, the read-modify-write
+/// and the spill of `node` around it land in every loop that drops a reference, and a
+/// loop that drops one per iteration pays for both on the path where the count does not
+/// reach zero.
+noinline fn containerRelease(node: FatPtr, releasing_worker_id: u32) void {
+	op_counters.bump(.rc_decrement);
+	const cell = cellHeader(node);
+	const old_count = cell.ref_count.fetchSub(1, .release);
+	if (std.debug.runtime_safety) assert(old_count != 0);
+	if (old_count != 1) return;
+	_ = cell.ref_count.load(.acquire);
+	releaseNode(node, releasing_worker_id);
 }
 
 /// Methods cached per call site, to avoid a vtable lookup.
@@ -681,7 +988,8 @@ pub fn obj_k(
 ) FatPtr {
 	op_counters.bump(.heap_obj);
 	const Layout = GenObjectLayoutType(Captures);
-	const align_log2: u8 = @intFromEnum(std.mem.Alignment.of(Layout));
+	const green = resolveGreen(Captures, vt, captures);
+	if (green == .green) op_counters.bump(.green_obj);
 
 	// The building worker owns the object and holds its first reference in the
 	// biased half. Generated code always runs on a fiber, so it always names a
@@ -689,30 +997,20 @@ pub fn obj_k(
 	// born merged and takes the shared path for every operation.
 	const me = worker_mod.currentWorkerId();
 
-	const MemorySlot = struct { ptr: *Layout, raw_size: usize };
-	const memory_slot: MemorySlot = if (alloc_recycler.pop(@sizeOf(Layout), align_log2)) |recycled|
-		.{ .ptr = @ptrCast(@alignCast(recycled.ptr)), .raw_size = recycled.real_size }
-	else blk: {
-		// One block taken from the collector. Its counterpart is in `freeHeader`, which
-		// subtracts one where a block goes back. A block the recycling pool answers is
-		// already counted, and one the pool keeps is still held, so neither moves the
-		// count. See `rc_live`.
-		gc.recordRcAlloc(me);
-		break :blk .{ .ptr = allocator.create(Layout) catch @panic("OOM"), .raw_size = @sizeOf(Layout) };
-	};
-	memory_slot.ptr.* = .{
-			.header = .{
-				.shared = std.atomic.Value(u32).init(if (me == 0) UNIT | MERGED else 0),
-				.biased = if (me == 0) 0 else 1,
-				.drop_fn = vt.drop_fn orelse captureDropFn(Captures),
-				.alloc_size = memory_slot.raw_size,
-				.biased_worker_id = std.atomic.Value(u32).init(me),
-				.alloc_align_log2 = align_log2,
-			},
+	const raw = heap.allocComptime(me, @sizeOf(Layout), @alignOf(Layout)) orelse @panic("OOM");
+	const slot: *Layout = @ptrCast(@alignCast(raw));
+	slot.* = .{
+		.header = .{
+			.shared = std.atomic.Value(u32).init(if (me == 0) UNIT | MERGED else 0),
+			.biased = if (me == 0) 0 else 1,
+			.drop_fn = vt.drop_fn orelse captureDropFn(Captures),
+			.biased_worker_id = std.atomic.Value(u32).init(me),
+			.green = @intFromEnum(green),
+		},
 		.captures = shareCaptureFields(Captures, captures),
 	};
 	return .{
-		.data = FearlessValue{ .obj = &memory_slot.ptr.header },
+		.data = FearlessValue{ .obj = &slot.header },
 		.vt = vt,
 	};
 }
@@ -727,9 +1025,9 @@ pub fn obj_k_singleton(comptime vt: *const VTable) FatPtr {
 				.shared = std.atomic.Value(u32).init(IMMORTAL_SHARED),
 				.biased = 0,
 				.drop_fn = null,
-				.alloc_size = @sizeOf(Layout),
 				.biased_worker_id = std.atomic.Value(u32).init(0),
-				.alloc_align_log2 = @intFromEnum(std.mem.Alignment.of(Layout)),
+				// A singleton captures nothing, which is what makes it one.
+				.green = @intFromEnum(Green.green),
 			},
 			.captures = .{},
 		};
@@ -752,9 +1050,8 @@ pub fn init_transient_obj(
 			.shared = std.atomic.Value(u32).init(IMMORTAL_SHARED),
 			.biased = 0,
 			.drop_fn = vt.drop_fn orelse captureDropFn(Captures),
-			.alloc_size = @sizeOf(GenObjectLayoutType(Captures)),
 			.biased_worker_id = std.atomic.Value(u32).init(0),
-			.alloc_align_log2 = @intFromEnum(std.mem.Alignment.of(GenObjectLayoutType(Captures))),
+			.green = @intFromEnum(resolveGreen(Captures, vt, captures)),
 		},
 		.captures = shareCaptureFields(Captures, captures),
 	};
@@ -774,6 +1071,38 @@ pub fn deref(comptime Captures: type, ptr: FatPtr) *const Captures {
 	return &self.captures;
 }
 
+/// The [`Green`] an object built from `captures` is born with.
+///
+/// A vtable whose trace hook is not the generic one reaches edges this cannot
+/// see -- every mutable container of the standard library is such a type -- so
+/// only the generic shape may be answered from the captures. `captureTraceFn`
+/// gives back null when no field is counted, so a literal that captures only
+/// primitives compares null against null and is answered from its empty capture
+/// set: green, with no work at run time.
+inline fn resolveGreen(
+	comptime Captures: type,
+	comptime vt: *const VTable,
+	captures: Captures,
+) Green {
+	if (comptime vt.green) return .green;
+	if (comptime vt.trace_fn != captureTraceFn(Captures)) return .not_green;
+	return if (capturesAreGreen(Captures, captures)) .green else .not_green;
+}
+
+/// Whether every counted capture is itself green. The values are the same before
+/// and after [`shareCaptureFields`], so either copy answers.
+inline fn capturesAreGreen(comptime Captures: type, captures: Captures) bool {
+	switch (@typeInfo(Captures)) {
+		.@"struct" => |info| inline for (info.fields) |field| {
+			if (comptime isCountedField(Captures, field)) {
+				if (!valueIsGreen(@field(captures, field.name))) return false;
+			}
+		},
+		else => {},
+	}
+	return true;
+}
+
 fn captureDropFn(comptime Captures: type) ?DropFn {
 	if (!capturesContainFatPtr(Captures)) return null;
 	return struct {
@@ -783,6 +1112,23 @@ fn captureDropFn(comptime Captures: type) ?DropFn {
 			dropCaptureFields(Captures, &self.captures, releasing_worker_id);
 		}
 	}.drop;
+}
+
+/// Mirror of [`captureDropFn`]: it enumerates the same fields that one
+/// releases, so an object literal traces exactly the references it owns.
+pub fn captureTraceFn(comptime Captures: type) ?TraceFn {
+	if (!capturesContainFatPtr(Captures)) return null;
+	return struct {
+		fn trace(header: *anyopaque, visit: VisitFn, ctx: *anyopaque) callconv(.c) void {
+			const Layout = GenObjectLayoutType(Captures);
+			const self: *const Layout = @ptrCast(@alignCast(header));
+			inline for (@typeInfo(Captures).@"struct".fields) |field| {
+				if (comptime isCountedField(Captures, field)) {
+					visit(ctx, @field(self.captures, field.name));
+				}
+			}
+		}
+	}.trace;
 }
 
 /// True when reference counting `field` of `Captures` can change a count.

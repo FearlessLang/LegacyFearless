@@ -8,7 +8,7 @@ const instance = @import("instance.zig");
 
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
-const ArrayList = storage_mod.ArrayList;
+const ItemVec = storage_mod.ItemVec;
 const ListCaptures = storage_mod.ListCaptures;
 const make_list = instance.make_list;
 const make_ulist = instance.make_ulist;
@@ -119,7 +119,7 @@ fn ulist_factory_16(_: FatPtr, a0: FatPtr, a1: FatPtr, a2: FatPtr, a3: FatPtr, a
     return make_ulist(&.{ a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15 });
 }
 
-fn fromLList_into(llist: FatPtr, al: *ArrayList) void {
+fn fromLList_into(llist: FatPtr, al: *ItemVec) void {
     // Walk the LList via .head/.tail. .size bounds the walk, so every .head
     // is a Some and the extractor's empty case is unreachable.
     const size = nat_rt.deref(objs.call(llist, h("imm .size/0"), .{}, @src()));

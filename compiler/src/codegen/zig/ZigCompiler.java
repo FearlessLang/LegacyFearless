@@ -328,10 +328,6 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
               }),
           });
 
-          const libgc = b.dependency("libgc", .{ .target = target, .optimize = optimize });
-          const gc_lib = libgc.artifact("gc");
-          const gc_include = gc_lib.getEmittedIncludeTree();
-
           const context_switch_lib = b.addLibrary(.{
               .linkage = .static,
               .name = "context_switch",
@@ -346,22 +342,6 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
               else => {},
           }
 
-          // gc_mark.h includes gc.h and adds the mark-time API
-          // (GC_set_push_other_roots, GC_push_all_eager) the fiber stack hook needs.
-          const c_libgc_tc = b.addTranslateC(.{
-              .root_source_file = gc_include.path(b, "gc_mark.h"),
-              .target = target,
-              .optimize = optimize,
-              .link_libc = true,
-          });
-          c_libgc_tc.defineCMacro("GC_THREADS", "1");
-          c_libgc_tc.defineCMacro("GC_PTHREADS", "1");
-          c_libgc_tc.addIncludePath(gc_include);
-          c_libgc_tc.addIncludePath(gc_include.path(b, "gc"));
-          const c_libgc_mod = c_libgc_tc.createModule();
-          c_libgc_mod.linkLibrary(gc_lib);
-
-          exe.root_module.addImport("libgc", c_libgc_mod);
           exe.root_module.linkLibrary(context_switch_lib);
 
           // Linking the archive directly lets the linker drop its unused JNI objects. The
@@ -410,9 +390,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
           .version = "0.0.0",
           .fingerprint = 0xb506340ff5c420d3,
           .minimum_zig_version = "0.16.0",
-          .dependencies = .{
-              .libgc = .{ .path = "lib/zig-build-libgc" }
-          },
+          .dependencies = .{},
           .paths = .{
               "build.zig",
               "build.zig.zon",

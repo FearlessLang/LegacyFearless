@@ -18,6 +18,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const worker_mod = @import("../worker.zig");
 const gc = @import("../gc.zig");
+const log = @import("../log.zig");
 const error_rt = @import("../error.zig");
 const unwind = @import("unwind.zig");
 const fiber_mod = @import("../fiber.zig");
@@ -162,7 +163,20 @@ fn ndSignalHandler(sig: std.posix.SIG, info: *const std.posix.siginfo_t, ctx: ?*
         setResumeContext(uctx, @intFromPtr(&ndRecoveryTrampoline), recovery_stack_top);
         return;
     }
+    log.dumpFaultSite(addr, faultIp(ctx), worker_mod.getCurrentWorker() != null);
     chainOldHandler(sig, info, ctx);
+}
+
+/// The instruction that faulted, or zero when the kernel gave us no context.
+fn faultIp(ctx: ?*anyopaque) usize {
+    const c = ctx orelse return 0;
+    const uctx: *NativeUcontext = @ptrCast(@alignCast(c));
+    const mc = mcontextOf(uctx);
+    return switch (builtin.cpu.arch) {
+        .x86_64 => mc.rip,
+        .aarch64 => mc.pc,
+        else => 0,
+    };
 }
 
 /// Forward a fault we don't own to whatever handler BDW-GC installed before us
@@ -264,20 +278,13 @@ pub fn initThreadSignalStacks(worker_id: u32) void {
     };
     std.posix.sigaltstack(&ss, null) catch {};
 
-    // Only the recovery region: an `Info` built during recovery lives there and a
-    // collection must not sweep it. The alt stack holds no Fearless objects, and
-    // the fiber registry reaches the header.
-    gc.addRoots(@ptrFromInt(recovery_bottom), @ptrFromInt(recovery_stack_top));
 }
 
-/// Undo `initThreadSignalStacks` before a worker thread's TLS is torn down, so a
-/// later collection never scans freed memory.
+/// Undo `initThreadSignalStacks` before a worker thread's TLS is torn down.
 pub fn deinitThreadSignalStacks() void {
     const base = signal_block;
     if (base == 0) return;
     signal_block = 0;
-    const recovery_bottom = base + fiber_mod.FIBER_REGION + ALT_STACK_SIZE;
-    gc.removeRoots(@ptrFromInt(recovery_bottom), @ptrFromInt(recovery_stack_top));
     recovery_stack_top = 0;
     // Before the unmap, so a stale stack pointer that masks here fails the
     // `currentFiber` check instead of reading a dead header.

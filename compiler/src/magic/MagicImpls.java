@@ -7,17 +7,25 @@ import java.util.List;
 import java.util.Optional;
 
 public interface MagicImpls<R> {
-  /// The traits the runtime implements that cannot carry the `base.RuntimeImplemented` marker.
+  /// The traits whose values the runtime makes itself, and that cannot carry the
+  /// `base.RuntimeImplemented` marker.
   ///
-  /// A literal type cannot: its implementation is a clone {@link Magic#getDec} synthesises from
-  /// a template, which would carry the marker into a lambda that the well-formedness rule on the
-  /// marker forbids. `base.Bool` cannot either, for the opposite reason: `True` and `False` are
-  /// ordinary Fearless singletons, so nothing marks the trait, yet the backend still answers
-  /// calls on it.
+  /// A literal type cannot carry the marker: its implementation is a clone
+  /// {@link Magic#getDec} synthesises from a template, which would carry the marker into a
+  /// lambda that the well-formedness rule on the marker forbids.
+  ///
+  /// A pass reads this to learn that a value of the trait can arrive with no object literal
+  /// behind it, so an implementation set built from literals alone is incomplete for it. That is
+  /// what keeps `base.Var` off the specialised reference-count operations: the runtime makes its
+  /// cells, and their storage mode is not the storage mode of the Fearless lambda in `Vars#`.
+  ///
+  /// `base.Bool` is not here. The runtime makes no value of it and the backend answers no call on
+  /// it: `True` and `False` are ordinary Fearless singletons with Fearless bodies, and where the
+  /// runtime needs a boolean it returns one of those same two singletons.
   ///
   /// {@link #get} is not derived from this list and keeps its own if-chain.
   List<Id.DecId> MAGIC_DECS = List.of(
-    Magic.Int, Magic.Nat, Magic.Float, Magic.Byte, Magic.Str, Magic.Bool);
+    Magic.Int, Magic.Nat, Magic.Float, Magic.Byte, Magic.Str, Magic.Var, Magic.IsoPod);
 
   default Optional<MagicTrait<MIR.E,R>> get(MIR.E e) {
     if (isMagic(Magic.Int, e)) { return Optional.ofNullable(int_(e)); }

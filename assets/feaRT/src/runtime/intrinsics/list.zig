@@ -12,6 +12,8 @@ const factory = @import("lists/factory.zig");
 pub const ListStorage = storage.ListStorage;
 pub const ListCaptures = storage.ListCaptures;
 pub const deref_list = storage.deref_list;
+pub const deref_storage = storage.deref_storage;
+pub const storageEdge = storage.storageEdge;
 pub const make_storage = storage.make_storage;
 
 pub const wrap_list_storage = instance.wrap_list_storage;

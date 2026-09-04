@@ -1,6 +1,7 @@
 const std = @import("std");
 const objs = @import("../objs.zig");
 const gc = @import("../gc.zig");
+const cycles = @import("../cycles.zig");
 const nat_rt = @import("nat.zig");
 const hash_rt = @import("hash.zig");
 const bool_intrinsics = @import("bool.zig");
@@ -99,38 +100,65 @@ fn ctx_of(storage: *MapStorage) MapCtx {
     return .{ .keyEq = storage.keyEq, .hashFn = storage.hashFn };
 }
 
-fn map_drop(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void {
-    const Layout = objs.GenObjectLayoutType(MapCaptures);
-    const self: *const Layout = @ptrCast(@alignCast(header));
-    const storage: *MapStorage = @ptrFromInt(self.captures.storage_ptr);
+/// Enumerates every key, every value and both closures, for the cycle
+/// collector.
+pub fn map_trace(header: *anyopaque, visit: objs.VisitFn, ctx: *anyopaque) callconv(.c) void {
+    const storage = storage_of_header(header);
+    for (storage.map.keys()) |k| visit(ctx, k);
+    for (storage.map.values()) |v| visit(ctx, v);
+    visit(ctx, storage.keyEq);
+    visit(ctx, storage.hashFn);
+}
+
+/// Releases every entry and both closures. Part of `Release`.
+pub fn map_drop(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void {
+    const storage = storage_of_header(header);
     for (storage.map.keys()) |k| k.rc_decrement_as(releasing_worker_id);
     for (storage.map.values()) |v| v.rc_decrement_as(releasing_worker_id);
-    storage.map.deinit(gc.allocator);
     storage.keyEq.rc_decrement_as(releasing_worker_id);
     storage.hashFn.rc_decrement_as(releasing_worker_id);
+}
+
+/// Gives the table back. Part of the collector's `Free`, which a candidate-root
+/// buffer can hold back until the buffer has been looked at.
+pub fn map_free(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void {
+    _ = releasing_worker_id;
+    const storage = storage_of_header(header);
+    storage.map.deinit(gc.allocator);
     gc.recycleDestroy(MapStorage, storage, .map_release);
 }
 
+fn storage_of_header(header: *anyopaque) *MapStorage {
+    const Layout = objs.GenObjectLayoutType(MapCaptures);
+    const self: *const Layout = @ptrCast(@alignCast(header));
+    return @ptrFromInt(self.captures.storage_ptr);
+}
+
 /// Insert or replace; takes ownership of `key` and `val`.
-fn map_insert(storage: *MapStorage, key: FatPtr, val: FatPtr) void {
+fn map_insert(self: FatPtr, storage: *MapStorage, key: FatPtr, val: FatPtr) void {
+    cycles.noteStore(self, key);
+    cycles.noteStore(self, val);
     const gop = storage.map.getOrPutContext(gc.allocator, key, ctx_of(storage)) catch @panic("OOM");
-    if (gop.found_existing) {
-        gop.value_ptr.*.rc_decrement(); // release the replaced value
-        gop.value_ptr.* = val;
-        key.rc_decrement(); // key already present; keep the stored one
-    } else {
+    if (!gop.found_existing) {
         // getOrPutContext already wrote `key` into key_ptr.
         gop.value_ptr.* = val;
+        return;
     }
+    // The key already present keeps its place, so the key handed in is dropped
+    // along with the value it displaced.
+    const replaced = gop.value_ptr.*;
+    gop.value_ptr.* = val;
+    replaced.rc_decrement();
+    key.rc_decrement();
 }
 
 fn map_plus(self: FatPtr, k: FatPtr, v: FatPtr) callconv(.c) FatPtr {
-    map_insert(deref_storage(self), k, v);
+    map_insert(self, deref_storage(self), k, v);
     return self.share(); // `mut +` answers with the same mutable map
 }
 
 fn map_put(self: FatPtr, k: FatPtr, v: FatPtr) callconv(.c) FatPtr {
-    map_insert(deref_storage(self), k, v);
+    map_insert(self, deref_storage(self), k, v);
     return make_void();
 }
 
@@ -149,7 +177,8 @@ fn map_remove(self: FatPtr, key: FatPtr) callconv(.c) FatPtr {
     defer key.rc_decrement();
     const storage = deref_storage(self);
     if (storage.map.fetchOrderedRemoveContext(key, ctx_of(storage))) |kv| {
-        kv.key.rc_decrement(); // release the stored key; hand the value to the caller
+        // The stored key is dropped; the value goes to the caller.
+        kv.key.rc_decrement();
         return make_some(kv.value);
     }
     return make_none();
@@ -157,6 +186,8 @@ fn map_remove(self: FatPtr, key: FatPtr) callconv(.c) FatPtr {
 
 fn map_clear(self: FatPtr) callconv(.c) FatPtr {
     const storage = deref_storage(self);
+    // The entries go before the clear: a safe build fills a cleared region with
+    // `undefined`, so a slice taken beforehand does not survive it.
     for (storage.map.keys()) |k| k.rc_decrement();
     for (storage.map.values()) |v| v.rc_decrement();
     storage.map.clearRetainingCapacity();
@@ -229,6 +260,8 @@ pub const VT_LinkedHashMap: objs.VTable = .{
         "imm .values/0",
     },
     .drop_fn = map_drop,
+    .free_fn = map_free,
+    .trace_fn = map_trace,
 };
 
 /// `Maps.hashMap(keyEq, hashFn): mut LinkedHashMap`. Takes ownership of both

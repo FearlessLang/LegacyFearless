@@ -10,7 +10,7 @@ Board: {
   .d2: Nat,
   /// The board with a queen at `row` and column `c`. It is empty when another queen attacks
   /// that square. The diagonal indexes are `row + c` and `row + n - c`, and both stay below 2n.
-  .place(row: Nat, c: Nat, n: Nat): mut Opt[Board] -> this.attacked(row, c, n).if[mut Opt[Board]]{
+  .place(row: Nat, c: Nat, n: Nat): Opt[Board] -> this.attacked(row, c, n).if[Opt[Board]]{
     .then -> {},
     .else -> Opts#(Boards#(
       this.cols.bitwiseOr(1.shiftLeft(c)),

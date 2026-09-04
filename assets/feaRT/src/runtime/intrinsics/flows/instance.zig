@@ -8,6 +8,7 @@
 const std = @import("std");
 const objs = @import("../../objs.zig");
 const gc = @import("../../gc.zig");
+const cycles = @import("../../cycles.zig");
 const scope_mod = @import("../../scope.zig");
 const nat_rt = @import("../nat.zig");
 const list_rt = @import("../list.zig");
@@ -458,11 +459,15 @@ fn box_flow(self_m: FatPtr) callconv(.c) FatPtr {
     return object.make_flow_fp(&VT_Flow, object.copy_flow_body(object.deref_flow(self_m)));
 }
 
+/// Folds the right half of a split flow's result list into the left half.
 fn list_concat_apply(_: FatPtr, l: FatPtr, r: FatPtr) callconv(.c) FatPtr {
-    const l_al = list_rt.deref_list(l);
-    const r_al = list_rt.deref_list(r);
-    l_al.appendSlice(gc.allocator, r_al.items) catch @panic("OOM");
-    for (r_al.items) |item| _ = item.share();
+    const l_storage = list_rt.deref_storage(l);
+    const l_al = &l_storage.al;
+    const r_items = list_rt.deref_list(r).items;
+    const l_edge = list_rt.storageEdge(l_storage);
+    for (r_items) |item| cycles.noteStore(l_edge, item);
+    l_al.appendSlice(gc.allocator, r_items) catch @panic("OOM");
+    for (r_items) |item| _ = item.share();
     r.rc_decrement();
     return l;
 }
@@ -730,6 +735,7 @@ pub const VT_Flow: objs.VTable = .{
         "mut .unwrapOp/1",
     },
     .drop_fn = object.flow_drop,
+    .trace_fn = object.flow_trace,
 };
 
 /// `VT_Flow` for a flow whose storage is a caller frame. It answers the same methods:

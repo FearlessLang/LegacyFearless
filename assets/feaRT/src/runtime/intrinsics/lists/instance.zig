@@ -6,6 +6,7 @@
 const std = @import("std");
 const objs = @import("../../objs.zig");
 const gc = @import("../../gc.zig");
+const cycles = @import("../../cycles.zig");
 const nat_rt = @import("../nat.zig");
 const bool_intrinsics = @import("../bool.zig");
 const flow_rt = @import("../flow.zig");
@@ -90,7 +91,9 @@ fn list_uList(self: FatPtr) callconv(.c) FatPtr {
 }
 
 fn ulist_add(self: FatPtr, item: FatPtr) callconv(.c) FatPtr {
-    const al = deref_list(self);
+    const storage = storage_mod.deref_storage(self);
+    cycles.noteStore(storage_mod.storageEdge(storage), item);
+    const al = &storage.al;
     al.append(gc.allocator, item) catch @panic("OOM");
     return make_void();
 }
@@ -98,8 +101,7 @@ fn ulist_add(self: FatPtr, item: FatPtr) callconv(.c) FatPtr {
 fn ulist_takeFirst(self: FatPtr) callconv(.c) FatPtr {
     const al = deref_list(self);
     if (al.items.len == 0) return make_none();
-    const first = al.orderedRemove(0);
-    return make_some(first);
+    return make_some(al.orderedRemove(0));
 }
 
 fn ulist_clear(self: FatPtr) callconv(.c) FatPtr {
@@ -219,6 +221,7 @@ pub const VT_List: objs.VTable = .{
         "read .subList/2",
     },
     .drop_fn = storage_mod.list_drop,
+    .trace_fn = storage_mod.list_trace,
 };
 
 pub const VT_UList: objs.VTable = .{
@@ -257,4 +260,5 @@ pub const VT_UList: objs.VTable = .{
         "imm .iter/0",
     },
     .drop_fn = storage_mod.list_drop,
+    .trace_fn = storage_mod.list_trace,
 };

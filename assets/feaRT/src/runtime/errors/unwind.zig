@@ -71,10 +71,6 @@ pub fn feart_unwind(payload: FatPtr) noreturn {
     // The loop above emptied the shadow stack; this stops the heartbeat
     // refilling it before the scheduler retires the fiber.
     fiber.vpf_enabled = false;
-    // mem_base points at the OS stack while %rsp is still on the fiber's.
-    // switchTo never returns here, so the scheduler ends the switch window.
-    gc.beginStackSwitch();
-    gc.setStackBottom(gc.currentStackBase());
     gc.enable_cycle_collection();
     fiber_mod.switchTo(fiber, &worker.scheduler_fiber);
     unreachable;

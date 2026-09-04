@@ -100,16 +100,15 @@ pub fn make_str_from_literal(comptime s: []const u8) FatPtr {
     return make_str(s.ptr, s.len);
 }
 
-/// Allocate a `len`-byte buffer for string data. Routes small buffers through
-/// the per-thread recycler pool and degrades to a fresh GC allocation for
-/// larger ones, keeping the bdwgc alloc lock off the common small-string path.
+/// Allocate a `len`-byte buffer for string data. A size class answers any
+/// length up to `heap.MAX_SMALL` from this thread's own free list; a longer
+/// string gets its own mapping.
 pub fn alloc_bytes(len: usize) []u8 {
     return gc.recycleAllocSlice(u8, len);
 }
 
-/// Release a string-data buffer through the destroyer worker -- a batched,
-/// off-thread `GC_free` -- rather than a synchronous `GC_free` that would take
-/// the global alloc lock on the calling thread.
+/// Give a string-data buffer back to the size class it came from, on the heap
+/// that made it.
 pub fn free_bytes(ptr: [*]u8) void {
     gc.free(@ptrCast(ptr));
 }

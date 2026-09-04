@@ -80,11 +80,37 @@ pub const Op = enum {
     /// Bumps a contended atomic on the hottest path in the program. Read it for
     /// structure, never for timing.
     token_granted,
-    /// A full-heap stop-the-world trace that ran. The trigger counter is
-    /// per-thread but the trace it starts is global, so read this against the
-    /// worker count: if it scales with the number of workers, the threshold is
-    /// being reached independently on each one.
+    /// A worker asking for a cycle collection because its heap has grown past
+    /// the threshold. The trigger counter is per-thread but the collection it
+    /// asks for is global, so read this against the worker count: if it scales
+    /// with the number of workers, the threshold is being reached independently
+    /// on each one.
     cycle_collection,
+    /// A collection that ran: the world stopped and the passes completed.
+    cycle_collection_run,
+    /// A collection given up because the world would not stop inside the
+    /// budget, or because another one already held it. Read against
+    /// `cycle_collection`: a count that tracks it means fibers are running
+    /// longer than the budget without reaching their scheduler.
+    cycle_collection_abandoned,
+    /// A node entered into the candidate set: a container that took an edge it
+    /// could not have been born with. Read against `heap_obj` for the share of
+    /// a program's objects a cycle could possibly run through.
+    cycle_candidate_added,
+    /// A candidate root the collector examined.
+    cycle_root_examined,
+    /// A node freed as part of a garbage cycle. Nothing but the collector could
+    /// have reclaimed it.
+    cycle_node_freed,
+    /// A heap object born green: it cannot reach a mutable container, so it can
+    /// never be part of a cycle. Read against `heap_obj` for the share of a
+    /// program's objects a cycle cannot run through.
+    green_obj,
+    /// Reference count operations whose node is green. Read against
+    /// `rc_increment` and `rc_decrement` for the share of the counting traffic
+    /// that belongs to objects no cycle can run through.
+    rc_increment_green,
+    rc_decrement_green,
 };
 
 const COUNT = @typeInfo(Op).@"enum".fields.len;

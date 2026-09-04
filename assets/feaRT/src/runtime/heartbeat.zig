@@ -78,15 +78,17 @@ inline fn hasPromotableFrame(fiber: *const Fiber) bool {
 }
 
 /// A fiber that runs a long time without reaching the scheduler still has to
-/// drain objects handed back by other workers. The inline rejection above skips
-/// `doPromote` and its drain, so keep that liveness on a coarse cadence.
+/// hand its reference-counting chains to the collector. The inline rejection
+/// above skips `doPromote` and its checkpoint, so keep that liveness on a coarse
+/// cadence: a fiber that never returns to the scheduler would otherwise stall
+/// every epoch.
 inline fn periodicDrain(tokens: u32) void {
-    if (tokens & 0xFFFF == 0) drainMergeQueueOnly();
+    if (tokens & 0xFFFF == 0) checkpointOnly();
 }
 
-noinline fn drainMergeQueueOnly() void {
+noinline fn checkpointOnly() void {
     const worker = worker_mod.getCurrentWorker() orelse return;
-    worker.drainMergeQueue();
+    worker.checkpoint();
 }
 
 /// Promote the oldest un-promoted frame of the running fiber. True only when the
@@ -98,7 +100,7 @@ noinline fn doPromote(fiber: *Fiber, child_initial_tokens: u32) bool {
         return false;
     };
 
-    worker.drainMergeQueue();
+    worker.checkpoint();
 
     const cursor = &fiber.shadow_cursor;
     const frame_idx = cursor.lowest_unpromoted;

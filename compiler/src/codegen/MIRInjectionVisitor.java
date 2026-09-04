@@ -8,6 +8,7 @@ import id.Id;
 import id.Mdf;
 import magic.Magic;
 import program.CM;
+import program.typesystem.ImmGuaranteed;
 import program.typesystem.TsT;
 import program.typesystem.XBs;
 import vpf.VPFCallMode;
@@ -43,15 +44,29 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     }
   }
 
-  public record Ctx(Map<String, MIR.X> xXs) {
+  /// `declaredTs` and `bounds` are what the cycle collector's green analysis needs and what
+  /// {@link MIR.MT} cannot hold: the type a name was declared with, and the bounds of the
+  /// generics in scope. Lowering keeps a generic's use-site modifier and drops the generic, so
+  /// the answer has to be taken here, where both are still present. Both are keyed by the
+  /// source-level name, the way `xXs` is.
+  public record Ctx(Map<String, MIR.X> xXs, Map<String, T> declaredTs, XBs bounds) {
     public static Ctx EMPTY = new Ctx();
     public Ctx {
       xXs = Collections.unmodifiableMap(xXs);
+      declaredTs = Collections.unmodifiableMap(declaredTs);
     }
     public Ctx withXXs(Map<String, MIR.X> xXs) {
-      return new Ctx(xXs);
+      return new Ctx(xXs, declaredTs, bounds);
     }
-    private Ctx() { this(Map.of()); }
+    public Ctx with(Map<String, MIR.X> xXs, Map<String, T> declaredTs, XBs bounds) {
+      return new Ctx(xXs, declaredTs, bounds);
+    }
+    private Ctx() { this(Map.of(), Map.of(), XBs.empty()); }
+
+    /// Whether the name `x` was declared with a type that admits only `imm` values.
+    public boolean isImm(String x) {
+      return ImmGuaranteed.of(declaredTs.get(x), bounds);
+    }
   }
 
   public MIRInjectionVisitor(Collection<String>cached, Program p, ConcurrentHashMap<Long, TsT> resolvedCalls) {
@@ -93,8 +108,11 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
       .filter(m->!m.isAbs())
       .map(m->{
         var g = new HashMap<>(ctx.xXs());
-        g.put(dec.lambda().selfName(), new MIR.X(normX(dec.lambda().selfName()), MIR.MT.of(new T(m.mdf(), it))));
-        var ctx_ = ctx.withXXs(g);
+        var selfT = new T(m.mdf(), it);
+        g.put(dec.lambda().selfName(), new MIR.X(normX(dec.lambda().selfName()), MIR.MT.of(selfT)));
+        var ts = new HashMap<>(ctx.declaredTs());
+        ts.put(dec.lambda().selfName(), selfT);
+        var ctx_ = ctx.with(g, ts, ctx.bounds().addBounds(dec.gxs(), dec.bounds()));
         return function(new CM.CoreCM(it, m, m.sig()), ctx_);
       })
       .reduce(TopLevelRes::merge).orElse(TopLevelRes.EMPTY);
@@ -128,12 +146,15 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
       .map(cm->visitMeth(cm, visitSig(cm)))
       .toList();
 
+    var fv = new FreeVariables();
+    fv.visitLambda(e);
     return new MIR.CreateObj(
       MIR.MT.of(new T(e.mdf(), e.id().toIT())),
       normX(e.selfName()),
       ms,
       uncallableMs,
-      captures(e, ctx)
+      captures(fv.res(), ctx),
+      immCaptures(fv.res(), ctx)
     );
   }
 
@@ -154,12 +175,20 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
 
     // Gamma uses source-level names, because bodies refer to params by their name before the
     // renaming. A "_" param has no name, so it stays out of Gamma.
-    var mCtx = new Ctx(Mapper.of(xXs->{
-      xXs.putAll(ctx.xXs());
-      Streams.zip(cm.xs(), sig.xs()).forEach((srcX,x)->{
-        if (!srcX.equals("_")) { xXs.put(srcX, x); }
-      });
-    }));
+    var mCtx = ctx.with(
+      Mapper.of(xXs->{
+        xXs.putAll(ctx.xXs());
+        Streams.zip(cm.xs(), sig.xs()).forEach((srcX,x)->{
+          if (!srcX.equals("_")) { xXs.put(srcX, x); }
+        });
+      }),
+      Mapper.of(ts->{
+        ts.putAll(ctx.declaredTs());
+        Streams.zip(cm.xs(), cm.sig().ts()).forEach((srcX,t)->{
+          if (!srcX.equals("_")) { ts.put(srcX, t); }
+        });
+      }),
+      ctx.bounds().addBounds(cm.sig().gens(), cm.sig().bounds()));
 
     var x = ctx.xXs().get(selfNameOf(cm.c().name()));
     // The self-arg is always present, also when it is not captured, to keep the signatures equal
@@ -336,10 +365,19 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     fv.visitMeth(m);
     return Collections.unmodifiableSortedSet(fv.res());
   }
-  private SortedSet<MIR.X> captures(E.Lambda e, Ctx ctx) {
-    var fv = new FreeVariables();
-    fv.visitLambda(e);
-    return Collections.unmodifiableSortedSet(fv.res().stream()
+  /// The captures the type system answered `imm` for, by the name they carry in the capture
+  /// set. A name it has no answer for stays out, which reads as "not proved" downstream.
+  private Set<String> immCaptures(Collection<String> freeVariables, Ctx ctx) {
+    return freeVariables.stream()
+      .filter(ctx::isImm)
+      .map(x->ctx.xXs().get(x))
+      .filter(Objects::nonNull)
+      .map(MIR.X::name)
+      .collect(Collectors.toUnmodifiableSet());
+  }
+
+  private SortedSet<MIR.X> captures(Collection<String> freeVariables, Ctx ctx) {
+    return Collections.unmodifiableSortedSet(freeVariables.stream()
         .map(x->visitX(x, ctx))
         .collect(Collectors.toCollection(MIR::createCapturesSet)));
   }

@@ -1,6 +1,8 @@
 const std = @import("std");
 
-pub const WriteLock = struct {
+/// A test-and-set spin lock. `extern` so it can sit inside the C-layout
+/// headers the cycle collector reads.
+pub const WriteLock = extern struct {
     is_locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn acquire(self: *WriteLock) void {

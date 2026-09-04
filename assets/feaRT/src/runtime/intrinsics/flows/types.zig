@@ -9,6 +9,7 @@ const objs = @import("../../objs.zig");
 const int_rt = @import("../int.zig");
 const native = @import("../../native.zig");
 const string_flows = @import("string_flows.zig");
+const ops_node = @import("ops_node.zig");
 
 const FatPtr = objs.FatPtr;
 
@@ -65,7 +66,9 @@ pub const FeartFlow = struct {
     // null and own their source data directly.
     source_owner: ?FatPtr = null,
     ops: []OpDesc,
-    ops_ref_count: ?*OpsRefCount = null,
+    /// The node that owns `ops`, and null when there are none. The slice is
+    /// repeated here so that iteration reads it without a second indirection.
+    ops_owner: ?*ops_node.FlowOps = null,
     is_finite: bool,
     // Body refcount. Currently always 1 (each FatPtr owns its own body), but
     // `flow_drop` releases through this so future schemes that share bodies
@@ -81,14 +84,6 @@ pub const ActorState = struct { state_fp: FatPtr, callback: FatPtr };
 // fixed capture: each element calls `.iso` then `.self`.
 // This cell is immutable.
 pub const CtxCell = struct { ctx: FatPtr };
-
-pub const OpsRefCount = extern struct {
-    value: std.atomic.Value(u32),
-    // Padded to 8 bytes so the destroyer's Treiber-stack overlay (which writes
-    // a `?*Node` into the first 8 bytes of every freed allocation) has enough
-    // space. The 4-byte counter alone wouldn't fit.
-    _pad: u32 = 0,
-};
 
 // ==========================================
 // Source primitives

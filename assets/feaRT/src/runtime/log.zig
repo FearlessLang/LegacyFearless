@@ -189,13 +189,31 @@ pub fn dumpAllTraceBuffers() void {
 	}
 }
 
+/// Records where a fault landed, ahead of the trace dump.
+///
+/// The signal number on its own does not say what was touched. The address and
+/// the instruction are the two facts that name the access, and a fault on a
+/// worker thread reads differently from one on a thread that owns no fiber.
+///
+/// Async-signal-safe: a bounded write of a fixed-size buffer, and nothing else.
+pub fn dumpFaultSite(addr: usize, ip: usize, on_fiber: bool) void {
+	var buf: [18]u8 = undefined;
+	const head = "\n=== FAULT addr=";
+	dumpWrite(head, head.len);
+	dumpWrite(&buf, fmtHex(addr, &buf));
+	const mid = " ip=";
+	dumpWrite(mid, mid.len);
+	dumpWrite(&buf, fmtHex(ip, &buf));
+	const tail = if (on_fiber) " on_fiber=1 ===\n" else " on_fiber=0 ===\n";
+	dumpWrite(tail, tail.len);
+}
+
 fn crashHandler(sig: c_int) callconv(.c) void {
 	// `SA.RESETHAND` only covers the thread that faults first. Every other worker
 	// can fault on the same address, and the dump itself can fault as it reads a
 	// buffer that a live thread still writes. Each of those re-enters the handler.
 	if (crash_dumped.swap(true, .acq_rel)) {
-		std.posix.raise(@enumFromInt(sig)) catch {};
-		return;
+		dieWith(sig);
 	}
 	dump_budget.store(MAX_CRASH_DUMP_BYTES, .monotonic);
 
@@ -212,8 +230,29 @@ fn crashHandler(sig: c_int) callconv(.c) void {
 	const footer = "=== END TRACE DUMP ===\n";
 	dumpWrite(footer, footer.len);
 
-	// Re-raise for the default behaviour, such as a core dump.
+	dieWith(sig);
+}
+
+/// Ends the process on the signal that brought us here.
+///
+/// The handler is reached as a plain call from the fault handler that owns the
+/// signal, so `SA.RESETHAND` never fires for it and the disposition still names
+/// a handler. Raising without clearing that would deliver the signal straight
+/// back, and returning would resume the faulting instruction, which faults
+/// again: either way the thread spins on the fault while the rest of the
+/// process runs on and exits successfully, which hides the fault from every
+/// exit-code check. Clearing the disposition first is what makes the signal
+/// fatal, and what leaves a core holding the faulting context.
+fn dieWith(sig: c_int) noreturn {
+	var sa = std.posix.Sigaction{
+		.handler = .{ .handler = std.posix.SIG.DFL },
+		.mask = std.posix.sigemptyset(),
+		.flags = 0,
+	};
+	std.posix.sigaction(@enumFromInt(sig), &sa, null);
 	std.posix.raise(@enumFromInt(sig)) catch {};
+	// The signal is fatal by now, so this is only for a target that refuses it.
+	std.process.abort();
 }
 
 fn sysWrite(buf: [*]const u8, len: usize) void {

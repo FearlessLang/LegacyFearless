@@ -99,22 +99,18 @@ class VPFCodegen {
     };
   }
 
-  void emitVPFFun(MIR.Fun fun, String name, List<String> paramNames, List<ZigSingleCodegen.Drop> dropNames,
-                  String params, VPFCallInfo vpf) {
+  void emitVPFFun(MIR.Fun fun, String name, ZigSingleCodegen.FunSignature signature,
+                  List<ZigSingleCodegen.Drop> dropNames, VPFCallInfo vpf) {
     int vpfId = vpfCounter++;
     var localsName = name + "_" + vpfId + "_Locals";
     var thiefName = name + "_" + vpfId + "_thief";
+    var params = signature.params();
+    var paramNames = signature.discardNames();
 
     var frameAddingExprs = vpf.subExprs.stream().filter(s -> s.isFrameAdding).toList();
-    var funParamNames = new HashSet<String>();
-    for (var arg : fun.args()) {
-      funParamNames.add(arg.name());
-    }
+    var funParamExprs = thiefParamExprs(fun);
 
-    var localsFields = new StringBuilder();
-    for (var arg : fun.args()) {
-      localsFields.append(parent.id.varName(arg.name())).append(": rt.FatPtr,\n");
-    }
+    var localsFields = new StringBuilder(localsFieldDecls(fun));
     localsFields.append("r1: rt.FatPtr,\n");
     parent.currentState().captureStructs.put(
       new DecId(localsName, 0),
@@ -125,14 +121,15 @@ class VPFCodegen {
     var remaining = frameAddingExprs.subList(1, frameAddingExprs.size());
     if (remaining.size() >= 2 && canDeepenVPF(fun, 1)) {
       emitVPFThiefFunction(thiefName, localsName, fun, vpf, frameAddingExprs,
-        remaining, funParamNames, List.of());
+        remaining, funParamExprs, List.of());
     } else {
       emitSimpleThiefFunction(thiefName, localsName, fun, vpf, frameAddingExprs,
-        funParamNames, List.of());
+        funParamExprs, List.of());
     }
 
     var sb = new StringBuilder();
     sb.append("pub fn ").append(name).append("(").append(params).append(") callconv(.c) rt.FatPtr {\n");
+    sb.append(signature.prologue());
     if (!paramNames.isEmpty()) {
       sb.append("_ = .{ ");
       sb.append(String.join(", ", paramNames));
@@ -142,7 +139,7 @@ class VPFCodegen {
     // Before the base-case check, so it always runs.
     sb.append("heartbeat.tryPromote();\n");
     for (var drop : dropNames) {
-      sb.append("defer ").append(parent.decrementCode(drop.name(), drop.t())).append(";\n");
+      sb.append("defer ").append(parent.generateDecrement(drop.name(), drop.t())).append(";\n");
     }
 
     if (vpf.boolExpr != null) {
@@ -154,8 +151,11 @@ class VPFCodegen {
     }
 
     sb.append("var locals = ").append(localsName).append("{ ");
-    for (var arg : fun.args()) {
-      sb.append(".").append(parent.id.varName(arg.name())).append(" = ").append(parent.id.varName(arg.name())).append(", ");
+    var shape = parent.funShape(fun.name());
+    for (int i = 0; i < fun.args().size(); i++) {
+      if (i < shape.size() && shape.get(i).elided()) { continue; }
+      sb.append(".").append(parent.id.varName(fun.args().get(i).name()))
+        .append(" = ").append(signature.scalarNames().get(i)).append(", ");
     }
     sb.append(".r1 = undefined };\n");
 
@@ -285,21 +285,18 @@ class VPFCodegen {
   private void emitVPFThiefFunction(String thiefName, String localsName, MIR.Fun fun,
                                      VPFCallInfo vpf, List<SubExprInfo> allFrameAddingExprs,
                                      List<SubExprInfo> remainingFrameAdding,
-                                     Set<String> funParamNames,
+                                     Map<String, String> funParamExprs,
                                      List<String> forwardedChildOblFields) {
     int innerVpfId = vpfCounter++;
     var innerLocalsName = thiefName + "_" + innerVpfId + "_Locals";
     var innerThiefName = thiefName + "_" + innerVpfId + "_thief";
 
-    var thiefGen = new ThiefCodegen(parent, funParamNames);
+    var thiefGen = new ThiefCodegen(parent, funParamExprs);
 
     var myExpr = remainingFrameAdding.getFirst();
     int myGlobalIdx = allFrameAddingExprs.indexOf(myExpr);
 
-    var innerFields = new StringBuilder();
-    for (var arg : fun.args()) {
-      innerFields.append(parent.id.varName(arg.name())).append(": rt.FatPtr,\n");
-    }
+    var innerFields = new StringBuilder(localsFieldDecls(fun));
     var newForwardedFields = new ArrayList<>(forwardedChildOblFields);
     for (var fwdField : forwardedChildOblFields) {
       innerFields.append(fwdField).append(": usize,\n");
@@ -318,10 +315,10 @@ class VPFCodegen {
     var innerRemaining = remainingFrameAdding.subList(1, remainingFrameAdding.size());
     if (innerRemaining.size() >= 2 && canDeepenVPF(fun, newForwardedFields.size())) {
       emitVPFThiefFunction(innerThiefName, innerLocalsName, fun, vpf,
-        allFrameAddingExprs, innerRemaining, funParamNames, newForwardedFields);
+        allFrameAddingExprs, innerRemaining, funParamExprs, newForwardedFields);
     } else {
       emitSimpleThiefFunction(innerThiefName, innerLocalsName, fun, vpf,
-        allFrameAddingExprs, funParamNames, newForwardedFields);
+        allFrameAddingExprs, funParamExprs, newForwardedFields);
     }
 
     int fwdCount = forwardedChildOblFields.size();
@@ -331,8 +328,10 @@ class VPFCodegen {
     sb.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
 
     sb.append("var thief_locals = ").append(innerLocalsName).append("{ ");
-    for (var arg : fun.args()) {
-      var vn = parent.id.varName(arg.name());
+    var shape = parent.funShape(fun.name());
+    for (int i = 0; i < fun.args().size(); i++) {
+      if (i < shape.size() && shape.get(i).elided()) { continue; }
+      var vn = parent.id.varName(fun.args().get(i).name());
       sb.append(".").append(vn).append(" = locals.").append(vn).append(", ");
     }
     for (var fwdField : forwardedChildOblFields) {
@@ -380,7 +379,9 @@ class VPFCodegen {
   /// value of its declared type.
   private void emitLocalsHooks(String localsName, MIR.Fun fun) {
     var args = fun.args();
+    var shape = parent.funShape(fun.name());
     var fatPtrFields = IntStream.range(0, args.size())
+      .filter(i -> i >= shape.size() || !shape.get(i).elided())
       .mapToObj(i -> new LocalsField(parent.id.varName(args.get(i).name()),
         parent.paramStrategy(fun.name(), i, args.get(i).t())))
       .filter(field -> field.strategy() != RcFreeTypes.Strategy.NONE)
@@ -394,7 +395,7 @@ class VPFCodegen {
     } else {
       for (var field : fatPtrFields) {
         retain.append("if (parent.").append(field.name()).append(".is_transient()) parent.").append(field.name()).append(" = parent.").append(field.name()).append(".box_transient();\n");
-        retain.append("copy.").append(field.name()).append(" = ").append(parent.shareCode("parent." + field.name(), field.strategy())).append(";\n");
+        retain.append("copy.").append(field.name()).append(" = ").append(parent.generateShare("parent." + field.name(), field.strategy())).append(";\n");
       }
     }
     retain.append("}");
@@ -411,7 +412,7 @@ class VPFCodegen {
       drop.append("_ = releasing_worker_id;\n");
     } else {
       for (var field : fatPtrFields) {
-        drop.append(parent.decrementAsCode("locals." + field.name(), field.strategy(), "releasing_worker_id")).append(";\n");
+        drop.append(parent.generateDecrementAs("locals." + field.name(), field.strategy(), "releasing_worker_id")).append(";\n");
       }
     }
     drop.append("}");
@@ -422,9 +423,9 @@ class VPFCodegen {
   /// obligation and then the forwarded ones, and calls the full combiner.
   private void emitSimpleThiefFunction(String thiefName, String localsName, MIR.Fun fun,
                                         VPFCallInfo vpf, List<SubExprInfo> frameAddingExprs,
-                                        Set<String> funParamNames,
+                                        Map<String, String> funParamExprs,
                                         List<String> forwardedChildOblFields) {
-    var thiefGen = new ThiefCodegen(parent, funParamNames);
+    var thiefGen = new ThiefCodegen(parent, funParamExprs);
     int fwdCount = forwardedChildOblFields.size();
 
     // The body comes first, because it shows whether a locals decl is necessary.
@@ -529,7 +530,7 @@ class VPFCodegen {
         allArgs[sub.index] = (sub.expr instanceof MIR.X x)
           ? sub.index == 0
             ? "locals." + parent.id.varName(x.name())
-            : parent.shareCode("locals." + parent.id.varName(x.name()), x.t())
+            : parent.generateShare("locals." + parent.id.varName(x.name()), x.t())
           : sub.expr.accept(codegen, true);
       }
     }
@@ -545,7 +546,9 @@ class VPFCodegen {
       var all = new ArrayList<String>();
       all.add(recvStr);
       all.addAll(argStrs);
-      return parent.methWrapperRef(target, methName) + "(" + String.join(", ", all) + ")";
+      return parent.methWrapperRef(target, methName) + "("
+        + String.join(", ", parent.unboxArgs(target, vpf.vpfCall.name(), vpf.vpfCall.mdf(), all))
+        + ")";
     }
     if (vpf.guardTarget.isPresent()) {
       return emitGuardedCombiner(vpf, recvStr, argStrs);
@@ -575,7 +578,10 @@ class VPFCodegen {
     sb.append("break :").append(block)
       .append(" if (").append(parent.guardTest(recvName, target)).append(") ")
       .append(parent.methWrapperRef(target, methName))
-      .append("(").append(String.join(", ", names)).append(")")
+      .append("(")
+      .append(String.join(", ",
+        parent.unboxArgs(target, vpf.vpfCall.name(), vpf.vpfCall.mdf(), names)))
+      .append(")")
       .append(" else rt.call(").append(recvName).append(", ").append(vpf.hashName).append(", ")
       .append(argsTuple).append(", @src());\n}");
     return sb.toString();
@@ -583,27 +589,77 @@ class VPFCodegen {
 
   /// True when one more thief level keeps the locals inside the runtime buffer.
   private boolean canDeepenVPF(MIR.Fun fun, int nextFwdCount) {
-    int structSize = fun.args().size() * 16  // FatPtr params
-                   + nextFwdCount * 8         // forwarded obligation usize fields
-                   + 16;                      // r_thief FatPtr
-    return structSize <= LOCALS_COPY_LIMIT;
+    return localsSize(fun, nextFwdCount) <= LOCALS_COPY_LIMIT;
+  }
+
+  /// The bytes a `_Locals` of `fun` takes, laid out the way an `extern struct` lays its fields
+  /// out: one field per argument the shape keeps, `nextFwdCount` `usize` obligation fields, and
+  /// the trailing result `FatPtr`.
+  ///
+  /// A field is rounded up to its own alignment, so a `u8` between two `FatPtr`s costs eight
+  /// bytes and not one. Under-counting would let a frame past the runtime's copy buffer, which
+  /// the assert in `heartbeat.zig` catches at run time.
+  int localsSize(MIR.Fun fun, int nextFwdCount) {
+    var shape = parent.funShape(fun.name());
+    int size = 0;
+    for (int i = 0; i < fun.args().size(); i++) {
+      var slot = i < shape.size() ? shape.get(i) : ZigSingleCodegen.ArgSlot.BOXED;
+      if (slot.elided()) { continue; }
+      size = align(size, slot.align()) + slot.bytes();
+    }
+    size = align(size, 8) + nextFwdCount * 8 + 16;
+    return size;
+  }
+
+  private static int align(int offset, int to) {
+    return (offset + to - 1) / to * to;
+  }
+
+  /// The fields a `_Locals` of `fun` declares for its arguments, following the shape the
+  /// function's own signature takes.
+  private String localsFieldDecls(MIR.Fun fun) {
+    var shape = parent.funShape(fun.name());
+    var out = new StringBuilder();
+    for (int i = 0; i < fun.args().size(); i++) {
+      var slot = i < shape.size() ? shape.get(i) : ZigSingleCodegen.ArgSlot.BOXED;
+      if (slot.elided()) { continue; }
+      out.append(parent.id.varName(fun.args().get(i).name())).append(": ")
+        .append(slot.scalar().map(sc -> sc.zigType()).orElse("rt.FatPtr")).append(",\n");
+    }
+    return out.toString();
+  }
+
+  /// The expression a thief reads each parameter of `fun` back with. A thief holds its
+  /// parameters in the stolen locals struct, so a boxed one is a field read, an unboxed one is
+  /// that field boxed again, and an elided one is the singleton the arm never reads.
+  private Map<String, String> thiefParamExprs(MIR.Fun fun) {
+    var shape = parent.funShape(fun.name());
+    var out = new LinkedHashMap<String, String>();
+    for (int i = 0; i < fun.args().size(); i++) {
+      var arg = fun.args().get(i);
+      var slot = i < shape.size() ? shape.get(i) : ZigSingleCodegen.ArgSlot.BOXED;
+      var field = "locals." + parent.id.varName(arg.name());
+      out.put(arg.name(), slot.elided()
+        ? parent.standInSelf()
+        : slot.scalar().map(sc -> sc.rtModule() + ".make(" + field + ")").orElse(field));
+    }
+    return out;
   }
 
   /// Gives each param name the "locals." prefix: a thief reads its params through the locals
   /// struct pointer.
   static class ThiefCodegen implements MIRVisitor<String> {
     private final ZigSingleCodegen delegate;
-    private final Set<String> paramNames;
+    private final Map<String, String> paramExprs;
 
-    ThiefCodegen(ZigSingleCodegen delegate, Set<String> paramNames) {
+    ThiefCodegen(ZigSingleCodegen delegate, Map<String, String> paramExprs) {
       this.delegate = delegate;
-      this.paramNames = paramNames;
+      this.paramExprs = paramExprs;
     }
 
     @Override public String visitX(MIR.X x, boolean checkMagic) {
-      if (paramNames.contains(x.name())) {
-        return "locals." + delegate.id.varName(x.name());
-      }
+      var param = paramExprs.get(x.name());
+      if (param != null) { return param; }
       return delegate.visitX(x, checkMagic);
     }
     @Override public String visitMCall(MIR.MCall call, boolean checkMagic) {

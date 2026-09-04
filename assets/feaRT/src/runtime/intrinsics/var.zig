@@ -1,6 +1,8 @@
 const std = @import("std");
 const objs = @import("../objs.zig");
 const gc = @import("../gc.zig");
+const cycles = @import("../cycles.zig");
+const worker_mod = @import("../worker.zig");
 
 const FatPtr = objs.FatPtr;
 const FearlessValue = objs.FearlessValue;
@@ -8,11 +10,17 @@ const root = @import("root");
 const log = @import("../log.zig");
 
 pub const VarCell = extern struct {
-    ref_count: std.atomic.Value(u32),
+    header: objs.RcCellHeader,
     /// The language guarantees data race freedom, so acquire/release is enough
     /// for cross-thread visibility.
     value: std.atomic.Value(*FatPtr),
 };
+
+/// Enumerates the one reference the cell holds, for the cycle collector.
+fn var_trace(node: *anyopaque, visit: objs.VisitFn, ctx: *anyopaque) callconv(.c) void {
+    const cell: *VarCell = @ptrCast(@alignCast(node));
+    visit(ctx, cell.value.load(.monotonic).*);
+}
 
 pub const VT_Var: objs.VTable = .{
     .type_name = "<rt impl for base.Var/1>",
@@ -20,6 +28,7 @@ pub const VT_Var: objs.VTable = .{
     .methods = &.{},
     .method_names = &.{},
     .storage_mode = .primitiveContainer,
+    .trace_fn = var_trace,
 };
 
 pub fn make(value: FatPtr) FatPtr {
@@ -27,35 +36,22 @@ pub fn make(value: FatPtr) FatPtr {
     val_ptr.* = value;
     const cell = gc.allocator.create(VarCell) catch @panic("OOM");
     cell.* = .{
-        .ref_count = std.atomic.Value(u32).init(1),
+        .header = .born,
         .value = std.atomic.Value(*FatPtr).init(val_ptr),
     };
-    return .{
-        .data = .{ .cell = cell },
-        .vt = &VT_Var,
-    };
+    return .{ .data = .{ .cell = cell }, .vt = &VT_Var };
 }
 
-pub fn retain(cell: *VarCell) void {
-    const count = cell.ref_count.fetchAdd(1, .monotonic);
-    const referencer_limit = std.math.maxInt(u32) - 4096;
-    if (count >= referencer_limit) {
-        @branchHint(.unlikely);
-        @panic("Too many references");
-    }
+/// Releases the one reference a dead cell holds. Part of the collector's
+/// `Release`, which runs as soon as the count reaches zero.
+pub fn drop_children(cell: *VarCell, releasing_worker_id: u32) void {
+    cell.value.load(.monotonic).*.rc_decrement_as(releasing_worker_id);
 }
 
-/// `releasing_worker_id` is the worker on whose behalf this release runs. It
-/// travels down from the start of the drop chain.
-pub noinline fn release(cell: *VarCell, releasing_worker_id: u32) void {
-    const old_count = cell.ref_count.fetchSub(1, .release);
-    if (std.debug.runtime_safety) std.debug.assert(old_count != 0);
-    if (old_count != 1) return;
-
-    _ = cell.ref_count.load(.acquire);
-    const old_ptr = cell.value.load(.monotonic);
-    old_ptr.*.rc_decrement_as(releasing_worker_id);
-    gc.recycleDestroy(FatPtr, old_ptr, .var_release);
+/// Gives a dead cell's storage back. Part of the collector's `Free`.
+pub fn free_cell(cell: *VarCell, releasing_worker_id: u32) void {
+    _ = releasing_worker_id;
+    gc.recycleDestroy(FatPtr, cell.value.load(.monotonic), .var_release);
     gc.recycleDestroy(VarCell, cell, .var_release);
 }
 
@@ -64,6 +60,7 @@ fn get(self: FatPtr) FatPtr {
 }
 
 fn swap(self: FatPtr, new_value: FatPtr) FatPtr {
+    cycles.noteStore(self, new_value);
     var cell = self.data.cell;
     const new_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
     new_ptr.* = new_value;
@@ -74,6 +71,7 @@ fn swap(self: FatPtr, new_value: FatPtr) FatPtr {
 }
 
 fn set(self: FatPtr, new_value: FatPtr) FatPtr {
+    cycles.noteStore(self, new_value);
     var cell = self.data.cell;
     const new_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
     new_ptr.* = new_value;

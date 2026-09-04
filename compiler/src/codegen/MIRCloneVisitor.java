@@ -65,12 +65,19 @@ public interface MIRCloneVisitor extends MIRVisitor<MIR.E> {
   }
 
   @Override default MIR.CreateObj visitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
+    // A capture keeps its `imm` answer across a rename, so the set is rebuilt from the
+    // captures rather than copied: a stale name would name a capture that no longer exists.
+    var immCaptures = createObj.captures().stream()
+      .filter(x->createObj.immCaptures().contains(x.name()))
+      .map(x->((MIR.X)this.visitX(x, checkMagic)).name())
+      .collect(Collectors.toUnmodifiableSet());
     return new MIR.CreateObj(
       this.visitMT(createObj.t()),
       createObj.selfName(),
       createObj.meths().stream().map(this::visitMeth).toList(),
       createObj.unreachableMs().stream().map(this::visitMeth).toList(),
-      Collections.unmodifiableSortedSet(createObj.captures().stream().map(x->(MIR.X)this.visitX(x, checkMagic)).collect(Collectors.toCollection(MIR::createCapturesSet)))
+      Collections.unmodifiableSortedSet(createObj.captures().stream().map(x->(MIR.X)this.visitX(x, checkMagic)).collect(Collectors.toCollection(MIR::createCapturesSet))),
+      immCaptures
     );
   }
 

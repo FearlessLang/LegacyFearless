@@ -9,15 +9,16 @@ const std = @import("std");
 const objs = @import("../../objs.zig");
 const gc = @import("../../gc.zig");
 const list_rt = @import("../list.zig");
+const list_storage = @import("../lists/storage.zig");
 const native = @import("../../native.zig");
 const root = @import("root");
 const pb = root.pkg_base;
 
 const types = @import("types.zig");
+const ops_node = @import("ops_node.zig");
 const string_flows = @import("string_flows.zig");
 const FatPtr = objs.FatPtr;
 
-const ArrayList = std.ArrayList(FatPtr);
 
 pub const FlowCaptures = extern struct { flow_ptr: usize };
 
@@ -35,7 +36,7 @@ pub fn create_flow(source: types.Source, is_finite: bool) *types.FeartFlow {
     f.* = .{
         .source = source,
         .ops = &.{},
-        .ops_ref_count = null,
+        .ops_owner = null,
         .is_finite = is_finite,
         .ref_count = std.atomic.Value(u32).init(1),
     };
@@ -69,6 +70,40 @@ pub fn flow_drop(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void
     const Layout = objs.GenObjectLayoutType(FlowCaptures);
     const self: *const Layout = @ptrCast(@alignCast(header));
     release_flow(@ptrFromInt(self.captures.flow_ptr), releasing_worker_id);
+}
+
+/// Enumerates every reference a flow holds, for the cycle collector.
+///
+/// It follows `release_source` and `release_ops` arm for arm: the collector must
+/// see each reference exactly as many times as the drop releases it, or a live
+/// node reads as garbage.
+///
+/// A flow over a range, or over nothing, reaches this and enumerates nothing.
+/// Only a flow that names user objects -- through its source, through the list
+/// it borrows from, or through a closure in its op chain -- can lie on a cycle.
+pub fn flow_trace(header: *anyopaque, visit: objs.VisitFn, ctx: *anyopaque) callconv(.c) void {
+    const Layout = objs.GenObjectLayoutType(FlowCaptures);
+    const self: *const Layout = @ptrCast(@alignCast(header));
+    const f: *const types.FeartFlow = @ptrFromInt(self.captures.flow_ptr);
+
+    visit_source(f, visit, ctx);
+    if (f.ops_owner) |node| visit(ctx, ops_node.opsEdge(node));
+}
+
+fn visit_source(f: *const types.FeartFlow, visit: objs.VisitFn, ctx: *anyopaque) void {
+    switch (f.source) {
+        .str => |ss| return visit(ctx, ss.owner),
+        else => {},
+    }
+
+    if (f.source_owner) |source_owner| return visit(ctx, source_owner);
+
+    switch (f.source) {
+        .list => |ls| for (ls.items) |item| visit(ctx, item),
+        .single => |ss| if (!ss.consumed) visit(ctx, ss.value),
+        .str => unreachable, // handled above
+        .range_finite, .range_infinite, .empty => {},
+    }
 }
 
 fn release_source(f: *types.FeartFlow, releasing_worker_id: u32) void {
@@ -115,53 +150,12 @@ fn retain_source(source: types.Source, source_owner: ?FatPtr) ?FatPtr {
     return null;
 }
 
-fn make_ops_ref_count() *types.OpsRefCount {
-    const ref_count = gc.recycleAlloc(types.OpsRefCount);
-    ref_count.* = .{ .value = std.atomic.Value(u32).init(1) };
-    return ref_count;
-}
-
 fn retain_ops(flow: *const types.FeartFlow) void {
-    if (flow.ops_ref_count) |ref_count| {
-        _ = ref_count.value.fetchAdd(1, .monotonic);
-    }
+    if (flow.ops_owner) |node| _ = ops_node.opsEdge(node).share();
 }
 
 fn release_ops(flow: *types.FeartFlow, releasing_worker_id: u32) void {
-    const ref_count = flow.ops_ref_count orelse return;
-    const old_count = ref_count.value.fetchSub(1, .release);
-    if (std.debug.runtime_safety) std.debug.assert(old_count != 0);
-    if (old_count != 1) return;
-    _ = ref_count.value.load(.acquire);
-
-    for (flow.ops) |op| release_op(op, releasing_worker_id);
-    gc.recycleDestroySlice(types.OpDesc, flow.ops, .flow_op_release);
-    gc.recycleDestroy(types.OpsRefCount, ref_count, .flow_op_release);
-}
-
-fn release_op(op: types.OpDesc, releasing_worker_id: u32) void {
-    switch (op.kind) {
-        .scan => {
-            const cell: *types.ScanCell = @ptrFromInt(op.state);
-            cell.acc.rc_decrement_as(releasing_worker_id);
-            gc.recycleDestroy(types.ScanCell, cell, .flow_op_release);
-            op.closure.rc_decrement_as(releasing_worker_id);
-        },
-        .actor => {
-            const state: *types.ActorState = @ptrFromInt(op.state);
-            state.state_fp.rc_decrement_as(releasing_worker_id);
-            state.callback.rc_decrement_as(releasing_worker_id);
-            gc.recycleDestroy(types.ActorState, state, .flow_op_release);
-        },
-        .map_ctx, .peek_ctx => {
-            const cell: *types.CtxCell = @ptrFromInt(op.state);
-            cell.ctx.rc_decrement_as(releasing_worker_id);
-            gc.recycleDestroy(types.CtxCell, cell, .flow_op_release);
-            op.closure.rc_decrement_as(releasing_worker_id);
-        },
-        .limit => {},
-        .map, .filter, .peek, .map_filter, .flat_map => op.closure.rc_decrement_as(releasing_worker_id),
-    }
+    if (flow.ops_owner) |node| ops_node.opsEdge(node).rc_decrement_as(releasing_worker_id);
 }
 
 fn clone_op(op: types.OpDesc) types.OpDesc {
@@ -196,12 +190,12 @@ fn clone_op(op: types.OpDesc) types.OpDesc {
     return copy;
 }
 
-fn clone_ops(ops: []types.OpDesc) struct { ops: []types.OpDesc, ref_count: ?*types.OpsRefCount } {
-    if (ops.len == 0) return .{ .ops = &.{}, .ref_count = null };
+fn clone_ops(ops: []types.OpDesc) struct { ops: []types.OpDesc, owner: ?*ops_node.FlowOps } {
+    if (ops.len == 0) return .{ .ops = &.{}, .owner = null };
 
     const cloned = gc.recycleAllocSlice(types.OpDesc, ops.len);
     for (ops, 0..) |op, i| cloned[i] = clone_op(op);
-    return .{ .ops = cloned, .ref_count = make_ops_ref_count() };
+    return .{ .ops = cloned, .owner = ops_node.make_ops(cloned) };
 }
 
 // Divide-and-conquer source split for the parallel driver.
@@ -248,7 +242,7 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 .source = left_source,
                 .source_owner = retain_source(left_source, flow.source_owner),
                 .ops = flow.ops,
-                .ops_ref_count = flow.ops_ref_count,
+                .ops_owner = flow.ops_owner,
                 .is_finite = true,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
@@ -256,7 +250,7 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 .source = right_source,
                 .source_owner = retain_source(right_source, flow.source_owner),
                 .ops = flow.ops,
-                .ops_ref_count = flow.ops_ref_count,
+                .ops_owner = flow.ops_owner,
                 .is_finite = true,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
@@ -282,7 +276,7 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 .source = .{ .range_finite = .{ .current = rs.current, .end = mid, .step = rs.step } },
                 .source_owner = null,
                 .ops = flow.ops,
-                .ops_ref_count = flow.ops_ref_count,
+                .ops_owner = flow.ops_owner,
                 .is_finite = true,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
@@ -290,7 +284,7 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 .source = .{ .range_finite = .{ .current = mid, .end = rs.end, .step = rs.step } },
                 .source_owner = null,
                 .ops = flow.ops,
-                .ops_ref_count = flow.ops_ref_count,
+                .ops_owner = flow.ops_owner,
                 .is_finite = true,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
@@ -328,7 +322,7 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 } },
                 .source_owner = null,
                 .ops = flow.ops,
-                .ops_ref_count = flow.ops_ref_count,
+                .ops_owner = flow.ops_owner,
                 .is_finite = true,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
@@ -342,7 +336,7 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 } },
                 .source_owner = null,
                 .ops = flow.ops,
-                .ops_ref_count = flow.ops_ref_count,
+                .ops_owner = flow.ops_owner,
                 .is_finite = true,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
@@ -364,7 +358,7 @@ pub fn copy_flow_body(src: *const types.FeartFlow) *types.FeartFlow {
         .source = src.source,
         .source_owner = retain_source(src.source, src.source_owner),
         .ops = src.ops,
-        .ops_ref_count = src.ops_ref_count,
+        .ops_owner = src.ops_owner,
         .is_finite = src.is_finite,
         .ref_count = std.atomic.Value(u32).init(1),
     };
@@ -382,7 +376,7 @@ pub fn clone_with_op(existing: *types.FeartFlow, new_op: types.OpDesc) *types.Fe
         .source = existing.source,
         .source_owner = retain_source(existing.source, existing.source_owner),
         .ops = new_ops,
-        .ops_ref_count = make_ops_ref_count(),
+        .ops_owner = ops_node.make_ops(new_ops),
         .is_finite = existing.is_finite,
         .ref_count = std.atomic.Value(u32).init(1),
     };
@@ -396,7 +390,7 @@ pub fn clone_with_finiteness(existing: *types.FeartFlow, is_finite: bool) *types
         .source = existing.source,
         .source_owner = retain_source(existing.source, existing.source_owner),
         .ops = ops_clone.ops,
-        .ops_ref_count = ops_clone.ref_count,
+        .ops_owner = ops_clone.owner,
         .is_finite = is_finite,
         .ref_count = std.atomic.Value(u32).init(1),
     };
@@ -427,13 +421,18 @@ pub fn make_flow_from_str(comptime vt: *const objs.VTable, owner: FatPtr, bytes:
     return make_flow_fp(vt, flow);
 }
 
-// Generic "flow over N items": used by both factory `#/N` and `ofIso/N`.
-// Items are copied into a gc-owned ArrayList; the flow holds a view into it.
+/// A flow over a copy of `items`, used by both factory `#/N` and `ofIso/N`. It
+/// takes the one reference the caller holds on each item.
+///
+/// The copy lives in a `ListStorage`, which the flow names as its source owner.
+/// A split shares that owner rather than the buffer, so the buffer has one owner
+/// however many halves read it, and the last of them gives it back.
 pub fn make_flow_from_items(comptime vt: *const objs.VTable, items: []const FatPtr) FatPtr {
-    const al = gc.allocator.create(ArrayList) catch @panic("OOM");
-    al.* = ArrayList.initCapacity(gc.allocator, items.len) catch @panic("OOM");
-    al.appendSliceAssumeCapacity(items);
-    return make_flow_fp(vt, create_flow(.{ .list = .{ .items = al.items, .index = 0 } }, true));
+    const storage = list_storage.make_storage(items.len);
+    storage.al.appendSliceAssumeCapacity(items);
+    const flow = create_flow(.{ .list = .{ .items = storage.al.items, .index = 0 } }, true);
+    flow.source_owner = list_storage.storageEdge(storage);
+    return make_flow_fp(vt, flow);
 }
 
 pub fn make_flow_from_range(comptime vt: *const objs.VTable, start: i64, end: i64, step: i64) FatPtr {

@@ -7,8 +7,7 @@
 //!
 //! On Linux the backend is a single shared io_uring with one poller thread; the
 //! kernel fulfils obligations. Elsewhere it is a single dedicated blocking-I/O
-//! thread (modelled on the destroyer) that performs the syscall and fulfils the
-//! obligation itself. Both share the submit -> park -> resume -> decode skeleton
+//! thread that performs the syscall and fulfils the obligation itself. Both share the submit -> park -> resume -> decode skeleton
 //! in `awaitOp`; only op dispatch and result production differ.
 
 const std = @import("std");
@@ -100,9 +99,9 @@ const LinuxBackend = struct {
         thread.detach();
     }
 
-    /// Retries on EINTR: bdwgc's stop-the-world suspend signal routinely
-    /// interrupts `io_uring_enter`, and a dropped submit leaves the SQE in the
-    /// userspace ring with its fiber parked on a completion that never comes.
+    /// Retries on EINTR: a signal that interrupts `io_uring_enter` would
+    /// otherwise leave the SQE in the userspace ring with its fiber parked on a
+    /// completion that never comes.
     fn submitPending() void {
         while (true) {
             _ = ring.submit() catch |err| switch (err) {
@@ -138,8 +137,6 @@ const LinuxBackend = struct {
     }
 
     fn pollerLoop() void {
-        gc.register_thread();
-        defer gc.unregister_thread();
         while (true) {
             const cqe = ring.copy_cqe() catch continue;
             const c: *Completion = @ptrFromInt(cqe.user_data);
@@ -172,8 +169,6 @@ const FallbackBackend = struct {
     }
 
     fn ioLoop() void {
-        gc.register_thread();
-        defer gc.unregister_thread();
         while (true) {
             if (submit_queue.dequeue()) |c| {
                 const res: i32 = switch (c.op) {
