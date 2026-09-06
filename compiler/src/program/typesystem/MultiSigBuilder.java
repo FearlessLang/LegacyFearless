@@ -139,7 +139,10 @@ record MultiSigBuilder(
     //we return t if the transformation does not change any
     //information about mdf X. 
     //It also works for read/imm X
-    Mdf goodMdf= isRet?MdfLubGlb.glb(options):MdfLubGlb.lub(options);
+    //Parameters and the receiver narrow with the greatest lower bound, which makes the
+    //promoted method harder to call; the return type widens with the least upper bound,
+    //which makes the result usable. Reversing either direction is unsound.
+    Mdf goodMdf= isRet?MdfLubGlb.lub(options):MdfLubGlb.glb(options);
     if(mdf.isMdf()){ return t.withMdf(goodMdf); }
     assert mdf.isReadImm();
     if(goodMdf.is(Mdf.imm, Mdf.iso)){ return t.withMdf(Mdf.imm); }

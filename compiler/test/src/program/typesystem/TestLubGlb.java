@@ -24,15 +24,19 @@ class TestLubGlb {
     MdfLubGlb.lub(EnumSet.of(mut));
     //MdfLubGlb is selftesting.
   }
+  /// The least upper bound is the most general of the modifiers that every option
+  /// is a subtype of.
   @Test void testHandMadeLub(){
     for(var mdfs: MdfLubGlb.domain()){
-      assertEquals(MdfLubGlb.lub(mdfs),mostSpecific(mdfs),
+      assertEquals(MdfLubGlb.lub(mdfs),mostGeneral(mdfs),
         "For mdfs= "+mdfs);
     }
   }
+  /// The greatest lower bound is the most specific of the modifiers that are a
+  /// subtype of every option.
   @Test void testHandMadeGlb(){
     for(var mdfs: MdfLubGlb.domain()){
-      assertEquals(MdfLubGlb.glb(mdfs),mostGeneral(mdfs),
+      assertEquals(MdfLubGlb.glb(mdfs),mostSpecific(mdfs),
         "For mdfs= "+mdfs);
     }
   }

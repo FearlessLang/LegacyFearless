@@ -45,27 +45,31 @@ public class MdfLubGlb {
     var o= EnumSet.copyOf(options);
     return glbMap.get(o); 
   }
+  /// `ub` is above every option, so every option is a subtype of it.
   static boolean isUb(EnumSet<Mdf> options,Mdf ub){
-    return options.stream().allMatch(x -> isSubType(ub,x));
+    return options.stream().allMatch(x -> isSubType(x,ub));
   }
+  /// `lb` is below every option, so it is a subtype of every option.
   static boolean isLb(EnumSet<Mdf> options,Mdf lb){
-    return options.stream().allMatch(x -> isSubType(x,lb));
+    return options.stream().allMatch(x -> isSubType(lb,x));
   }
+  /// The least upper bound is an upper bound that is below every other upper bound.
   static boolean isLub(EnumSet<Mdf> options,Mdf lub){
     var isUb= isUb(options,lub);
     var isLowest= allMdf.stream()
       .filter(mdf -> isUb(options,mdf))
-      .allMatch(ub -> isSubType(ub, lub));    
+      .allMatch(ub -> isSubType(lub, ub));
     return isUb && isLowest;
   }
+  /// The greatest lower bound is a lower bound that is above every other lower bound.
   static boolean isGlb(EnumSet<Mdf> options,Mdf glb){
     var isLb= isLb(options,glb);
     var isGreatest= allMdf.stream()
       .filter(mdf -> isLb(options,mdf))
-      .allMatch(lb -> isSubType(glb,lb));    
+      .allMatch(lb -> isSubType(lb, glb));
     return isLb && isGreatest;
   }
-  static void init(EnumSet<Mdf> options,Mdf lub,Mdf glb){
+  static void init(EnumSet<Mdf> options,Mdf glb,Mdf lub){
     var novel1= lubMap.put(options,lub);
     var novel2= glbMap.put(options, glb);
     assert novel1==null && novel2==null;//both new entries
@@ -83,7 +87,7 @@ public class MdfLubGlb {
       :"not unique glb: "+otherGlb;
   }
 
-  // RCs | LUB | GLB
+  // RCs | GLB | LUB
   static {
     init(of(iso),      iso,     iso);
     init(of(imm),      imm,     imm);
