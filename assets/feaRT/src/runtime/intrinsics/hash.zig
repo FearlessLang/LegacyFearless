@@ -66,7 +66,6 @@ fn cheap_byte(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
 }
 
 fn cheap_str(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
-    defer x.rc_decrement();
     const caps = deref_caps(self);
     var hv: i32 = 1;
     for (str_rt.deref_str(x)) |b| hv = (hv *% 31) +% @as(i32, b);
@@ -75,10 +74,9 @@ fn cheap_str(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
 }
 
 fn cheap_hash(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
-    // Default `Hasher.hash(x)` body: `x.hash(this)`. `x` is lent to the call, so this frame
-    // still owns the reference the caller gave it.
-    defer x.rc_decrement();
-    return objs.call(x, comptime h("read .hash/1"), .{self.share()}, @src());
+    // Default `Hasher.hash(x)` body: `x.hash(this)`. Every operand of that call is
+    // lent, so neither `x` nor this receiver is released here.
+    return objs.call(x, comptime h("read .hash/1"), .{self}, @src());
 }
 
 pub const VT_CheapHash: objs.VTable = .{

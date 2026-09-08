@@ -70,9 +70,8 @@ pub const FeartFlow = struct {
     /// repeated here so that iteration reads it without a second indirection.
     ops_owner: ?*ops_node.FlowOps = null,
     is_finite: bool,
-    // Body refcount. Currently always 1 (each FatPtr owns its own body), but
-    // `flow_drop` releases through this so future schemes that share bodies
-    // (e.g. an alternate split design) can bump it without touching call sites.
+    // Body refcount. Always 1 today: each FatPtr owns its own body, and
+    // `flow_drop` releases through this.
     ref_count: std.atomic.Value(u32),
 };
 

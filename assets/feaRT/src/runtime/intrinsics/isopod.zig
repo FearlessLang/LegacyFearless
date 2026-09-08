@@ -31,9 +31,11 @@ pub const VT_IsoPod: objs.VTable = .{
     .trace_fn = isopod_trace,
 };
 
+/// Takes `value` on loan and keeps one reference of its own. See
+/// [`FatPtr.box_transient`] for why the order is `share` then `box_transient`.
 pub fn make(value: FatPtr) FatPtr {
     const val_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
-    val_ptr.* = value;
+    val_ptr.* = value.share().box_transient();
     const cell = gc.allocator.create(IsoCell) catch @panic("OOM");
     cell.* = .{
         .header = .born,
@@ -60,11 +62,12 @@ fn is_alive(self: FatPtr) FatPtr {
     return bool_intrinsics.to_bool(val != null);
 }
 
+/// Borrows the viewer and lends it the stored value. The pod holds that value
+/// and outlives the call, so the arm needs no reference of its own.
 fn peek(self: FatPtr, viewer: FatPtr) FatPtr {
-    defer viewer.rc_decrement();
     const val = self.data.iso_cell.value.load(.monotonic);
     if (val) |ptr| {
-        return objs.call(viewer, h("mut .some/1"), .{ptr.*.share()}, @src());
+        return objs.call(viewer, h("mut .some/1"), .{ptr.*}, @src());
     }
     return objs.call(viewer, h("mut .empty/0"), .{}, @src());
 }
@@ -90,11 +93,12 @@ fn consume(self: FatPtr) FatPtr {
     unreachable;
 }
 
+/// Borrows `new_value` and keeps it, releasing the reference it replaces.
 fn next(self: FatPtr, new_value: FatPtr) FatPtr {
     cycles.noteStore(self, new_value);
     const cell = self.data.iso_cell;
     const new_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
-    new_ptr.* = new_value;
+    new_ptr.* = new_value.share().box_transient();
     const old_ptr = cell.value.swap(new_ptr, .monotonic);
     if (old_ptr) |ptr| {
         ptr.*.rc_decrement();
@@ -155,20 +159,20 @@ test "IsoPod consume transfers exactly once and next releases overwritten value"
     var a = objs.obj_k(Captures, &vt_a, .{});
     var b = objs.obj_k(Captures, &vt_b, .{});
     var c = objs.obj_k(Captures, &vt_c, .{});
-    var pod = make(a.share());
+    var pod = make(a);
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
 
-    // `consume` and `next` borrow their receiver: neither releases it. Sharing it
-    // here would leave the pod with a reference no one gives back, so the release
-    // below would never reach zero and never free the value.
+    // `consume` and `next` borrow their receiver and their value alike: neither
+    // releases either. `next` keeps a share of its own for what it stores, so the
+    // counts below are the test's own reference plus the pod's.
     var consumed = consume(pod);
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
     consumed.rc_decrement();
     try testing.expectEqual(@as(u32, 1), a.boxed_value().refCountForTest());
 
-    _ = next(pod, b.share());
+    _ = next(pod, b);
     try testing.expectEqual(@as(u32, 2), b.boxed_value().refCountForTest());
-    _ = next(pod, c.share());
+    _ = next(pod, c);
     try testing.expectEqual(@as(u32, 1), b.boxed_value().refCountForTest());
     try testing.expectEqual(@as(u32, 2), c.boxed_value().refCountForTest());
 
@@ -185,7 +189,7 @@ const PeekViewerCaptures = extern struct { result_ptr: usize };
 fn peek_viewer_some(self: FatPtr, value: FatPtr) callconv(.c) FatPtr {
     const caps = objs.deref(PeekViewerCaptures, self);
     const result: *FatPtr = @ptrFromInt(caps.result_ptr);
-    result.* = value;
+    result.* = value.share();
     return make_void();
 }
 
@@ -208,12 +212,12 @@ test "IsoPod peek shares the stored value with the viewer" {
     const Captures = extern struct {};
     const vt: objs.VTable = .{ .type_name = "test.IsoPeek", .hashes = &.{}, .methods = &.{}, .method_names = &.{}, };
     var value = objs.obj_k(Captures, &vt, .{});
-    var pod = make(value.share());
+    var pod = make(value);
     try testing.expectEqual(@as(u32, 2), value.boxed_value().refCountForTest());
 
     var seen: FatPtr = undefined;
     var viewer = objs.obj_k(PeekViewerCaptures, &VT_PeekViewer, .{ .result_ptr = @intFromPtr(&seen) });
-    var result = peek(pod.share(), viewer.share());
+    var result = peek(pod, viewer);
     try testing.expectEqual(@as(u32, 3), value.boxed_value().refCountForTest());
 
     result.rc_decrement();

@@ -28,7 +28,6 @@ fn utf16_from_surrogate_pair(self: FatPtr, high_fp: FatPtr, low_fp: FatPtr) call
     _ = self;
     const high = nat_intrinsics.deref(high_fp);
     const low = nat_intrinsics.deref(low_fp);
-    // const cp: u32 = @intCast(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00));
     const cp: u32 = if (high >= 0xD800 and high <= 0xDBFF and low >= 0xDC00 and low <= 0xDFFF)
         @intCast(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00))
     else
@@ -65,7 +64,6 @@ pub const VT_UTF16: objs.VTable = .{
 /// `UTF8.fromBytes(list): Action[Str]` -- validate the bytes as UTF-8.
 fn utf8_from_bytes(self: FatPtr, list_fp: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer list_fp.rc_decrement();
     const al = list_intrinsics.deref_list(list_fp);
     if (al.items.len == 0) return str.make_action_ok(str.make_str("".ptr, 0));
     const buf = str.alloc_bytes(al.items.len);

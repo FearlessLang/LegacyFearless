@@ -1,24 +1,22 @@
 //! Size-classed heap with thread-local allocation and thread-local free.
 //!
-//! Every block comes from one chunk, and a chunk belongs to one heap and
-//! one size class for its whole life. A heap is named by a worker id, so a
-//! thread finds its lists with an index rather than a thread-local read.
+//! Every block comes from one chunk, and a chunk belongs to one heap and one
+//! size class for its whole life. A heap is named by a worker id, so a thread
+//! finds its lists with an index rather than a thread-local read.
 //!
-//! The address of a block is what identifies it. All chunks are carved out of
-//! one contiguous reservation, so `(ptr - arena_base) >> CHUNK_SHIFT` is the
-//! chunk, and `chunk_meta` holds that chunk's class and owner. One shift and
-//! one load therefore answer "what size is this block, and whose is it", which
-//! is what lets a block freed on the wrong thread go back to the thread that
-//! made it instead of through a global lock.
-//!
-//! A block freed by its owner goes onto a plain singly-linked list with no
-//! atomics. A block freed by any other thread goes onto the owner's remote
-//! stack with one compare-and-swap, and the owner takes the whole backlog with
-//! one swap the next time a class runs dry.
+//! The address of a block identifies it: all chunks are carved out of one
+//! contiguous reservation, so `(ptr - arena_base) >> CHUNK_SHIFT` is the chunk
+//! and `chunk_meta` holds its class and owner. One shift and one load answer
+//! "what size is this block, and whose is it", which is what lets a block
+//! freed on the wrong thread go back to its owner instead of through a global
+//! lock. A block freed by its owner goes on a plain singly-linked list with no
+//! atomics; a foreign free pushes it on the owner's remote stack with one
+//! compare-and-swap, and the owner takes the whole backlog with one swap the
+//! next time a class runs dry.
 //!
 //! Allocations above `MAX_SMALL` bypass the classes and get their own mapping,
-//! recorded in a table under a mutex. They are rare -- whole-file reads are the
-//! usual source -- so nothing about them is on a hot path.
+//! recorded in a table under a mutex. They are rare, so nothing about them is
+//! on a hot path.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -34,16 +32,14 @@ pub const CHUNK_SIZE: usize = @as(usize, 1) << CHUNK_SHIFT;
 
 /// Chunks the arena reserves. The reservation is `PROT_NONE` and never
 /// committed until a chunk is carved, so this bounds the heap without costing
-/// memory. 256k chunks of 256 KiB is 64 GiB.
+/// memory (256k chunks of 256 KiB is 64 GiB).
 const ARENA_CHUNKS: usize = 256 * 1024;
 
-/// Bytes made readable in one step, and the alignment the arena starts on.
-///
-/// A chunk is the unit one heap owns, and it is small so that a heap holding a
-/// class it barely uses rounds up by little. Committing is a separate question:
-/// a mapping this size and this alignment is what a transparent huge page needs
-/// to back it, and a huge page is what keeps the fault count and the TLB
-/// pressure of a chunk this small from costing more than the rounding saves.
+/// Bytes made readable in one step, and the alignment the arena starts on. A
+/// chunk is the unit one heap owns, and it is small so that a heap holding a
+/// class it barely uses rounds up by little. The mapping size and alignment
+/// are what a transparent huge page needs to back it, which is what keeps the
+/// fault count and TLB pressure of a chunk this small worth the rounding.
 const COMMIT_SIZE: usize = 2 * 1024 * 1024;
 const COMMIT_CHUNKS: usize = COMMIT_SIZE / CHUNK_SIZE;
 
@@ -59,13 +55,10 @@ pub const MAX_SMALL: usize = 16 * 1024;
 /// down the large path however small the request is.
 const MAX_CLASS_ALIGN: usize = 4096;
 
-/// The size classes, from tightest to loosest steps.
-///
-/// The steps are graded so that the sizes a program makes most of are matched
-/// exactly. An object literal body is the header plus one word per capture, so
-/// bodies land on the 8-byte steps with no waste. String bodies are arbitrary
-/// lengths and are usually larger, so the steps widen where an exact match
-/// stops being worth a class.
+/// The size classes, from tightest to loosest steps. The steps are graded so
+/// the sizes a program makes most of are matched exactly: object literal bodies
+/// (header plus one word per capture) land on the 8-byte steps with no waste;
+/// the steps widen where an exact match stops being worth a class.
 pub const CLASS_SIZES = blk: {
     var out: [64]usize = undefined;
     var n: usize = 0;
@@ -107,12 +100,10 @@ const SIZE_CLASS_LUT = blk: {
     break :blk out;
 };
 
-/// The class that answers `size` at `alignment`.
-///
-/// A block sits at a whole multiple of its class size from a chunk base, and a
-/// chunk base is `CHUNK_SIZE`-aligned, so a block meets an alignment exactly
-/// when its class size is a multiple of that alignment. A request that no class
-/// can meet returns null and takes the large path.
+/// The class that answers `size` at `alignment`, or null for the large path.
+/// A block sits at a whole multiple of its class size from a `CHUNK_SIZE`-
+/// aligned chunk base, so a block meets an alignment exactly when its class
+/// size is a multiple of that alignment.
 inline fn classFor(size: usize, alignment: usize) ?usize {
     if (size > MAX_SMALL or alignment > MAX_CLASS_ALIGN) return null;
     var c: usize = SIZE_CLASS_LUT[(size + 7) / 8];
@@ -141,12 +132,10 @@ inline fn metaOwner(word: u32) u32 {
 /// 1, so slot 0 names "no worker".
 pub const MAX_HEAPS: usize = 512;
 
-/// One size class's free blocks for one heap.
-///
-/// A fresh chunk is handed out by bumping rather than by threading every block
-/// onto the free list at once: a 2 MiB chunk of the smallest class holds a
-/// quarter of a million blocks, and threading them would touch the whole chunk
-/// before the first allocation returned.
+/// One size class's free blocks for one heap. A fresh chunk is handed out by
+/// bumping rather than by threading every block onto the free list at once:
+/// threading a 2 MiB chunk of the smallest class would touch a quarter of a
+/// million blocks before the first allocation returned.
 const ClassState = struct {
     free: ?*Node = null,
     bump: usize = 0,
@@ -164,13 +153,11 @@ const Heap = struct {
 
 var heaps: [MAX_HEAPS]Heap = @splat(.{});
 
-/// Guards heap 0 alone. Worker threads name themselves and never take it; the
-/// reactor threads, the process's first thread and the unit tests all read as
-/// "no worker" and share heap 0, so that one heap needs a lock.
-///
-/// A spin lock rather than a fiber-aware one: both users hold it across a
-/// handful of instructions, and these paths can run off a fiber, where a
-/// fiber-aware lock would have nothing to yield to.
+/// Guards heap 0 alone: worker threads name themselves and never take it, but
+/// the reactor threads, the process's first thread and the unit tests all read
+/// as "no worker" and share heap 0. A spin lock rather than a fiber-aware one:
+/// both users hold it across a handful of instructions, and these paths can run
+/// off a fiber, where a fiber-aware lock has nothing to yield to.
 var shared_heap_lock: WriteLock = .{};
 
 var chunk_meta: [ARENA_CHUNKS]std.atomic.Value(u32) = @splat(std.atomic.Value(u32).init(0));
@@ -184,10 +171,8 @@ var arena_committed: usize = 0;
 var commit_lock: WriteLock = .{};
 
 /// Makes the chunk `idx` names readable, along with the rest of its batch.
-///
 /// Chunk indices are handed out by a monotonic counter, so a thread that finds
-/// `idx` already committed needs to do nothing: some thread further along
-/// claimed a later chunk and committed through this one.
+/// `idx` already committed needs to do nothing.
 fn ensureCommitted(idx: usize) bool {
     commit_lock.acquire();
     defer commit_lock.release();
@@ -211,10 +196,9 @@ fn ensureCommitted(idx: usize) bool {
 var init_state: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
 
 /// Reserves the address space every chunk is carved from, and commits nothing.
-///
 /// One reservation is what makes a block's chunk a shift of its address. The
 /// mapping is `PROT_NONE` and `NORESERVE`, so the only thing it spends is
-/// virtual address space, of which a 64-bit process has far more than this.
+/// virtual address space.
 fn reserveArena() void {
     const want = ARENA_CHUNKS * CHUNK_SIZE + COMMIT_SIZE;
     const raw = std.posix.mmap(
@@ -242,8 +226,7 @@ fn reserveArena() void {
 /// Idempotent: the runtime's own tests re-enter it, and a second call must not
 /// move the arena out from under live blocks. A caller that arrives while
 /// another thread is reserving waits, because the arena base every later
-/// address calculation reads must be there before the first block is handed
-/// out.
+/// address calculation reads must be there before the first block is handed out.
 pub fn init() void {
     if (init_state.load(.acquire) == 2) return;
     if (init_state.cmpxchgStrong(0, 1, .acquire, .acquire) == null) {
@@ -254,10 +237,9 @@ pub fn init() void {
     while (init_state.load(.acquire) != 2) std.atomic.spinLoopHint();
 }
 
-/// The chunk holding `p`, or null when `p` is not a small block.
-///
-/// The wrapping subtract puts an address below the arena far above
-/// `ARENA_CHUNKS`, so one unsigned compare covers both ends of the range.
+/// The chunk holding `p`, or null when `p` is not a small block. The wrapping
+/// subtract puts an address below the arena far above `ARENA_CHUNKS`, so one
+/// unsigned compare covers both ends of the range.
 inline fn chunkIndex(p: usize) ?usize {
     const idx = (p -% arena_base) >> CHUNK_SHIFT;
     if (idx >= ARENA_CHUNKS) return null;
@@ -271,22 +253,18 @@ pub fn blockSize(ptr: *const anyopaque) usize {
     return CLASS_SIZES[metaClass(chunk_meta[idx].load(.acquire))];
 }
 
-/// Takes `size` bytes at `alignment` for the heap `heap_id` names.
-///
-/// `heap_id` only picks which lists answer, so a caller that cannot name its
-/// worker may pass 0: a block always goes back to the heap its chunk records,
-/// whichever heap hands it out.
+/// Takes `size` bytes at `alignment`. `heap_id` only picks which lists answer,
+/// so a caller that cannot name its worker may pass 0: a block always goes back
+/// to the heap its chunk records, whichever heap hands it out.
 pub fn alloc(heap_id: u32, size: usize, alignment: usize) ?[*]u8 {
     const class_index = classFor(size, alignment) orelse return allocLarge(size, alignment);
     return allocIndex(heap_id, class_index);
 }
 
 /// [`alloc`] for a caller whose size and alignment are known when it is
-/// compiled, which every object literal's and every cell's is.
-///
-/// The class a request lands in follows from the size and the alignment alone,
-/// so this settles it at compile time: the call carries a constant, and the
-/// lookup table, the alignment walk and its divide never reach the program.
+/// compiled, which every object literal's and every cell's is. Settling the
+/// class at compile time keeps the lookup table, the alignment walk and its
+/// divide out of the program.
 pub inline fn allocComptime(heap_id: u32, comptime size: usize, comptime alignment: usize) ?[*]u8 {
     const class_index = comptime classFor(size, alignment);
     if (class_index == null) return allocLarge(size, alignment);
@@ -336,11 +314,10 @@ noinline fn allocClassSlow(h: *Heap, heap_id: u32, class_index: usize) ?[*]u8 {
 }
 
 /// Moves the whole remote backlog onto the local lists. True when there was
-/// anything to move.
-///
-/// One swap takes the backlog, and the walk after it needs no atomics because
-/// nothing else can reach the chain once it is detached. A remote block may
-/// belong to any class, so each one is sorted by the class its chunk records.
+/// anything to move. One swap takes the backlog, and the walk after it needs no
+/// atomics because nothing else can reach the chain once it is detached. A
+/// remote block may belong to any class, so each one is sorted by the class its
+/// chunk records.
 fn drainRemote(h: *Heap) bool {
     var n: *Node = h.remote.swap(null, .acquire) orelse return false;
     while (true) {
@@ -374,11 +351,10 @@ fn carveChunk(h: *Heap, heap_id: u32, class_index: usize) ?void {
     cs.bump_end = base + (CHUNK_SIZE / size) * size;
 }
 
-/// Gives one block back, from the thread `heap_id` names.
-///
-/// The chunk says whose block it is. Its owner puts it straight on a local
-/// list; anyone else hands it to the owner with one compare-and-swap, so a
-/// block never changes size class and no free ever takes a global lock.
+/// Gives one block back, from the thread `heap_id` names. The chunk says whose
+/// block it is: its owner puts it straight on a local list, anyone else hands
+/// it to the owner with one compare-and-swap, so a block never changes size
+/// class and no free ever takes a global lock.
 pub fn free(heap_id: u32, ptr: *anyopaque) void {
     const idx = chunkIndex(@intFromPtr(ptr)) orelse {
         freeLarge(ptr);
@@ -416,12 +392,10 @@ fn remotePush(h: *Heap, node: *Node) void {
     }
 }
 
-/// Every mapping the large path handed out, by the pointer it returned.
-///
-/// A large allocation gets its own mapping outside the arena, so the chunk
-/// table cannot name it and a side table has to. Whole-file reads are what
-/// reach here, and there are a handful of those in a run, so one lock over the
-/// table costs nothing measurable.
+/// Every mapping the large path handed out, by the pointer it returned. A
+/// large allocation gets its own mapping outside the arena, so the chunk table
+/// cannot name it and a side table has to. These are a handful per run, so one
+/// lock over the table costs nothing measurable.
 const LargeEntry = struct { base: usize, len: usize };
 var large_table: std.AutoHashMapUnmanaged(usize, LargeEntry) = .empty;
 var large_lock: WriteLock = .{};
@@ -653,7 +627,6 @@ test "heap 0 stays consistent when several threads share it" {
     for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Worker.run, .{});
     for (&threads) |*t| t.join();
     // Nothing to assert beyond surviving: an unguarded list would have lost or
-    // duplicated blocks, which the allocations above would have caught by
-    // handing the same block to two threads at once.
+    // duplicated blocks, which the allocations above would have caught.
     try testing.expect(true);
 }

@@ -32,14 +32,9 @@ const Applied = union(enum) {
     expanded, // op (flat_map / actor) handled the suffix itself
 };
 
-// Per-iteration cancel poll. Each iteration of run_chunk's while loop calls
-// arbitrary user closures via the op chain (map closures, filter predicates,
-// flatMap inner flows, etc.) -- those can be unboundedly expensive, so polling
-// only every N=1024 elements could leave the cancel signal unobserved for
-// seconds-to-minutes. The atomic acquire-load is ~2-5 ns; on a 100M-element
-// flow that's ~200-500 ms total overhead, which is acceptable. If profiling
-// later shows this dominates a benchmark we can tune to a small threshold
-// (e.g. 4-8); not motivated yet.
+// Per-iteration cancel poll. One iteration can call arbitrary user closures
+// (map, filter, flatMap, ...) of unbounded cost, so a fixed stride could leave
+// the cancel signal unobserved for seconds. The atomic load is a few nanoseconds.
 pub fn run_chunk(flow: *types.FeartFlow, ctx: *anyopaque, accept: AcceptFn) void {
     var stopped = false;
     while (!stopped and types.source_has_next(&flow.source)) {
@@ -78,6 +73,9 @@ pub fn process_element(
     if (stop_after) stopped.* = true;
 }
 
+/// Applies one op to one element. The element arrives owned, because `source_next` shares it,
+/// and a closure only borrows what it is given: an arm that answers `.pass` hands that one
+/// reference on; any other arm releases it.
 fn apply_op(
     op: *types.OpDesc,
     elem: FatPtr,
@@ -87,9 +85,12 @@ fn apply_op(
     stopped: *bool,
 ) Applied {
     return switch (op.kind) {
-        .map => .{ .pass = objs.call(op.closure, h("read #/1"), .{elem}, @src()) },
+        .map => blk: {
+            defer elem.rc_decrement();
+            break :blk .{ .pass = objs.call(op.closure, h("read #/1"), .{elem}, @src()) };
+        },
         .peek => blk: {
-            const result = objs.call(op.closure, h("read #/1"), .{elem.share()}, @src());
+            const result = objs.call(op.closure, h("read #/1"), .{elem}, @src());
             result.rc_decrement();
             break :blk .{ .pass = elem };
         },
@@ -98,6 +99,8 @@ fn apply_op(
             const iso_ctx = objs.call(cell.ctx, h("mut .iso/0"), .{}, @src());
             defer iso_ctx.rc_decrement();
             const cval = objs.call(iso_ctx, h("mut .self/0"), .{}, @src());
+            defer cval.rc_decrement();
+            defer elem.rc_decrement();
             break :blk .{ .pass = objs.call(op.closure, h("read #/2"), .{ cval, elem }, @src()) };
         },
         .peek_ctx => blk: {
@@ -105,12 +108,13 @@ fn apply_op(
             const iso_ctx = objs.call(cell.ctx, h("mut .iso/0"), .{}, @src());
             defer iso_ctx.rc_decrement();
             const cval = objs.call(iso_ctx, h("mut .self/0"), .{}, @src());
-            const result = objs.call(op.closure, h("read #/2"), .{ cval, elem.share() }, @src());
+            defer cval.rc_decrement();
+            const result = objs.call(op.closure, h("read #/2"), .{ cval, elem }, @src());
             result.rc_decrement();
             break :blk .{ .pass = elem };
         },
         .filter => blk: {
-            const ok = objs.call(op.closure, h("read #/1"), .{elem.share()}, @src());
+            const ok = objs.call(op.closure, h("read #/1"), .{elem}, @src());
             const passed = ok.vt == &pb.VT_True_0;
             ok.rc_decrement();
             if (passed) break :blk .{ .pass = elem };
@@ -118,6 +122,7 @@ fn apply_op(
             break :blk .skip;
         },
         .map_filter => blk: {
+            defer elem.rc_decrement();
             const opt = objs.call(op.closure, h("read #/1"), .{elem}, @src());
             if (opt.vt == &pb.VT_Opt_1) {
                 opt.rc_decrement();
@@ -127,8 +132,9 @@ fn apply_op(
         },
         .scan => blk: {
             const cell: *types.ScanCell = @ptrFromInt(op.state);
+            defer elem.rc_decrement();
             const old_acc = cell.acc;
-            cell.acc = objs.call(op.closure, h("read #/2"), .{ old_acc.share(), elem }, @src());
+            cell.acc = objs.call(op.closure, h("read #/2"), .{ old_acc, elem }, @src());
             old_acc.rc_decrement();
             break :blk .{ .pass = cell.acc.share() };
         },
@@ -147,6 +153,7 @@ fn apply_op(
         },
         .flat_map => blk: {
             const inner_fp = objs.call(op.closure, h("read #/1"), .{elem}, @src());
+            elem.rc_decrement();
             const inner = object.deref_flow(inner_fp);
             while (!stopped.* and types.source_has_next(&inner.source)) {
                 const inner_elem = types.source_next(&inner.source);
@@ -156,6 +163,7 @@ fn apply_op(
             break :blk .expanded;
         },
         .actor => blk: {
+            defer elem.rc_decrement();
             const state: *types.ActorState = @ptrFromInt(op.state);
             const sink = objs.obj_k(ActorSinkCaptures, &VT_ActorSink, .{
                 .remaining_ptr = @intFromPtr(remaining.ptr),
@@ -164,7 +172,8 @@ fn apply_op(
                 .accept_ptr = @intFromPtr(accept),
                 .stopped_ptr = @intFromPtr(stopped),
             });
-            const res = objs.call(state.callback, h("read #/3"), .{ sink, state.state_fp.share(), elem }, @src());
+            defer sink.rc_decrement();
+            const res = objs.call(state.callback, h("read #/3"), .{ sink, state.state_fp, elem }, @src());
             defer res.rc_decrement();
             const is_stopped = objs.call(res, h("imm .match/1"), .{objs.obj_k_singleton(&VT_ActorResMatch)}, @src());
             if (is_stopped.vt == &pb.VT_True_0) stopped.* = true;
@@ -215,7 +224,8 @@ const OptExtractCaptures = extern struct { result_ptr: usize };
 fn opt_extract_some(self: FatPtr, val: FatPtr) callconv(.c) FatPtr {
     const caps = objs.deref(OptExtractCaptures, self);
     const ptr: *FatPtr = @ptrFromInt(caps.result_ptr);
-    ptr.* = val;
+    // The slot outlives the arm, so it keeps a reference of its own.
+    ptr.* = val.share().box_transient();
     return object.make_void();
 }
 
@@ -248,12 +258,12 @@ pub const VT_OptExtract: objs.VTable = .{
     },
 };
 
-// Helper accessible to findMap in terminals.zig.
 pub fn extract_some(opt: FatPtr) FatPtr {
     var extracted: FatPtr = undefined;
     const extractor = objs.obj_k(OptExtractCaptures, &VT_OptExtract, .{ .result_ptr = @intFromPtr(&extracted) });
     defer opt.rc_decrement();
     const matched = objs.call(opt, h("imm .match/1"), .{extractor}, @src());
+    extractor.rc_decrement();
     matched.rc_decrement();
     return extracted;
 }
@@ -276,7 +286,10 @@ fn actor_sink_accept(self: FatPtr, element: FatPtr) callconv(.c) FatPtr {
     const ctx: *anyopaque = @ptrFromInt(caps.ctx_ptr);
     const accept: AcceptFn = @ptrFromInt(caps.accept_ptr);
     const stopped: *bool = @ptrFromInt(caps.stopped_ptr);
-    process_element(remaining, element, ctx, accept, stopped);
+    // The op chain and the terminal own the element they are handed, and this one
+    // is on loan from the Fearless actor body. A transient becomes a heap object,
+    // because the terminal can outlive the frame the actor pushed from.
+    process_element(remaining, element.share().box_transient(), ctx, accept, stopped);
     return object.make_void();
 }
 
@@ -284,10 +297,10 @@ fn actor_sink_push_error(self: FatPtr, info: FatPtr) callconv(.c) FatPtr {
     const caps = objs.deref(ActorSinkCaptures, self);
     const stopped: *bool = @ptrFromInt(caps.stopped_ptr);
     if (stopped.*) {
-        info.rc_decrement();
         return object.make_void();
     }
-    unwind.throwDeterministic(info);
+    // `throwDeterministic` takes the info with it, and this one is on loan.
+    unwind.throwDeterministic(info.share());
 }
 
 const VT_ActorSink: objs.VTable = .{

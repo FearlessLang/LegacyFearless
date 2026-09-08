@@ -16,30 +16,22 @@ import java.util.stream.Collectors;
 
 /// Which functions sit on a recursion cycle, as a compile-time stand-in for a profile.
 ///
-/// A profiled build spends its time inside recursion: the functions on a cycle run once per
-/// step of the computation the cycle drives, so a cycle names the hot code without a profile
-/// and without reading anything outside the compilation unit.
+/// The functions on a cycle run once per step of the computation the cycle drives, so a cycle
+/// names the hot code without a profile. The graph holds one node per {@link MIR.Fun} and one
+/// edge per call whose target is known when the code is generated: a `DirectCall`, each tested
+/// arm of a `GuardedCall`, a `StaticCall`, and the two arms of a `BoolExpr`. A virtual call
+/// adds no edge, so the graph understates the real one, which is sound for the use below.
 ///
-/// The graph holds one node per {@link MIR.Fun} and one edge per call whose target is known
-/// when the code is generated: a `DirectCall`, each tested arm of a `GuardedCall`, a
-/// `StaticCall`, and the two arms of a `BoolExpr`. A virtual call adds no edge, so the graph
-/// understates the real one, which is sound for the use below.
-///
-/// `hot(f)` holds when `f` is on a cycle -- its strongly connected component has more than
-/// one member, or `f` calls itself -- or when a hot function calls `f` and `f` is small
-/// enough to fold in. The second rule is what reaches past the cycle itself: a cycle calls a
-/// chain of small helpers, and a profiled build folds the whole chain into the cycle, not
-/// only its first link. The budget is what keeps the growth bounded, since a large body
-/// costs a copy at every hot site and buys only one frame.
+/// `hot(f)` holds when `f` is on a cycle, or when a hot function calls `f` and `f` is small
+/// enough to fold in -- a cycle calls a chain of small helpers, and a profiled build folds the
+/// whole chain, not only its first link. The budget keeps that growth bounded.
 ///
 /// `inlineWanted(f)` holds the functions some hint targets, so codegen emits an inline-only
 /// wrapper for `f` only where a call site can name it.
 ///
 /// `inlineTarget(caller, callee)` holds when a call from `caller` to `callee` should carry an
-/// inline hint: `caller` is hot and `callee` sits in another component. The component test is
-/// what makes the hints terminate. A chain of hints follows graph edges, every cycle of graph
-/// edges lies inside one component, and no hint leaves a component for itself, so no chain of
-/// hints can close.
+/// inline hint: `caller` is hot and `callee` sits in another component. That component test is
+/// what makes a chain of hints terminate: no hint leaves a component for itself.
 public final class RecursionHotness {
   private final Map<MIR.FName, MIR.Fun> funMap;
   private final ReturnShapeAnalysis shapes;

@@ -7,24 +7,15 @@ import java.util.Collection;
 import java.util.Set;
 
 /// Which object literals are acyclic by construction, so the cycle collector can
-/// skip them.
+/// skip them (Bacon and Rajan's green, ECOOP 2001 section 3.2).
 ///
-/// Bacon and Rajan colour such objects green and never treat one as a candidate
-/// cycle root (ECOOP 2001, section 3.2). They drive the colour from the Java
-/// class loader, which can only see that a class holds no reference fields at
-/// all. Fearless answers a stronger question from the type system.
+/// A literal is green when every capture it holds is `imm`: a literal fixes its captures when
+/// it is built, so the one built first cannot name the one built after it. `read` does not
+/// serve: it may name a `mut` object that can come to name this one.
 ///
-/// An object literal is green when every capture it holds is `imm`. An object
-/// literal fixes its captures when it is built, so of two objects the one built
-/// first cannot name the other; `imm` data is therefore acyclic by construction,
-/// and an object whose captures are all `imm` can never come to name itself.
-///
-/// `read` does not serve here. A `read` reference may name a `mut` object that
-/// something else still mutates, and that object can come to name this one.
-///
-/// The answer depends on the declaration alone, never on what the current
-/// compilation happens to contain, so it is safe to write into cached package
-/// code the way {@link RcFreeTypes#strategyForever} is.
+/// The answer depends on the declaration alone, never on what the current compilation happens
+/// to contain, so it is safe to write into cached package code, the way
+/// {@link RcFreeTypes#strategyForever} is.
 public final class AcyclicTypes {
   private final RcFreeTypes rcFree;
 

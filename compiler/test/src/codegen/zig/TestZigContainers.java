@@ -32,6 +32,14 @@ public class TestZigContainers {
       }
     """, Base.mutBaseAliases);}
 
+  /// The operands of `Block#(do, ret)` must evaluate left to right: the `do` statement's store
+  /// happens before `ret` reads it. A `Void`-typed call operand stays side-effecting even
+  /// though its result needs no reference, so it pins the order the later operands observe.
+  @Test void flatMapAdvancesBeforeRecursing() { okBase(new Res("3,3,4,4", "", 0), """
+    package test
+    Test: Main{sys -> sys.io.println(List#[Nat](3, 4).iter.flatMap{n -> List#(n, n).iter}.str({n -> n.str}, ","))}
+    """, Base.mutBaseAliases);}
+
   @Test void listIter() { okBase(new Res("350,350,350,140,140,140", "", 0), """
     package test
     Test: Main{sys -> Block#

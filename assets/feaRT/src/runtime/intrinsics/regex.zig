@@ -26,7 +26,6 @@ fn regex_str(self: FatPtr) callconv(.c) FatPtr {
 }
 
 fn regex_is_match(self: FatPtr, haystack: FatPtr) callconv(.c) FatPtr {
-    defer haystack.rc_decrement();
     const hay = str_rt.deref_str(haystack);
     const handle: ?*const anyopaque = @ptrFromInt(deref_regex(self).handle);
     return bool_intrinsics.to_bool(native.frt_regex_is_match(handle, hay.ptr, hay.len));
@@ -55,18 +54,17 @@ fn regexs_compile(self: FatPtr, pattern_fp: FatPtr) callconv(.c) FatPtr {
     var err: native.frt_buf = undefined;
     const handle = native.frt_regex_compile(pat.ptr, pat.len, &err);
     if (handle == null) {
-        // throwDeterministic unwinds past Zig `defer`, so release explicitly.
-        const info = compile_error_info(err);
-        pattern_fp.rc_decrement();
-        root.errors.throwDeterministic(info);
+        root.errors.throwDeterministic(compile_error_info(err));
     }
-    // obj_k shares `pattern` into the captures; release our incoming reference.
-    const regex = objs.obj_k(RegexCaptures, &VT_Regex, .{
+    // The pattern arrives on loan and the regex keeps it, so it takes a
+    // reference of its own; `obj_k` shares that into the captures and the one
+    // taken here goes back.
+    const pattern_kept = pattern_fp.share().box_transient();
+    defer pattern_kept.rc_decrement();
+    return objs.obj_k(RegexCaptures, &VT_Regex, .{
         .handle = @intFromPtr(handle.?),
-        .pattern = pattern_fp,
+        .pattern = pattern_kept,
     });
-    pattern_fp.rc_decrement();
-    return regex;
 }
 
 /// Build an `Infos.msg(...)` from a compile-error buffer, then free the buffer.

@@ -17,7 +17,10 @@ fn env_launchArgs(self: FatPtr) callconv(.c) FatPtr {
         i -= 1;
         const arg = std.mem.span(argv[i]);
         const s = str_rt.make_str_copy(arg);
+        // `pushFront` borrows the string and keeps a reference of its own, so
+        // the one made here is this loop's to release.
         const next = objs.call(acc, comptime h("mut .pushFront/1"), .{s}, @src());
+        s.rc_decrement();
         acc.rc_decrement();
         acc = next;
     }

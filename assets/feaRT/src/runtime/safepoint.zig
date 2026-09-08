@@ -25,14 +25,8 @@ const SPINS: usize = 4096;
 ///
 /// The wait is bounded by lack of *progress*, not by elapsed time. A fixed time
 /// budget cannot tell "one fiber is never coming back" from "thirty-two workers
-/// are arriving one per round", and a pool answers a request one worker at a
-/// time: with a flat budget the last workers to arrive were still outstanding
-/// when it ran out, the request was dropped, everyone was released, and the next
-/// collection started again from nothing. Measured on the cyclic benchmark under
-/// VPF, every collection was abandoned and nothing was ever reclaimed.
-///
-/// So each round that reduces the outstanding count resets this, and only a run
-/// of rounds where nothing moved ends the wait.
+/// are arriving one per round". Each round that reduces the outstanding count
+/// resets this, and only a run of rounds where nothing moved ends the wait.
 const STALL_ROUNDS: usize = 8;
 
 /// One worker's park state.

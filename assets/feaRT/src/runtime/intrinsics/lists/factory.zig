@@ -133,6 +133,7 @@ fn fromLList_into(llist: FatPtr, al: *ItemVec) void {
             .result_ptr = @intFromPtr(&al.items.ptr[al.items.len]),
         });
         _ = objs.call(opt, h("imm .match/1"), .{handler}, @src());
+        handler.rc_decrement();
         opt.rc_decrement();
         al.items.len += 1;
         const next = objs.call(current, h("imm .tail/0"), .{}, @src());
@@ -143,7 +144,6 @@ fn fromLList_into(llist: FatPtr, al: *ItemVec) void {
 }
 
 fn list_fromLList(_: FatPtr, llist: FatPtr) callconv(.c) FatPtr {
-    defer llist.rc_decrement();
     const size = nat_rt.deref(objs.call(llist, h("imm .size/0"), .{}, @src()));
     const storage = storage_mod.make_storage(@intCast(size));
     fromLList_into(llist, &storage.al);
@@ -151,7 +151,6 @@ fn list_fromLList(_: FatPtr, llist: FatPtr) callconv(.c) FatPtr {
 }
 
 fn ulist_fromLList(_: FatPtr, llist: FatPtr) callconv(.c) FatPtr {
-    defer llist.rc_decrement();
     const size = nat_rt.deref(objs.call(llist, h("imm .size/0"), .{}, @src()));
     const storage = storage_mod.make_storage(@intCast(size));
     fromLList_into(llist, &storage.al);
@@ -159,8 +158,8 @@ fn ulist_fromLList(_: FatPtr, llist: FatPtr) callconv(.c) FatPtr {
 }
 
 fn list_consumeUList(_: FatPtr, ulist: FatPtr) callconv(.c) FatPtr {
-    // Zero-copy: reuse the UList's ArrayList, just retag as List
-    defer ulist.rc_decrement();
+    // Zero-copy: reuse the UList's ArrayList, just retag as List. The UList is
+    // lent, so the retain below is the new List's own reference to the storage.
     const caps = objs.deref(ListCaptures, ulist);
     storage_mod.retain_storage(@ptrFromInt(caps.list_ptr));
     return objs.obj_k(ListCaptures, &instance.VT_List, caps.*);
@@ -179,7 +178,8 @@ const OptExtractorCaptures = extern struct {
 fn opt_extractor_some(self: FatPtr, val: FatPtr) callconv(.c) FatPtr {
     const caps = objs.deref(OptExtractorCaptures, self);
     const ptr: *FatPtr = @ptrFromInt(caps.result_ptr);
-    ptr.* = val;
+    // The slot is a list's storage, which keeps what it is given.
+    ptr.* = val.share().box_transient();
     return instance.make_void();
 }
 

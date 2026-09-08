@@ -43,8 +43,9 @@ fn reply_info(m: FatPtr, prefix: []const u8, path: []const u8) FatPtr {
     @memcpy(buf[0..prefix.len], prefix);
     @memcpy(buf[prefix.len..], path);
     const msg = str_rt.make_owned_str(buf.ptr, buf.len);
-    defer m.rc_decrement();
-    return objs.call(m, comptime h("mut .info/1"), .{str_rt.make_info_msg(msg)}, @src());
+    const info = str_rt.make_info_msg(msg);
+    defer info.rc_decrement();
+    return objs.call(m, comptime h("mut .info/1"), .{info}, @src());
 }
 
 /// `.run(m)` -- read the whole file now, validate UTF-8, and dispatch to
@@ -98,9 +99,9 @@ fn readstr_run(self: FatPtr, m: FatPtr) callconv(.c) FatPtr {
         gc.free(@ptrCast(buf.ptr));
         return reply_info(m, "Invalid UTF-8 in file: ", path);
     }
-    const ok = objs.call(m, comptime h("mut .ok/1"), .{str_rt.make_owned_str(data.ptr, data.len)}, @src());
-    m.rc_decrement();
-    return ok;
+    const payload = str_rt.make_owned_str(data.ptr, data.len);
+    defer payload.rc_decrement();
+    return objs.call(m, comptime h("mut .ok/1"), .{payload}, @src());
 }
 
 pub const VT_ReadStrAction = actions.ActionVTable("<runtime read-str action>", &readstr_run, &readstr_drop);

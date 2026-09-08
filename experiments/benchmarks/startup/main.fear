@@ -1,0 +1,5 @@
+package bench
+
+/// Fixed process cost only: start, initialise the runtime, print one line,
+/// exit. Subtract this from every other benchmark to get compute time.
+Test: Main {sys -> sys.io.println("0")}

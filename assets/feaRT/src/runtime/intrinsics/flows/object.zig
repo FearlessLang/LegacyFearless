@@ -427,9 +427,11 @@ pub fn make_flow_from_str(comptime vt: *const objs.VTable, owner: FatPtr, bytes:
 /// The copy lives in a `ListStorage`, which the flow names as its source owner.
 /// A split shares that owner rather than the buffer, so the buffer has one owner
 /// however many halves read it, and the last of them gives it back.
+/// The items are lent by the factory method's caller and the flow keeps them, so
+/// each is boxed out of that frame and shared into the storage.
 pub fn make_flow_from_items(comptime vt: *const objs.VTable, items: []const FatPtr) FatPtr {
     const storage = list_storage.make_storage(items.len);
-    storage.al.appendSliceAssumeCapacity(items);
+    for (items) |item| storage.al.appendAssumeCapacity(item.share().box_transient());
     const flow = create_flow(.{ .list = .{ .items = storage.al.items, .index = 0 } }, true);
     flow.source_owner = list_storage.storageEdge(storage);
     return make_flow_fp(vt, flow);
@@ -443,8 +445,10 @@ pub fn make_flow_from_infinite(comptime vt: *const objs.VTable, start: i64, step
     return make_flow_fp(vt, create_flow(.{ .range_infinite = .{ .current = start, .end = 0, .step = step } }, false));
 }
 
+/// As `make_flow_from_items`, for the one value a single-element flow keeps.
 pub fn make_flow_from_single(comptime vt: *const objs.VTable, value: FatPtr) FatPtr {
-    return make_flow_fp(vt, create_flow(.{ .single = .{ .value = value, .consumed = false } }, true));
+    const kept = value.share().box_transient();
+    return make_flow_fp(vt, create_flow(.{ .single = .{ .value = kept, .consumed = false } }, true));
 }
 
 pub fn make_empty_flow(comptime vt: *const objs.VTable) FatPtr {

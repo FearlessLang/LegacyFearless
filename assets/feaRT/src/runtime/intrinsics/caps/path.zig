@@ -119,15 +119,12 @@ pub fn write_from_cwd(segments: FatPtr) FatPtr {
 }
 
 fn path_accessRW(self: FatPtr, segments: FatPtr) callconv(.c) FatPtr {
-    defer segments.rc_decrement();
     return make_path(scoped_resolve(self, segments), &VT_ReadWritePath);
 }
 fn path_accessR(self: FatPtr, segments: FatPtr) callconv(.c) FatPtr {
-    defer segments.rc_decrement();
     return make_path(scoped_resolve(self, segments), &VT_ReadPath);
 }
 fn path_accessW(self: FatPtr, segments: FatPtr) callconv(.c) FatPtr {
-    defer segments.rc_decrement();
     return make_path(scoped_resolve(self, segments), &VT_WritePath);
 }
 

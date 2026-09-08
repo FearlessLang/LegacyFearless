@@ -59,7 +59,6 @@ fn mut_str_append_bytes(caps: *MutStrCaptures, src: []const u8) void {
 
 /// `mut .append(other: read Stringable): Void` -- append `other.str`.
 fn mut_str_append(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    defer other.rc_decrement();
     const other_str = objs.call(other, comptime h("read .str/0"), .{}, @src());
     defer other_str.rc_decrement();
     mut_str_append_bytes(deref_mut_caps(self), str.deref_str(other_str));
@@ -68,7 +67,6 @@ fn mut_str_append(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
 
 /// `mut +(other): mut Str` -- append and return self.
 fn mut_str_plus(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    defer other.rc_decrement();
     const other_str = objs.call(other, comptime h("read .str/0"), .{}, @src());
     defer other_str.rc_decrement();
     mut_str_append_bytes(deref_mut_caps(self), str.deref_str(other_str));

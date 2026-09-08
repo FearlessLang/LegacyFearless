@@ -22,6 +22,9 @@ import java.util.stream.Collectors;
 /// `f`: not a capture of a `CreateObj`, not the returned value, not an operand of a virtual
 /// call, and flowing only into non-escaping positions of known callees. The fixpoint is
 /// optimistic: every param starts at "does not escape" and escapes propagate until stable.
+/// A function a cached package wrote is exempt from that fixpoint: its body is `base.Abort!`,
+/// which uses no parameter, so the optimistic answer for it is an artefact of the erasure and
+/// not a fact. Such a function answers "escapes" for every parameter and holds no `freshObj`.
 ///
 /// `slotWanted(f)` holds the functions some `DirectCall`/`StaticCall` site targets, so
 /// codegen emits a `_transient` variant only where a site can reference it.
@@ -32,13 +35,23 @@ public final class ReturnShapeAnalysis {
   private final Map<MIR.FName, Optional<MIR.CreateObj>> freshObjs = new HashMap<>();
   private final Map<MIR.FName, boolean[]> paramEscapes = new HashMap<>();
   private final Set<MIR.FName> wantedFuns = new HashSet<>();
+  /// The functions whose bodies a cache read back erased. An `MIR.FName` carries the
+  /// declaration that writes the body, not the literal that inherits it, so the package of that
+  /// declaration is what says whether the body survived: a method a cached package declares is
+  /// `base.Abort!` wherever the fun for it is emitted. Nothing this pass measures about such a
+  /// body holds, so each is given the answer that costs speed, never correctness: every
+  /// parameter escapes, and no result is a fresh object.
+  private final Set<MIR.FName> erasedFuns;
 
-  public ReturnShapeAnalysis(MIR.Program p, Predicate<MIR.E> isTransientCreateObj) {
+  public ReturnShapeAnalysis(MIR.Program p, Predicate<MIR.E> isTransientCreateObj, Set<String> cachedPkg) {
     this.p = p;
     this.isTransientCreateObj = isTransientCreateObj;
     this.funMap = p.pkgs().stream()
       .flatMap(pkg -> pkg.funs().stream())
       .collect(Collectors.toMap(MIR.Fun::name, f -> f));
+    this.erasedFuns = funMap.keySet().stream()
+      .filter(f -> cachedPkg.contains(f.d().pkg()))
+      .collect(Collectors.toSet());
     computeFreshObjs();
     computeParamEscapes();
     collectWantedFuns();
@@ -130,6 +143,7 @@ public final class ReturnShapeAnalysis {
     while (changed) {
       changed = false;
       for (var fun : funMap.values()) {
+        if (erasedFuns.contains(fun.name())) { continue; }
         if (freshObjs.get(fun.name()).isPresent()) { continue; }
         var shape = shapeOf(unwrap(fun.body()));
         if (shape.isPresent()) {
@@ -150,11 +164,16 @@ public final class ReturnShapeAnalysis {
   }
 
   private void computeParamEscapes() {
-    for (var fun : funMap.values()) { paramEscapes.put(fun.name(), new boolean[fun.args().size()]); }
+    for (var fun : funMap.values()) {
+      var flags = new boolean[fun.args().size()];
+      if (erasedFuns.contains(fun.name())) { java.util.Arrays.fill(flags, true); }
+      paramEscapes.put(fun.name(), flags);
+    }
     var changed = true;
     while (changed) {
       changed = false;
       for (var fun : funMap.values()) {
+        if (erasedFuns.contains(fun.name())) { continue; }
         var escaped = new HashSet<String>();
         var top = unwrap(fun.body());
         if (top instanceof MIR.X x) { escaped.add(x.name()); }

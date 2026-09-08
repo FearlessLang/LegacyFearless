@@ -20,15 +20,22 @@ const ListCaptures = storage_mod.ListCaptures;
 const ListStorage = storage_mod.ListStorage;
 const deref_list = storage_mod.deref_list;
 
+/// The items arrive on loan, from the factory methods a program writes, and the
+/// list keeps them, so each is boxed out of its caller's frame and shared into
+/// the storage.
+fn appendKept(storage: *ListStorage, items: []const FatPtr) void {
+    for (items) |item| storage.al.appendAssumeCapacity(item.share().box_transient());
+}
+
 pub fn make_list(items: []const FatPtr) FatPtr {
     const storage = storage_mod.make_storage(items.len);
-    storage.al.appendSliceAssumeCapacity(items);
+    appendKept(storage, items);
     return objs.obj_k(ListCaptures, &VT_List, .{ .list_ptr = @intFromPtr(storage) });
 }
 
 pub fn make_ulist(items: []const FatPtr) FatPtr {
     const storage = storage_mod.make_storage(items.len);
-    storage.al.appendSliceAssumeCapacity(items);
+    appendKept(storage, items);
     return objs.obj_k(ListCaptures, &VT_UList, .{ .list_ptr = @intFromPtr(storage) });
 }
 
@@ -45,7 +52,10 @@ pub fn wrap_ulist_storage(storage: *ListStorage) FatPtr {
     return objs.obj_k(ListCaptures, &VT_UList, .{ .list_ptr = @intFromPtr(storage) });
 }
 
+/// Wraps a value the caller owns. `Opts#` lends its argument and keeps a
+/// reference of its own, so the caller's one goes back here.
 pub fn make_some(item: FatPtr) FatPtr {
+    defer item.rc_decrement();
     return objs.call(objs.obj_k_singleton(&pb.VT_Opts_0), h("imm #/1"), .{item}, @src());
 }
 
@@ -58,14 +68,12 @@ pub fn make_void() FatPtr {
 }
 
 fn list_get(self: FatPtr, index: FatPtr) callconv(.c) FatPtr {
-    defer index.rc_decrement();
     const al = deref_list(self);
     const i = nat_rt.deref(index);
     return al.items[i].share();
 }
 
 fn list_tryGet(self: FatPtr, index: FatPtr) callconv(.c) FatPtr {
-    defer index.rc_decrement();
     const al = deref_list(self);
     const i = nat_rt.deref(index);
     if (i >= al.items.len) return make_none();
@@ -90,11 +98,14 @@ fn list_uList(self: FatPtr) callconv(.c) FatPtr {
     return wrap_ulist_storage(storage);
 }
 
+/// Adds `item` to the storage. The item is on loan, so the list takes the one
+/// reference the storage holds: `share` then `box_transient` yields exactly one
+/// owned reference, and a transient becomes a heap object the storage owns.
 fn ulist_add(self: FatPtr, item: FatPtr) callconv(.c) FatPtr {
     const storage = storage_mod.deref_storage(self);
     cycles.noteStore(storage_mod.storageEdge(storage), item);
     const al = &storage.al;
-    al.append(gc.allocator, item) catch @panic("OOM");
+    al.append(gc.allocator, item.share().box_transient()) catch @panic("OOM");
     return make_void();
 }
 

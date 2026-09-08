@@ -57,10 +57,20 @@ if [ "$governor" != performance ]; then
   echo "         Run: sudo cpupower frequency-set -g performance" >&2
 fi
 
-if [ ! -f "$HERE/corpus/corpus.txt" ]; then
-  echo "corpus missing; generating it (this takes a moment)"
-  python3 "$HERE/gencorpus.py"
-fi
+# The corpora are generated, not committed: they are a function of the seed alone,
+# so regenerating gives a bit-identical file and the checksums stay comparable
+# across machines. `wc` and `grep` read the 1 MiB one; `wc-big` and `grep-big`
+# read the 16 MiB one, at which size the JVM is warm and startup is ~2%.
+for size in 1 16; do
+  case $size in
+    1) corpus=corpus.txt ;;
+    *) corpus=corpus$size.txt ;;
+  esac
+  if [ ! -f "$HERE/corpus/$corpus" ]; then
+    echo "corpus/$corpus missing; generating it (this takes a moment)"
+    python3 "$HERE/gencorpus.py" --size-mb "$size" --out "$HERE/corpus/$corpus"
+  fi
+done
 
 mkdir -p "$RESULTS"
 cd "$HERE"

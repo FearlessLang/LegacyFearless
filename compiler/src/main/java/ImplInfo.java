@@ -103,9 +103,13 @@ public record ImplInfo(Map<Id.DecId, Entry> entries) {
   /// codegen makes, so a type that is never instantiated, and therefore carries no vtable, is no
   /// implementation of anything.
   public static ImplInfo of(String pkgName, ast.Program program, MIR.Program mir) {
+    // Ordered, because the order reaches generated code: `implsOf` keeps it, and
+    // `DevirtualiseGuarded` tests the guard arms in the order recorded here. An unordered set
+    // iterates in an order the JVM randomises per run, which would make the arm order, and the
+    // branch layout that follows from it, differ between two compilations of the same source.
     var values = valuesOf(mir).stream()
       .filter(value -> value.pkg().equals(pkgName))
-      .collect(Collectors.toUnmodifiableSet());
+      .collect(Collectors.toCollection(LinkedHashSet::new));
     var singletons = singletonsOf(mir);
     var forwards = forwardsOf(mir);
     return new ImplInfo(Mapper.of(out -> targetsOf(pkgName, program).forEach(target ->

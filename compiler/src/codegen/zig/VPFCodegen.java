@@ -210,16 +210,37 @@ class VPFCodegen {
     }
 
     var resultMap = new HashMap<Integer, String>();
+    // Every operand of the combining call is lent, so a value this frame built for it is
+    // this frame's to release once the call has returned.
+    var owned = new ArrayList<ZigSingleCodegen.Drop>();
     for (int i = 0; i < frameAddingExprs.size(); i++) {
-      resultMap.put(frameAddingExprs.get(i).index, i == 0 ? "locals.r1" : "r" + (i + 1));
+      var resultRef = i == 0 ? "locals.r1" : "r" + (i + 1);
+      var resultExpr = frameAddingExprs.get(i).expr;
+      resultMap.put(frameAddingExprs.get(i).index, resultRef);
+      if (!parent.isRcFree(resultExpr)) {
+        owned.add(new ZigSingleCodegen.Drop(resultRef, resultExpr.t()));
+      }
     }
+    // The combining call lends every operand, receiver included, so a name passes as it
+    // stands and a value this frame builds is bound and released below. A value that needs no
+    // reference stays inline: a direct target's wrapper drops a receiver it does not need.
     for (var sub : vpf.plainExprs) {
-      // Index 0 is the combining call's receiver, which that call lends.
-      resultMap.put(sub.index, sub.index == 0
-        ? sub.expr.accept(parent, true)
-        : parent.ownedExpr(sub.expr, true));
+      if (sub.expr instanceof MIR.X || parent.isRcFree(sub.expr)) {
+        resultMap.put(sub.index, sub.expr.accept(parent, true));
+        continue;
+      }
+      var tmp = parent.freshName("fear_vpf_arg_");
+      sb.append("const ").append(tmp).append(" = ").append(sub.expr.accept(parent, true)).append(";\n");
+      resultMap.put(sub.index, tmp);
+      owned.add(new ZigSingleCodegen.Drop(tmp, sub.expr.t()));
     }
-    sb.append("return ").append(emitCombinerFromMap(vpf, resultMap, parent)).append(";\n");
+    var combined = parent.freshName("fear_vpf_res_");
+    sb.append("const ").append(combined).append(" = ")
+      .append(emitCombinerFromMap(vpf, resultMap, parent)).append(";\n");
+    for (var drop : owned) {
+      sb.append(parent.generateDecrement(drop.name(), drop.t())).append(";\n");
+    }
+    sb.append("return ").append(combined).append(";\n");
 
     sb.append("}");
     parent.currentState().functions.add(sb.toString());
@@ -525,12 +546,10 @@ class VPFCodegen {
       if (resultMap.containsKey(sub.index)) {
         allArgs[sub.index] = resultMap.get(sub.index);
       } else {
-        // The combiner lends its receiver and owns its arguments, so index 0 passes the
-        // locals field as it stands and only an argument shares.
+        // The combiner lends every operand, receiver and argument alike, so a locals field
+        // passes as it stands.
         allArgs[sub.index] = (sub.expr instanceof MIR.X x)
-          ? sub.index == 0
-            ? "locals." + parent.id.varName(x.name())
-            : parent.generateShare("locals." + parent.id.varName(x.name()), x.t())
+          ? "locals." + parent.id.varName(x.name())
           : sub.expr.accept(codegen, true);
       }
     }
@@ -691,6 +710,10 @@ class VPFCodegen {
     @Override public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
       var fRef = delegate.funRef(call.fun());
       var prelude = new ArrayList<String>();
+      // The callee lends every position, so a name passes as it stands and a value built here
+      // binds to a temporary the enclosing block releases. Statement-emitting operands bind to
+      // prelude temporaries in argument order, which keeps them evaluating left to right; only
+      // an owned value adds a `defer`.
       var args = call.args().stream()
         .map(a -> {
           if (delegate.isTransientCreateObj(a)) {
@@ -698,7 +721,11 @@ class VPFCodegen {
             prelude.addAll(materialised.prelude());
             return materialised.ref();
           }
-          return delegate.ownedExpr(a, this, checkMagic);
+          if (delegate.isPureInline(a)) { return a.accept(this, checkMagic); }
+          var tmp = delegate.freshName("fear_thief_arg_");
+          prelude.add("const " + tmp + " = " + delegate.ownedExpr(a, this, checkMagic) + ";");
+          if (!delegate.isRcFree(a)) { prelude.add("defer " + delegate.generateDecrement(tmp, a.t()) + ";"); }
+          return tmp;
         })
         .collect(Collectors.joining(", "));
       return delegate.withTransientPrelude(prelude, fRef + "(" + args + ")");

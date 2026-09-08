@@ -31,9 +31,11 @@ pub const VT_Var: objs.VTable = .{
     .trace_fn = var_trace,
 };
 
+/// Takes `value` on loan and keeps one reference of its own. See
+/// [`FatPtr.box_transient`] for why the order is `share` then `box_transient`.
 pub fn make(value: FatPtr) FatPtr {
     const val_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
-    val_ptr.* = value;
+    val_ptr.* = value.share().box_transient();
     const cell = gc.allocator.create(VarCell) catch @panic("OOM");
     cell.* = .{
         .header = .born,
@@ -59,22 +61,24 @@ fn get(self: FatPtr) FatPtr {
     return self.data.cell.value.load(.monotonic).*.share();
 }
 
+/// Borrows `new_value` and keeps it, giving back the reference the cell held.
 fn swap(self: FatPtr, new_value: FatPtr) FatPtr {
     cycles.noteStore(self, new_value);
     var cell = self.data.cell;
     const new_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
-    new_ptr.* = new_value;
+    new_ptr.* = new_value.share().box_transient();
     const old_ptr = cell.value.swap(new_ptr, .monotonic);
     const old_value = old_ptr.*;
     gc.recycleDestroy(FatPtr, old_ptr, .var_release);
     return old_value;
 }
 
+/// Borrows `new_value` and keeps it, releasing the reference it replaces.
 fn set(self: FatPtr, new_value: FatPtr) FatPtr {
     cycles.noteStore(self, new_value);
     var cell = self.data.cell;
     const new_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
-    new_ptr.* = new_value;
+    new_ptr.* = new_value.share().box_transient();
     const old_ptr = cell.value.swap(new_ptr, .monotonic);
     old_ptr.*.rc_decrement();
     gc.recycleDestroy(FatPtr, old_ptr, .var_release);
@@ -117,10 +121,15 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
         h("mut .swap/1") => swap(self, args[0]),
         h("mut :=/1"), h("mut .set/1") => set(self, args[0]),
         h("mut <-/1"), h("mut .update/1") => {
-            // self is not decremented: it moves into the swap call.
+            // Every operand here is on loan, `args[0]` included, so nothing this
+            // prong is given is released. What it owns is what it makes: the
+            // share of the current value it lends to the update function, and
+            // that function's result, which `swap` keeps a reference of its own
+            // to.
             const current = self.data.cell.value.load(.monotonic).*.share();
+            defer current.rc_decrement();
             const new_val = objs.call(args[0], h("mut #/1"), .{current}, @src());
-            args[0].rc_decrement();
+            defer new_val.rc_decrement();
             return swap(self, new_val);
         },
         else => objs.primitive_dispatch_failed(VT_Var.type_name, target_method),
@@ -139,24 +148,24 @@ test "Var get set and swap retain returned values and release overwritten storag
     var a = objs.obj_k(Captures, &vt_a, .{});
     var b = objs.obj_k(Captures, &vt_b, .{});
     var c = objs.obj_k(Captures, &vt_c, .{});
-    var cell_fp = make(a.share());
+    var cell_fp = make(a);
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
 
-    // `get`, `set` and `swap` borrow their receiver: none of them releases it.
-    // Sharing it here would leave the cell with a reference no one gives back,
-    // so the release below would never reach zero and never free the value.
+    // `get`, `set` and `swap` borrow their receiver and their value alike: none
+    // of them releases either. Each keeps a share of its own for what it stores,
+    // so the counts below are the test's own reference plus the cell's.
     var got = get(cell_fp);
     try testing.expectEqual(@as(u32, 3), a.boxed_value().refCountForTest());
     got.rc_decrement();
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
 
-    var old = swap(cell_fp, b.share());
+    var old = swap(cell_fp, b);
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
     try testing.expectEqual(@as(u32, 2), b.boxed_value().refCountForTest());
     old.rc_decrement();
     try testing.expectEqual(@as(u32, 1), a.boxed_value().refCountForTest());
 
-    _ = set(cell_fp, c.share());
+    _ = set(cell_fp, c);
     try testing.expectEqual(@as(u32, 1), b.boxed_value().refCountForTest());
     try testing.expectEqual(@as(u32, 2), c.boxed_value().refCountForTest());
 

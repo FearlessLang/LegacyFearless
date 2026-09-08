@@ -1,0 +1,45 @@
+package bench
+
+WcStates: {
+  #(b: Nat, l: Nat, w: Nat, iw: Bool): WcState -> {
+    .bytes -> b,
+    .lines -> l,
+    .words -> w,
+    .inWord -> iw,
+    },
+
+  .zero: WcState -> WcStates#(0, 0, 0, False),
+
+  /// Named rather than inline at the fold: two-parameter lambdas in argument
+  /// position do not always infer.
+  .stepper: read F[WcState, Str, WcState] -> {s, c -> s.step(c)},
+  }
+
+/// The word-count monoid, one codepoint at a time. A word is counted where it
+/// starts, the only transition needing the previous codepoint. The corpus is
+/// ASCII, so a codepoint is a byte and the separators are space and newline.
+WcState: {
+  .bytes: Nat,
+  .lines: Nat,
+  .words: Nat,
+  .inWord: Bool,
+
+  .step(c: Str): WcState -> (c == "\n").if[WcState]{
+    .then -> WcStates#(this.bytes + 1, this.lines + 1, this.words, False),
+    .else -> (c == " ").if[WcState]{
+      .then -> WcStates#(this.bytes + 1, this.lines, this.words, False),
+      .else -> this.inWord.if[WcState]{
+        .then -> WcStates#(this.bytes + 1, this.lines, this.words, True),
+        .else -> WcStates#(this.bytes + 1, this.lines, this.words + 1, True),
+        },
+      },
+    },
+
+  .str: Str -> this.bytes.str + " " + (this.lines.str) + " " + (this.words.str),
+  }
+
+/// Reading the file is inside the timed process on purpose: wall clock is the
+/// headline number and I/O is part of what the program costs.
+Test: Main {sys -> sys.io.println(
+  sys.io.accessR(List#[Str]("corpus", "corpus16.txt")).readStr!
+    .codepoints.fold[WcState]({WcStates.zero}, WcStates.stepper).str)}

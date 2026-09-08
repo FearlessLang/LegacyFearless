@@ -39,15 +39,21 @@ fn drive(flow: *types.FeartFlow, ctx: *anyopaque, accept: exec.AcceptFn) void {
 }
 
 const FoldCtx = struct { acc: FatPtr, combine: FatPtr };
+/// An accept callback owns the element it is handed, because `source_next` shares
+/// it, and the combining call only borrows what it is given. So the element is
+/// released here and the accumulator chain is this context's own.
 fn fold_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *FoldCtx = @ptrCast(@alignCast(ctx_ptr));
     const old_acc = ctx.acc;
-    ctx.acc = objs.call(ctx.combine, h("read #/2"), .{ old_acc.share(), elem }, @src());
+    ctx.acc = objs.call(ctx.combine, h("read #/2"), .{ old_acc, elem }, @src());
     old_acc.rc_decrement();
+    elem.rc_decrement();
     return true;
 }
 pub fn drive_fold(flow: *types.FeartFlow, initial: FatPtr, combine: FatPtr) FatPtr {
-    var ctx = FoldCtx{ .acc = initial, .combine = combine };
+    // `initial` is lent, and the accumulator is released on every step, so the
+    // chain starts from a reference of this context's own.
+    var ctx = FoldCtx{ .acc = initial.share(), .combine = combine };
     drive(flow, @ptrCast(&ctx), &fold_accept);
     return ctx.acc;
 }
@@ -107,6 +113,7 @@ fn for_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *ForCtx = @ptrCast(@alignCast(ctx_ptr));
     const result = objs.call(ctx.callback, h("mut #/1"), .{elem}, @src());
     result.rc_decrement();
+    elem.rc_decrement();
     return true;
 }
 pub fn drive_for(flow: *types.FeartFlow, callback: FatPtr) FatPtr {
@@ -122,6 +129,7 @@ const FindCtx = struct { predicate: FatPtr, found: ?FatPtr };
 fn find_map_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *FindCtx = @ptrCast(@alignCast(ctx_ptr));
     const result = objs.call(ctx.predicate, h("read #/1"), .{elem}, @src());
+    defer elem.rc_decrement();
     if (result.vt == &pb.VT_Opt_1) {
         result.rc_decrement();
         return true;
@@ -142,6 +150,7 @@ pub fn drive_find_map(flow: *types.FeartFlow, mapper: FatPtr) FatPtr {
 fn unordered_find_map_accept(ctx_ptr: *anyopaque, elem: FatPtr) bool {
     const ctx: *FindCtx = @ptrCast(@alignCast(ctx_ptr));
     const result = objs.call(ctx.predicate, h("read #/1"), .{elem}, @src());
+    defer elem.rc_decrement();
     if (result.vt == &pb.VT_Opt_1) {
         result.rc_decrement();
         return true;

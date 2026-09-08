@@ -122,15 +122,20 @@ pub fn make_str_copy(bytes: []const u8) FatPtr {
     return make_owned_str(buf.ptr, bytes.len);
 }
 
-/// Wrap a message `Str` as a `base.Info` (mirrors `Infos.msg msg`). Consumes
-/// the single reference held by `msg`.
+/// Wraps a freshly built value in a `base` constructor. A Fearless call lends
+/// its arguments, so each helper releases the one reference its caller holds.
+///
+/// `make_info_msg` wraps a message `Str` as a `base.Info` (mirrors `Infos.msg msg`).
 pub fn make_info_msg(msg: FatPtr) FatPtr {
+    defer msg.rc_decrement();
     return objs.call(objs.obj_k_singleton(&pb.VT_Infos_0), comptime h("imm .msg/1"), .{msg}, @src());
 }
 pub fn make_action_ok(x: FatPtr) FatPtr {
+    defer x.rc_decrement();
     return objs.call(objs.obj_k_singleton(&pb.VT_Actions_0), comptime h("imm .ok/1"), .{x}, @src());
 }
 pub fn make_action_info(info: FatPtr) FatPtr {
+    defer info.rc_decrement();
     return objs.call(objs.obj_k_singleton(&pb.VT_Actions_0), comptime h("imm .info/1"), .{info}, @src());
 }
 
@@ -170,7 +175,6 @@ fn codepoint_byte_offset(data: []const u8, cp: u64) usize {
 /// `+(other: read Stringable): Str` -- coerce `other` via `.str`, then build a
 /// fresh owned immutable string. Always immutable, even on a mutable receiver.
 pub fn str_concat(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    defer other.rc_decrement();
     const other_str = objs.call(other, comptime h("read .str/0"), .{}, @src());
     defer other_str.rc_decrement();
     const sa = deref_str(self);
@@ -183,12 +187,10 @@ pub fn str_concat(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
 }
 
 pub fn str_eq(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    defer other.rc_decrement();
     return bool_intrinsics.to_bool(std.mem.eql(u8, deref_str(self), deref_str(other)));
 }
 
 pub fn str_neq(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    defer other.rc_decrement();
     return bool_intrinsics.to_bool(!std.mem.eql(u8, deref_str(self), deref_str(other)));
 }
 
@@ -201,7 +203,6 @@ pub fn str_is_empty(self: FatPtr) callconv(.c) FatPtr {
 }
 
 pub fn str_starts_with(self: FatPtr, other: FatPtr) callconv(.c) FatPtr {
-    defer other.rc_decrement();
     const a = deref_str(self);
     const b = deref_str(other);
     return bool_intrinsics.to_bool(a.len >= b.len and std.mem.eql(u8, a[0..b.len], b));
@@ -269,8 +270,7 @@ pub fn str_utf8(self: FatPtr) callconv(.c) FatPtr {
 
 /// `.hash(hasher)` -- feed this string into the hasher, return the hasher.
 pub fn str_hash(self: FatPtr, hasher: FatPtr) callconv(.c) FatPtr {
-    defer hasher.rc_decrement();
-    return objs.call(hasher, comptime h("mut .str/1"), .{self.share()}, @src());
+    return objs.call(hasher, comptime h("mut .str/1"), .{self}, @src());
 }
 
 /// `.float` -- parse as `f64` via the native runtime, returning a base
@@ -332,9 +332,8 @@ pub fn str_graphemes(self: FatPtr) callconv(.c) FatPtr {
 /// Join a `Flow[Str]` using the receiver as the separator. Materialises the flow
 /// into a List, then concatenates with the separator between elements.
 pub fn str_join(separator: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
-    // `separator` is the receiver, which this frame does not own. `flow` arrived
-    // as an owned argument and `list` is a fresh result, so both are released.
-    defer flow.rc_decrement();
+    // `separator` and `flow` are both lent, so neither is released here. `list`
+    // is a fresh result this frame owns.
     const list = objs.call(flow, comptime h("mut .list/0"), .{}, @src());
     defer list.rc_decrement();
 
@@ -369,14 +368,14 @@ pub fn str_str_self(self: FatPtr) callconv(.c) FatPtr {
 
 pub fn str_assert_eq(self: FatPtr, actual: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(pb, "_StrHelpers_0__ZdotassertEq_2_imm_Zfun")) {
-        return pb._StrHelpers_0__ZdotassertEq_2_imm_Zfun(self.share(), actual, helpers_singleton());
+        return pb._StrHelpers_0__ZdotassertEq_2_imm_Zfun(self, actual, helpers_singleton());
     }
     @panic("This base has no _StrHelpers for Str.assertEq");
 }
 
 pub fn str_assert_eq_msg(self: FatPtr, actual: FatPtr, message: FatPtr) callconv(.c) FatPtr {
     if (comptime @hasDecl(pb, "_StrHelpers_0__ZdotassertEq_3_imm_Zfun")) {
-        return pb._StrHelpers_0__ZdotassertEq_3_imm_Zfun(self.share(), actual, message, helpers_singleton());
+        return pb._StrHelpers_0__ZdotassertEq_3_imm_Zfun(self, actual, message, helpers_singleton());
     }
     @panic("This base has no _StrHelpers for Str.assertEq");
 }

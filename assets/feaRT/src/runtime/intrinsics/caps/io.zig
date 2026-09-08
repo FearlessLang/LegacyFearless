@@ -21,11 +21,10 @@ fn make_void() FatPtr {
 var stdout_mutex: FiberMutex = .{};
 var stderr_mutex: FiberMutex = .{};
 
-/// Write `msg`'s bytes to `fd` through the reactor, serialised on `mutex`. The
-/// `defer rc_decrement` runs after `writeAsync` returns (it parks until the write
-/// completes), so `msg`'s data stays live for the whole I/O.
+/// Write `msg`'s bytes to `fd` through the reactor, serialised on `mutex`. `msg`
+/// is on loan and its owner outlives the call, so its data stays live for the
+/// whole I/O, which parks until the write completes.
 fn write_str(fd: i32, mutex: *FiberMutex, msg: FatPtr) void {
-    defer msg.rc_decrement();
     const data = str_rt.deref_str(msg);
     const w = worker_mod.getCurrentWorker().?;
     mutex.acquire(w);
@@ -35,7 +34,6 @@ fn write_str(fd: i32, mutex: *FiberMutex, msg: FatPtr) void {
 
 /// As `write_str` but appends a newline atomically via a 2-iovec `writev`.
 fn writeln_str(fd: i32, mutex: *FiberMutex, msg: FatPtr) void {
-    defer msg.rc_decrement();
     const data = str_rt.deref_str(msg);
     const vecs = [2]std.posix.iovec_const{
         .{ .base = data.ptr, .len = data.len },
@@ -80,19 +78,16 @@ fn io_println_err(self: FatPtr, msg: FatPtr) callconv(.c) FatPtr {
 
 fn io_accessRW(self: FatPtr, path: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer path.rc_decrement();
     return path_rt.rw_from_cwd(path);
 }
 
 fn io_accessR(self: FatPtr, path: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer path.rc_decrement();
     return path_rt.read_from_cwd(path);
 }
 
 fn io_accessW(self: FatPtr, path: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer path.rc_decrement();
     return path_rt.write_from_cwd(path);
 }
 

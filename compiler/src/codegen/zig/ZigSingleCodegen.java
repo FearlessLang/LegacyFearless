@@ -95,7 +95,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     }
 
     this.vpf = new VPFCodegen(this);
-    this.shapes = new ReturnShapeAnalysis(p, this::isTransientCreateObj);
+    this.shapes = new ReturnShapeAnalysis(p, this::isTransientCreateObj, cachedPkg);
     this.hotness = new RecursionHotness(p, shapes);
     this.standInArms = new StandInSelfArms(p);
   }
@@ -174,21 +174,16 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   /// `FatPtr`, and empty where it stays a `FatPtr`.
   ///
   /// A `FatPtr` is two machine words, so a five-parameter method overflows the six-register
-  /// argument budget and the caller writes the rest to the outgoing argument area on every call.
-  /// Passing the primitives as bare scalars keeps the call in registers. The body still sees
-  /// `FatPtr`s: the `make` this adds is inline and folds against the `deref` at the call site.
+  /// argument budget. Passing the primitives as bare scalars keeps the call in registers, and
+  /// the body still sees `FatPtr`s because the inline `make` folds against the caller's `deref`.
   ///
-  /// This is keyed on the wrapper's own identity rather than on a resolved callee, and the
-  /// definition, the dispatch thunk and every call site all read it through this one method.
-  /// A caller that resolves the callee differently from the definition -- or fails to resolve it
-  /// at all, which `ReturnShapeAnalysis.calleeOf` reports as empty -- therefore still agrees
-  /// about the shape. Deriving it twice would let a call pass `FatPtr`s to a wrapper declared
-  /// with scalars, which Zig refuses to compile: a Fearless program that type-checks would fail
-  /// to build.
-  ///
-  /// The body keeps the boxed shape, so a promoted frame still copies its locals as `FatPtr`s
-  /// and `VPFCodegen` needs no separate agreement; its combining call reads the shape from here
-  /// like every other call site.
+  /// This is keyed on the wrapper's own identity, and the definition, the dispatch thunk and
+  /// every call site all read it through this one method, so a caller that resolves the callee
+  /// differently -- or not at all, which `ReturnShapeAnalysis.calleeOf` reports as empty --
+  /// still agrees about the shape. Deriving it twice would let a call pass `FatPtr`s to a
+  /// wrapper declared with scalars, which Zig refuses to compile. The body keeps the boxed
+  /// shape, so a promoted frame still copies its locals as `FatPtr`s and `VPFCodegen` reads the
+  /// shape from here like every other call site.
   private WrapperShape wrapperShape(DecId objId, Id.MethName mName, Mdf mdf) {
     return shapeCache.computeIfAbsent(new WrapperKey(objId, mName, mdf),
       k -> new WrapperShape(singletonReceiver(k.objId()),
@@ -303,10 +298,9 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   /// `make`, which folds against the caller's `deref`.
   ///
   /// A receiver slot that {@link StandInSelfArms} reports is left out altogether: the arm is
-  /// reached only from a branch that passes a singleton it never reads.
-  ///
-  /// Every definition and every call site reads the shape from here, so a call cannot disagree
-  /// with the signature the function was emitted with.
+  /// reached only from a branch that passes a singleton it never reads. Every definition and
+  /// every call site reads the shape from here, so a call cannot disagree with the signature
+  /// the function was emitted with.
   List<ArgSlot> funShape(MIR.FName f) {
     return funShapeCache.computeIfAbsent(f, this::computeFunShape);
   }
@@ -555,11 +549,16 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   }
 
   /// A tail forward binds its operands to temporaries and returns the callee-variant call, so
-  /// no operand may need a prelude: a prelude holds a transient whose drop must outlive the
-  /// call.
+  /// no operand may need a prelude: an owned one adds a `defer` that runs after the call, which
+  /// is the prelude a tail forward cannot carry. Every position takes the same test, because
+  /// every position is borrowed.
   private boolean operandsSlotFree(MIR.E recv, List<? extends MIR.E> args) {
-    if (recv != null && (isTransientCreateObj(recv) || receiverNeedsOwner(recv))) { return false; }
-    return args.stream().noneMatch(this::isTransientCreateObj);
+    if (recv != null && needsPrelude(recv)) { return false; }
+    return args.stream().noneMatch(this::needsPrelude);
+  }
+
+  private boolean needsPrelude(MIR.E e) {
+    return isTransientCreateObj(e) || !isPureInline(e);
   }
 
   /// The `drop` a slot call needs, as the statement that runs when the value dies.
@@ -798,15 +797,18 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return tailStatements(body instanceof MIR.Block block ? block.original() : body, dropNames, checkMagic);
   }
 
-  /// `target(operands...)` in tail position, or empty when the operands need a prelude. A
-  /// prelude holds a transient stored in this frame whose drop must outlive the call, which
-  /// puts the call out of tail position.
+  /// `target(operands...)` in tail position, or empty when an operand drops after the call. A
+  /// prelude whose entries drop nothing may run before a tail call: no statement of it needs
+  /// the frame the call replaces. An owned temporary defers its drop to the enclosing block,
+  /// which a tail call never reaches, so only a drop-free prelude keeps the call in tail
+  /// position.
   private Optional<String> tailCallStatements(CallOperands ops, Function<List<String>, String> build,
                                               List<Drop> dropNames) {
-    if (!ops.prelude().isEmpty()) { return Optional.empty(); }
+    if (ops.prelude().stream().anyMatch(line -> line.startsWith("defer "))) { return Optional.empty(); }
     var operands = Stream.concat(Stream.of(ops.recv()), ops.args().stream()).toList();
     var moved = moveLastShares(operands, dropNames);
     var sb = new StringBuilder();
+    ops.prelude().forEach(line -> sb.append(line).append('\n'));
     var refs = new ArrayList<String>();
     for (var operand : moved.operands()) {
       var tmp = "fear_op_" + blockCounter++;
@@ -835,17 +837,14 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   ///
   /// A parameter this frame owns is shared into an operand and then dropped at the end of the
   /// path. The count returns to where it started and nothing in between reads it, so the
-  /// operand may take the reference this frame already holds and the drop goes away.
-  ///
-  /// Only the last use may become the move. Giving this frame's reference to an earlier operand
-  /// would let that callee release the value while a later operand still reads the name. Every
-  /// operand binds to a temporary before the drops and the call run, and Zig evaluates them
+  /// operand may take the reference this frame already holds and the drop goes away. Only the
+  /// last use may become the move: an earlier one would let that callee release the value while
+  /// a later operand still reads the name. Operands bind to temporaries and Zig evaluates them
   /// left to right, so the textually last use is the last one in time.
   ///
-  /// A name is refused unless every use of it across the operands is a share. A use that is not
-  /// a share is a borrow, and a borrow after the move would read a reference this frame has
-  /// given away. Text inside a string literal does not count as a use, but a name that appears
-  /// in one is refused rather than reasoned about, because the rewrite works on the raw text.
+  /// A name is refused unless every use of it across the operands is a share: a borrow after
+  /// the move would read a reference this frame has given away. A name inside a string literal
+  /// is refused rather than reasoned about, because the rewrite works on the raw text.
   private MovedShares moveLastShares(List<String> operands, List<Drop> dropNames) {
     var working = new ArrayList<>(operands);
     var cancelled = new LinkedHashSet<Drop>();
@@ -1021,10 +1020,10 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     for (var i = 0; i < arm.captures().size(); i++) {
       var read = "rt.deref(" + capturesRef(arm.impl()) + ", " + recvName + ")."
         + id.varName(arm.captures().get(i));
-      // The arm owns what it is given, so the capture is shared out of the receiver. The
-      // parameter it fills is written at this call site, so its declared type is known here and
-      // names a strategy narrower than the general storage-mode dispatch.
-      args.add(generateShare(read, rcStrategy(fun.args().get(i).t())));
+      // The arm borrows what it is given, as every other operand does. The receiver holds the
+      // capture and outlives the arm, because the frame that binds it drops it only after the
+      // match, so the read stands on its own.
+      args.add(read);
     }
     args.add(standInSelf());
     fun.args().stream().skip(arity + 1).forEach(x -> args.add(x.accept(gen, checkMagic)));
@@ -1506,17 +1505,12 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
   private void emitFun(MIR.Fun fun) {
     var name = id.getFName(fun.name());
-    // Only the declared params are owned, so only they drop. Everything from the receiver
-    // onwards is lent: the receiver by its caller (see `receiverOperand`), and each capture
-    // by the receiver that holds it. Captures are final, so a lent capture cannot be
-    // replaced while the call runs.
-    var selfIdx = selfArgIndex(fun);
-    var dropNames = java.util.stream.IntStream.range(0, fun.args().size())
-      .filter(i -> i < selfIdx)
-      .mapToObj(fun.args()::get)
-      .filter(x -> !isRcFree(x))
-      .map(x -> new Drop(id.varName(x.name()), x.t()))
-      .toList();
+    // Every argument is lent, so nothing a function receives drops here: a declared parameter
+    // is lent by its caller (see `borrowedOperand`), the receiver the same way, and each
+    // capture by the receiver that holds it. Captures are final, so a lent capture cannot be
+    // replaced while the call runs. A site that stores a lent value boxes and shares it first,
+    // which is what keeps it alive past the call.
+    var dropNames = List.<Drop>of();
     var signature = funSignature(fun);
     var paramNames = signature.discardNames();
     var params = signature.params();
@@ -1626,8 +1620,8 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
 
     var body = ReturnShapeAnalysis.unwrap(fun.body());
     switch (body) {
-      // The params arrive owned. `init_transient_obj` shares each capture and the param drops
-      // consume the passed-in refs, so the slot holds one ref per capture.
+      // The params arrive borrowed. `init_transient_obj` shares each capture, so the slot holds
+      // one ref per capture of its own and nothing here drops what it was lent.
       case MIR.CreateObj k -> {
         var captures = k.captures().stream()
           .map(x -> "." + id.varName(x.name()) + " = " + visitX(x, true))
@@ -1734,39 +1728,61 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
   /// the captures, so the receiver sits at the method's arity.
   private int selfArgIndex(MIR.Fun fun) { return fun.name().m().num(); }
 
-  /// The receiver of a call, which the callee borrows instead of owning.
+  /// One operand a callee borrows instead of owning. Every position of a call takes this path:
+  /// the receiver, each declared argument, and each capture.
   ///
-  /// A receiver is alive for the whole call by construction: the caller has to hold it to make
-  /// the call at all. The retain and release pair a shared receiver costs is therefore dead, and
-  /// both halves go: this emits no `share`, and the callee leaves the receiver out of its drop
-  /// list.
+  /// The caller has to hold an operand to make the call at all, so the retain and release pair
+  /// a shared operand costs is dead, and both halves go: no `share` here, and the callee drops
+  /// nothing it was given. A callee that stores what it is lent shares at the point of the
+  /// store (`emitCreateObjBoxed`, and the runtime's mutable containers do the same), so nothing
+  /// a borrowed operand names can outlive the call.
   ///
-  /// A borrowed receiver never escapes. Every position that can outlive the call already asks
-  /// for an owned value: an argument and a capture go through `ownedExpr`, and a returned name
-  /// goes through `returnExpr`. So a borrowed receiver is only ever borrowed again as the
-  /// receiver of a nested call, which holds for the same reason one level up.
-  ///
-  /// A receiver the caller builds on the spot has no owner, so the caller becomes one: the value
-  /// binds to a temporary and drops when the enclosing block ends, after the call.
-  private String receiverOperand(MIR.E e, MIRVisitor<String> gen, boolean checkMagic,
-                                 List<String> prelude) {
+  /// An operand the caller builds on the spot has no owner, so the caller becomes one: it binds
+  /// to a temporary that drops when the enclosing block ends, after the call. An operand whose
+  /// type needs no reference binds without a `defer`. Every operand whose evaluation emits
+  /// statements binds to a prelude temporary in argument order, which keeps operands evaluating
+  /// left to right; only the forms `isPureInline` admits stay in place.
+  private String borrowedOperand(MIR.E e, MIRVisitor<String> gen, boolean checkMagic,
+                                 List<String> prelude, boolean slotEligible, String tmpPrefix) {
     if (isTransientCreateObj(e)) {
       var materialised = materialiseTransient((MIR.CreateObj) e, gen, checkMagic);
       prelude.addAll(materialised.prelude());
       return materialised.ref();
     }
-    if (e instanceof MIR.X || isRcFree(e)) { return e.accept(gen, checkMagic); }
-    // A receiver the callee can build straight into a caller slot stays on the stack, which
-    // beats owning a heap object for the length of the call.
-    var slotted = materialiseSlotCall(e, gen, checkMagic);
-    if (slotted.isPresent()) {
-      prelude.addAll(slotted.get().prelude());
-      return slotted.get().ref();
+    if (isPureInline(e)) { return e.accept(gen, checkMagic); }
+    if (slotEligible) {
+      var slotted = materialiseSlotCall(e, gen, checkMagic);
+      if (slotted.isPresent()) {
+        prelude.addAll(slotted.get().prelude());
+        return slotted.get().ref();
+      }
     }
-    var tmp = "fear_recv_" + blockCounter++;
+    var tmp = tmpPrefix + blockCounter++;
     prelude.add("const " + tmp + " = " + ownedExpr(e, gen, checkMagic) + ";");
-    prelude.add("defer " + generateDecrement(tmp, e.t()) + ";");
+    if (!isRcFree(e)) { prelude.add("defer " + generateDecrement(tmp, e.t()) + ";"); }
     return tmp;
+  }
+
+  /// Whether visiting `e` as an operand emits its value alone, with no statements beside it.
+  /// Only such an operand may stay in the argument list; any other binds to a prelude temporary
+  /// in `borrowedOperand`, which is what keeps call operands in evaluation order.
+  ///
+  /// A call whose result needs no reference still emits statements: the `:=` of a `Var` costs no
+  /// `defer`, but the store it performs is what later operands read. Primitive intrinsic
+  /// arithmetic is the one form that is both reference free and side effect free.
+  boolean isPureInline(MIR.E e) {
+    return switch (e) {
+      case MIR.X ignored -> true;
+      case MIR.Box box -> isPureInline(box.inner());
+      case MIR.CreateObj ignored -> isRcFree(e);
+      case MIR.MCall call -> isRcFree(e) && primitiveIntrinsic(call.recv()).isPresent();
+      default -> false;
+    };
+  }
+
+  private String receiverOperand(MIR.E e, MIRVisitor<String> gen, boolean checkMagic,
+                                 List<String> prelude) {
+    return borrowedOperand(e, gen, checkMagic, prelude, true, "fear_recv_");
   }
 
   /// Whether the frame drops the very name it lends in a borrowed operand position.
@@ -1795,24 +1811,10 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     return !(e instanceof MIR.X) && !isRcFree(e) && !isTransientCreateObj(e);
   }
 
-  /// One owned operand. A syntactic transient `CreateObj` materialises into a stack slot.
-  /// With `slotEligible`, a `DirectCall`/`StaticCall` whose callee has a `_transient` variant
-  /// also fills a caller stack slot instead of a heap object.
+  /// One argument, which the callee borrows exactly as it borrows the receiver.
   private String operand(MIR.E e, MIRVisitor<String> gen, boolean checkMagic,
                          List<String> prelude, boolean slotEligible) {
-    if (isTransientCreateObj(e)) {
-      var materialised = materialiseTransient((MIR.CreateObj) e, gen, checkMagic);
-      prelude.addAll(materialised.prelude());
-      return materialised.ref();
-    }
-    if (slotEligible) {
-      var slotted = materialiseSlotCall(e, gen, checkMagic);
-      if (slotted.isPresent()) {
-        prelude.addAll(slotted.get().prelude());
-        return slotted.get().ref();
-      }
-    }
-    return ownedExpr(e, gen, checkMagic);
+    return borrowedOperand(e, gen, checkMagic, prelude, slotEligible, "fear_arg_");
   }
 
   /// True when an operand of `call` can fill a caller stack slot instead of a heap object.
@@ -1882,7 +1884,16 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var callee = funMap.get(call.fun());
     var selfIdx = call.fun().m().num();
     var shape = funShape(call.fun());
+    // The receiver evaluates before the declared arguments, so its operand takes the prelude
+    // first. The declared arguments append to the prelude in argument order after it, which
+    // keeps every operand of the call evaluating left to right.
+    var recvArgs = new ArrayList<String>();
+    for (int i = selfIdx; i < call.args().size(); i++) {
+      if (i < shape.size() && shape.get(i).elided()) { continue; }
+      recvArgs.add(receiverOperand(call.args().get(i), gen, checkMagic, prelude));
+    }
     var args = new ArrayList<String>();
+    var recvIdx = 0;
     for (int i = 0; i < call.args().size(); i++) {
       // A slot the callee leaves out of its signature is never built: the callee rebuilds the
       // value it stands for, so the expression written here has nothing to fill.
@@ -1890,7 +1901,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
       // The callee borrows the receiver and the captures, so each takes the path a receiver
       // takes in `slottedCallOperands`.
       if (i >= selfIdx) {
-        var recv = receiverOperand(call.args().get(i), gen, checkMagic, prelude);
+        var recv = recvArgs.get(recvIdx++);
         args.add(i < shape.size()
           ? shape.get(i).scalar().map(sc -> sc.rtModule() + ".deref(" + recv + ")").orElse(recv)
           : recv);

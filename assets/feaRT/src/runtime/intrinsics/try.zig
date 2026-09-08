@@ -35,10 +35,16 @@ const TryActionCaptures = extern struct {
     catch_nd: bool,
 };
 
+/// `f` and `data` are lent by the factory method's caller and the action keeps
+/// both, so each is boxed out of that frame and shared into the captures.
 fn make_try_action(f: FatPtr, data: FatPtr, has_data: bool, catch_nd: bool) FatPtr {
+    const f_kept = f.share().box_transient();
+    defer f_kept.rc_decrement();
+    const data_kept = data.share().box_transient();
+    defer data_kept.rc_decrement();
     return objs.obj_k(TryActionCaptures, &VT_TryAction, .{
-        .f = f,
-        .data = data,
+        .f = f_kept,
+        .data = data_kept,
         .has_data = has_data,
         .catch_nd = catch_nd,
     });
@@ -64,7 +70,9 @@ fn childEntry(fiber: *Fiber) void {
 
 /// Run `f#`/`f#data` on a fresh child fiber and block until it completes.
 /// Returns the lambda's value or a tag-typed error payload; classify with
-/// `error_rt.tagOf`. Ownership of `f`/`data` transfers to the child.
+/// `error_rt.tagOf`. `f` and `data` are on loan: the child only calls `f`, which
+/// borrows both, and the caller parks here until the child is done, so its own
+/// references cover the whole run.
 pub fn runInChildFiber(f: FatPtr, data: ?FatPtr) FatPtr {
     const worker = worker_mod.getCurrentWorker().?;
     const parent_fiber = worker.current_fiber.?;
@@ -94,21 +102,27 @@ pub fn runInChildFiber(f: FatPtr, data: ?FatPtr) FatPtr {
 fn tryaction_run(self: FatPtr, m: FatPtr) callconv(.c) FatPtr {
     const caps = objs.deref(TryActionCaptures, self);
     const catch_nd = caps.catch_nd;
-    defer m.rc_decrement();
     const result = runInChildFiber(
-        caps.f.share(),
-        if (caps.has_data) caps.data.share() else null,
+        caps.f,
+        if (caps.has_data) caps.data else null,
     );
     switch (error_rt.tagOf(result)) {
-        .none => return objs.call(m, comptime h("mut .ok/1"), .{result}, @src()),
+        // The match object lends what it is given, so every value handed to it
+        // here is released by this frame afterwards.
+        .none => {
+            defer result.rc_decrement();
+            return objs.call(m, comptime h("mut .ok/1"), .{result}, @src());
+        },
         .deterministic => {
             const info = error_rt.infoOf(result);
+            defer info.rc_decrement();
             result.rc_decrement();
             return objs.call(m, comptime h("mut .info/1"), .{info}, @src());
         },
         .nd => {
             if (catch_nd) {
                 const info = error_rt.infoOf(result);
+                defer info.rc_decrement();
                 result.rc_decrement();
                 return objs.call(m, comptime h("mut .info/1"), .{info}, @src());
             }
@@ -122,25 +136,19 @@ pub const VT_TryAction = actions.ActionVTable("<runtime try action>", &tryaction
 
 fn try_make_1(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer f.rc_decrement();
     return make_try_action(f, objs.obj_k_singleton(&pb.VT_Void_0), false, false);
 }
 fn try_make_2(self: FatPtr, data: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer data.rc_decrement();
-    defer f.rc_decrement();
     return make_try_action(f, data, true, false);
 }
 
 fn captry_make_1(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer f.rc_decrement();
     return make_try_action(f, objs.obj_k_singleton(&pb.VT_Void_0), false, true);
 }
 fn captry_make_2(self: FatPtr, data: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    defer data.rc_decrement();
-    defer f.rc_decrement();
     return make_try_action(f, data, true, true);
 }
 

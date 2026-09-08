@@ -18,18 +18,15 @@ fn value_str(x: FatPtr) FatPtr {
         .primitiveContainer => return type_name_str(x),
         .heap, .singleton, .transient => {
             if (x.vt.method_name(str_sig) != null) {
-                const result = objs.call(x, str_sig, .{}, @src());
-                x.rc_decrement();
-                return result;
+                return objs.call(x, str_sig, .{}, @src());
             }
             return type_name_str(x);
         },
     }
 }
 
-/// Consumes `x`.
+/// Borrows `x` and answers with a fresh string naming its type.
 fn type_name_str(x: FatPtr) FatPtr {
-    defer x.rc_decrement();
     return str_rt.make_str_copy(x.vt.type_name);
 }
 
@@ -39,7 +36,11 @@ fn make_void() FatPtr {
 
 fn debug_println(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    io.println_stderr(value_str(x));
+    // `value_str` answers with a string this frame owns, and `println_stderr`
+    // only borrows it.
+    const msg = value_str(x);
+    defer msg.rc_decrement();
+    io.println_stderr(msg);
     return make_void();
 }
 
@@ -47,8 +48,12 @@ fn debug_println(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
 /// the middle of an expression.
 fn debug_apply(self: FatPtr, x: FatPtr) callconv(.c) FatPtr {
     _ = self;
-    io.println_stderr(value_str(x.share()));
-    return x;
+    const msg = value_str(x);
+    defer msg.rc_decrement();
+    io.println_stderr(msg);
+    // `x` arrives on loan and leaves as a result the caller owns, so it is
+    // shared on the way out.
+    return x.share();
 }
 
 /// `.identify(x)` names `x`'s type rather than printing anything.

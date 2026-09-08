@@ -52,10 +52,9 @@ fn make_entry(key: FatPtr, value: FatPtr) FatPtr {
 
 /// A by-value view of a `MapStorage`'s closures, handed to the std map for the
 /// duration of one operation. It holds *non-owning* copies of `keyEq`/`hashFn`
-/// (same data/vt as the storage's owned refs). A call lends its receiver, so the
-/// closures pass to `objs.call` as they are. An argument is still given away, so
-/// a key that goes in as one is shared first, to keep the storage's references
-/// intact.
+/// (same data/vt as the storage's owned refs). Every operand of a call is lent,
+/// receiver and argument alike, so the closures and the keys both pass to
+/// `objs.call` as they stand.
 pub const MapCtx = struct {
     keyEq: FatPtr,
     hashFn: FatPtr,
@@ -64,9 +63,11 @@ pub const MapCtx = struct {
     /// `CheapHash`, then truncate the computed u64 to u32 (the Java backend's
     /// `Math.toIntExact` over an `int` hash).
     pub fn hash(self: MapCtx, key: FatPtr) u32 {
-        const to_hash = objs.call(self.hashFn, comptime h("read #/1"), .{key.share()}, @src());
+        const to_hash = objs.call(self.hashFn, comptime h("read #/1"), .{key}, @src());
         defer to_hash.rc_decrement();
-        const hashed = objs.call(to_hash, comptime h("read .hash/1"), .{hash_rt.make_cheap_hash()}, @src());
+        const cheap = hash_rt.make_cheap_hash();
+        defer cheap.rc_decrement();
+        const hashed = objs.call(to_hash, comptime h("read .hash/1"), .{cheap}, @src());
         defer hashed.rc_decrement();
         const n = objs.call(hashed, comptime h("mut .compute/0"), .{}, @src());
         return @truncate(nat_rt.deref(n));
@@ -76,7 +77,7 @@ pub const MapCtx = struct {
     /// map's stored / probe keys; neither is consumed.
     pub fn eql(self: MapCtx, a: FatPtr, b: FatPtr, b_index: usize) bool {
         _ = b_index;
-        const res = objs.call(self.keyEq, comptime h("read #/2"), .{ a.share(), b.share() }, @src());
+        const res = objs.call(self.keyEq, comptime h("read #/2"), .{ a, b }, @src());
         return res.vt == &pb.VT_True_0;
     }
 };
@@ -134,22 +135,25 @@ fn storage_of_header(header: *anyopaque) *MapStorage {
     return @ptrFromInt(self.captures.storage_ptr);
 }
 
-/// Insert or replace; takes ownership of `key` and `val`.
+/// Insert or replace. Both operands are on loan, so the map takes a reference of
+/// its own to each before it stores them.
 fn map_insert(self: FatPtr, storage: *MapStorage, key: FatPtr, val: FatPtr) void {
     cycles.noteStore(self, key);
     cycles.noteStore(self, val);
-    const gop = storage.map.getOrPutContext(gc.allocator, key, ctx_of(storage)) catch @panic("OOM");
+    const key_kept = key.share().box_transient();
+    const val_kept = val.share().box_transient();
+    const gop = storage.map.getOrPutContext(gc.allocator, key_kept, ctx_of(storage)) catch @panic("OOM");
     if (!gop.found_existing) {
-        // getOrPutContext already wrote `key` into key_ptr.
-        gop.value_ptr.* = val;
+        // getOrPutContext already wrote `key_kept` into key_ptr.
+        gop.value_ptr.* = val_kept;
         return;
     }
-    // The key already present keeps its place, so the key handed in is dropped
-    // along with the value it displaced.
+    // The key already present keeps its place, so the reference taken for the
+    // key goes back along with the value it displaced.
     const replaced = gop.value_ptr.*;
-    gop.value_ptr.* = val;
+    gop.value_ptr.* = val_kept;
     replaced.rc_decrement();
-    key.rc_decrement();
+    key_kept.rc_decrement();
 }
 
 fn map_plus(self: FatPtr, k: FatPtr, v: FatPtr) callconv(.c) FatPtr {
@@ -167,14 +171,12 @@ fn map_is_empty(self: FatPtr) callconv(.c) FatPtr {
 }
 
 fn map_get(self: FatPtr, key: FatPtr) callconv(.c) FatPtr {
-    defer key.rc_decrement();
     const storage = deref_storage(self);
     if (storage.map.getContext(key, ctx_of(storage))) |v| return make_some(v.share());
     return make_none();
 }
 
 fn map_remove(self: FatPtr, key: FatPtr) callconv(.c) FatPtr {
-    defer key.rc_decrement();
     const storage = deref_storage(self);
     if (storage.map.fetchOrderedRemoveContext(key, ctx_of(storage))) |kv| {
         // The stored key is dropped; the value goes to the caller.
@@ -199,15 +201,11 @@ fn map_key_eq(self: FatPtr, a: FatPtr, b: FatPtr) callconv(.c) FatPtr {
 }
 
 /// Flow over an ordered internal slice (keys / values). `make_flow_from_items`
-/// takes ownership and does NOT share, so we copy + `.share()` each element
-/// into a temporary slice it can consume.
+/// lends the slice and takes a reference of its own to each element, so the
+/// map's references pass to it as they stand.
 fn flow_over(items: []const FatPtr) FatPtr {
     const flow_rt = @import("root").flow_rt;
-    if (items.len == 0) return flow_rt.make_flow_from_items(&.{});
-    const copy = gc.recycleAllocSlice(FatPtr, items.len);
-    defer gc.free(@ptrCast(copy.ptr));
-    for (items, 0..) |it, i| copy[i] = it.share();
-    return flow_rt.make_flow_from_items(copy);
+    return flow_rt.make_flow_from_items(items);
 }
 
 fn map_keys(self: FatPtr) callconv(.c) FatPtr {
@@ -264,15 +262,16 @@ pub const VT_LinkedHashMap: objs.VTable = .{
     .trace_fn = map_trace,
 };
 
-/// `Maps.hashMap(keyEq, hashFn): mut LinkedHashMap`. Takes ownership of both
-/// closures (stored in the map storage, released on map drop).
+/// `Maps.hashMap(keyEq, hashFn): mut LinkedHashMap`. Both closures are on loan
+/// and the storage keeps them, so it takes a reference of its own to each and
+/// releases them on map drop.
 fn maps_hashmap(self: FatPtr, keyEq: FatPtr, hashFn: FatPtr) callconv(.c) FatPtr {
     _ = self;
     const storage = gc.recycleAlloc(MapStorage);
     storage.* = .{
         .map = .empty,
-        .keyEq = keyEq,
-        .hashFn = hashFn,
+        .keyEq = keyEq.share().box_transient(),
+        .hashFn = hashFn.share().box_transient(),
     };
     return objs.obj_k(MapCaptures, &VT_LinkedHashMap, .{ .storage_ptr = @intFromPtr(storage) });
 }
