@@ -103,9 +103,7 @@ interface ELambdaTypeSystem extends ETypeSystem{
       default -> litT;
     };
     litT = litT.mdf().isMdf() ? litT.withMdf(Mdf.mut) : litT;
-    var boundedTypeSys =(ELambdaTypeSystem) ETypeSystem.of(
-        p(), g(), xbs,
-        expectedT(), resolvedCalls(), cache(), depth());
+    var boundedTypeSys = (ELambdaTypeSystem) withXBs(xbs);
     try { return boundedTypeSys.mOk(selfName, selfT, litT, mi); }
     catch (CompileError err) { return err.fail(); }
     //TODO: will die soon since we avoid all the throws?
@@ -267,7 +265,7 @@ interface ELambdaTypeSystem extends ETypeSystem{
   }
 
   private FailOr<Void> okWithSubType(Gamma g, E.Meth m, E e, T expected) {
-    var methodBodyTypeSystem = ETypeSystem.of(p(), g, xbs(), List.of(expected), resolvedCalls(), cache(), depth()+1);
+    var methodBodyTypeSystem = ETypeSystem.of(p(), g, xbs(), List.of(expected), resolvedCalls(), cache(), depth()+1, callRestrictions());
     FailOr<T> res = e.accept(methodBodyTypeSystem);
     return res
       .flatMap(t -> methSubType(t, expected))

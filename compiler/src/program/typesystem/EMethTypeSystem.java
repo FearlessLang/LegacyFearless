@@ -53,14 +53,15 @@ public interface EMethTypeSystem extends ETypeSystem {
   |iso A| |imm B |   |iso C|
 */
   default FailOr<T> visitMCall(E.MCall e) {
+    var restriction = callRestrictions().map(calls -> calls.get(e.callId()));
     var recV= this.withExpectedTs(List.of());
     var recT= e.receiver().accept(recV);
-    return recT.flatMap(t0->visitMCall(t0,e));
+    return recT.flatMap(t0->visitMCall(t0,e,restriction));
   }
-  private FailOr<T> visitMCall(T t0, E.MCall e) {
+  private FailOr<T> visitMCall(T t0, E.MCall e, Optional<TsT> restriction) {
     return t0.match(
       gx->FailOr.err(()->Fail.noMethOnX(e,t0)),
-      it->visitMCall(t0.mdf(),it,e)
+      it->visitMCall(t0.mdf(),it,e,restriction)
       );
   }
   private CM applyGenerics(CM cm, List<T> ts){
@@ -78,13 +79,17 @@ public interface EMethTypeSystem extends ETypeSystem {
     // the replacement is valid for the specific sig we are selecting in the case of an overloaded receiver RC.
     return cm.withSig(res);
   }
-  private FailOr<T> visitMCall(Mdf mdf0, IT<T> recvIT, E.MCall e) {
+  private FailOr<T> visitMCall(Mdf mdf0, IT<T> recvIT, E.MCall e, Optional<TsT> restriction) {
     var sigs = p().meths(xbs(),mdf0,recvIT, e.name(),depth()).stream()
       .map(s->applyGenerics(s,e.ts()))
       .sorted(Comparator.comparingInt(cm->
           EMethTypeSystem.recvPriority.indexOf(cm.mdf())))
       .toList();
-    CM selected = selectOverload(e,sigs,mdf0,recvIT);
+    var selection = selectOverload(e,sigs,mdf0,recvIT,restriction);
+    if (selection instanceof FailOr.Fail<CM> fail) {
+      return fail.cast();
+    }
+    CM selected = selection.get();
     var boundsCheck = GenericBounds.validGenericMCall(p(), xbs(), selected, e.ts());
     if (boundsCheck instanceof FailOr.Fail<Void> fail) {
       return fail.mapErr(err->()->err.get().pos(e.pos())).cast();
@@ -110,12 +115,20 @@ public interface EMethTypeSystem extends ETypeSystem {
     return ft1n.flatMap(t1n->selectResult(e, selected, multi, t1n));
   }
 
-  private CM selectOverload(E.MCall e, List<CM> sigs, Mdf mdf0, IT<T> recvIT){
-    if(sigs.size()==1){ return sigs.getFirst(); }
-    return sigs.stream()
+  private FailOr<CM> selectOverload(E.MCall e, List<CM> sigs, Mdf mdf0, IT<T> recvIT, Optional<TsT> restriction){
+    if (callRestrictions().isPresent()) {
+      return restriction.stream()
+        .flatMap(resolved -> sigs.stream().filter(resolved.original()::equals))
+        .filter(cm -> selectOverload(cm, mdf0))
+        .<FailOr<CM>>map(FailOr::res)
+        .findFirst()
+        .orElseGet(() -> FailOr.err(() -> Fail.undefinedMethod(e.name(), new T(mdf0, recvIT), sigs.stream()).pos(e.pos())));
+    }
+    if(sigs.size()==1){ return FailOr.res(sigs.getFirst()); }
+    return FailOr.res(sigs.stream()
       .filter(cm->selectOverload(cm, mdf0))
       .findFirst()//Note: ok find first since ordered by mdf before
-      .orElseThrow(()->Fail.undefinedMethod(e.name(), new T(mdf0, recvIT), sigs.stream()).pos(e.pos()));
+      .orElseThrow(()->Fail.undefinedMethod(e.name(), new T(mdf0, recvIT), sigs.stream()).pos(e.pos())));
   }
   private boolean selectOverload(CM cm, Mdf mdf0){
     //we want possible subtypes allowing promotions
