@@ -26,13 +26,11 @@ Flow: RuntimeImplemented, _FlowExtensions, _FlowConverters{
   .ofIso[E:iso,imm,mut,read](e1: iso E, e2: iso E, e3: iso E, e4: iso E, e5: iso E, e6: iso E, e7: iso E, e8: iso E, e9: iso E, e10: iso E, e11: iso E, e12: iso E, e13: iso E, e14: iso E, e15: iso E, e16: iso E): mut Flow[mut E] -> List#[mut E](e1, e2, e3, e4, e5, e6, e7, e8, e9, e10, e11, e12, e13, e14, e15, e16).flow,
   .ofIsos[E](es: mut List[mut IsoPod[E]]): mut Flow[mut E] -> es.flow.map[mut E]{pod -> pod!}.list.flow,
 
-  // These fromOp calls will always be sequential. Only flows made from specific standard library types
-  // could have a parallel constructor.
+  // These flows are sequential. Only some standard library types make parallel flows.
   .fromOp[E:*](source: mut FlowOp[E]): mut Flow[E] -> _SeqFlow.fromOp(source, {}),
   .fromOp[E:*](source: mut FlowOp[E], size: Nat): mut Flow[E] -> _SeqFlow.fromOp(source, Opts#size),
 
-  // This variant of fromOp asks the compiler to emit code that collects the source into an intermediary list to
-  // avoid any concurrent modification issues if they would be possible during the execution of the flow.
+  // Collects the source into a list first, so the flow cannot see concurrent changes to the source.
   .fromMutSource[E:*](source: mut FlowOp[E]): mut Flow[E] -> _MutSourceCollection[E]#source,
   .fromMutSource[E:*](source: mut FlowOp[E], size: Nat): mut Flow[E] -> _MutSourceCollection[E]#(source, size),
   }
@@ -105,10 +103,7 @@ _TerminalOps[E:*]: Sealed{
   mut .first: mut Opt[E],
   mut .last: mut Opt[E] -> this.fold[mut Opt[E]]({{}}, {_, e -> Opts#e}),
   mut .findMap[R:*](f: read F[E, mut Opt[R]]): mut Opt[R],
-  /// Order-insensitive variant of `.findMap`. Parallel impls (e.g. `VT_Flow`)
-  /// can fork into halves and `scope.request()` on first match, cancelling
-  /// the sibling subtree. The default body delegates to ordered `.findMap`,
-  /// so non-parallel flow impls remain correct (sequential, no cancel).
+  /// As `.findMap`, but the result can be any match, not only the first.
   mut .unorderedFindMap[R:*](f: read F[E, mut Opt[R]]): mut Opt[R] -> this.findMap(f),
   mut .fold[S:*](acc: iso MF[S], f: read F[S,E,S]): S,
   /// Get the size of the flow if it is known. This does not consume the flow.

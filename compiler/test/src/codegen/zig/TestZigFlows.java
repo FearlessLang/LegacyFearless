@@ -6,9 +6,7 @@ import utils.Base;
 import static codegen.zig.RunZigProgramTests.okBase;
 import static utils.RunOutput.Res;
 
-/// Flow transformations and terminals (map, filter, flatMap, scan, limit, find, any, all, none,
-/// max, first, list, sum, fold), and the prime and sieve programs. [TestZigFlowErrors] holds the
-/// error propagation tests.
+/// FeaRT flow tests. [TestZigFlowErrors] has the error propagation tests.
 public class TestZigFlows {
   @Test void flowMap() { okBase(new Res("300", "", 0), """
     package test
@@ -39,9 +37,6 @@ public class TestZigFlows {
         .str
       )}
     """, Base.mutBaseAliases); }
-
-  // There is no .for test. A test of its side effects must capture `sys` in a `read F[E,Void]`
-  // closure, which the type system does not permit.
 
   @Test void flowFirst() { okBase(new Res("1", "", 0), """
     package test
@@ -131,8 +126,7 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Leaf paths. No flow here splits, so each drive goes directly to .runChunkCount or
-  // .runChunkLast.
+  // No flow here splits, so each drive goes directly to its leaf.
   @Test void flowCountAndLastOnEmptyFlow() { okBase(new Res("0|none", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -149,11 +143,9 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // The predicated terminals go through the Fearless defaults to .findMap, which keeps the order,
-  // or to .unorderedFindMap, which is cancel-safe. Each test uses a 4-element list, which splits.
+  // Each test below uses a 4-element list, which splits.
 
-  // The target is in the left half. The match in the left fork calls scope.request(), and the
-  // right fork cancels before or during its run_chunk. isSome is true in both cases.
+  // The match is in the left half. The right fork can cancel at any time, and the result is the same.
   @Test void flowAnyEarlyExit() { okBase(new Res("True", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -163,8 +155,7 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // The predicate is true for each element. Thus there is no match, no cancel occurs, and both
-  // halves run to the end.
+  // No match, so no cancel, and both halves run to the end.
   @Test void flowAll() { okBase(new Res("True", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -184,8 +175,7 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // The order is important, and the leftmost match wins. The target is in the right half, so the
-  // empty left result must not win at the merge.
+  // The match is in the right half, so the empty left result must not win at the merge.
   @Test void flowFindRightHalf() { okBase(new Res("4", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -198,8 +188,7 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // The peak is in the second quarter, so the reducer of driveMax runs at all three merge
-  // positions, and not only at the root.
+  // The peak is in the second quarter, so the reducer runs at all three merges, not only at the root.
   @Test void flowMax() { okBase(new Res("4", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -215,8 +204,7 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // Each element maps to an inner flow of a different size, so process_through must walk
-  // different lengths while the outer source splits.
+  // The inner flows have different sizes while the outer source splits.
   @Test void flowFlatMapVariableFanout() { okBase(new Res("10", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -228,8 +216,7 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // A .limit in the middle of a pipeline keeps state, so split_flow refuses it. At the limit,
-  // run_chunk must send Applied.done back through the upstream ops.
+  // `.limit` has state, so the flow does not split. The limit must stop the upstream ops.
   @Test void flowLimitMidPipeline() { okBase(new Res("5", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -242,8 +229,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // .scan becomes .actor, which keeps state. Thus split_flow refuses it, and the ActorState cell
-  // must stay alive between run_chunk iterations.
+  // `.scan` becomes `.actor`, which has state. The flow does not split, and the state must stay
+  // alive between elements.
   @Test void flowScan() { okBase(new Res("6", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -290,7 +277,7 @@ public class TestZigFlows {
       }
     """, Base.mutBaseAliases); }
 
-  // The list source splits, but the contextful map (.map/2) removes the DP mode
+  // The list source can split, but `.map/2` makes the flow sequential.
   @Test void flowMapCtxDP() { okBase(new Res("01 12 23 34", "", 0), """
     package test
     Test: Main{sys -> Block#
@@ -326,7 +313,7 @@ public class TestZigFlows {
       }
     """, Base.mutBaseAliases); }
 
-  // The source splits and no op keeps state, so the full pipeline runs under a split driveReduce.
+  // The source splits and no op has state, so the full pipeline runs in the split fold.
   @Test void flowMapFilterSum() { okBase(new Res("20", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -338,8 +325,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // `{a, _ -> a + 1}` counts, and it is not a monoid over E. A driver that combines two
-  // accumulators with the element combiner gives a low count, and does not fail.
+  // `{a, _ -> a + 1}` is not a monoid. A driver that combines two accumulators with it gives a
+  // low count, and does not fail.
   @Test void flowFoldNonMonoidCountsEveryElement() { okBase(new Res("6", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -349,8 +336,7 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // The same shape on a list source. Thus a failure comes from the driver, and not from the
-  // `.str` arm of split_flow.
+  // The same fold on a list source, so a failure is in the driver, not in the `.str` split.
   @Test void flowFoldNonMonoidOnListSource() { okBase(new Res("4", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -360,9 +346,8 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // The accumulator type differs from the element type (A = Wc, E = Str). This is the small form
-  // of the `wc` benchmark. A driver that gives an accumulator where the combiner needs an element
-  // cannot fail quietly: `c == "\\n"` dispatches `imm ==/1` on Wc and dies.
+  // A = Wc and E = Str. A driver that gives an accumulator in place of an element fails loudly:
+  // `c == "\\n"` dispatches `imm ==/1` on Wc.
   @Test void flowFoldMixedAccumulatorType() { okBase(new Res("2", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -378,8 +363,7 @@ public class TestZigFlows {
     Wcs: {#(n: Nat): Wc -> {.lines -> n}}
     """, Base.mutBaseAliases); }
 
-  // Only forced promotion runs the parallel arms of `.mergeFold`: the left fold and the collection
-  // of the right chunk then run on separate frames.
+  // Forced promotion runs the two args of `.mergeFold` on separate frames.
   @Test void flowFoldNonMonoidUnderForcedPromotion() { okBase(16, new Res("64", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -389,8 +373,7 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // This fold is non-associative and also order-sensitive. The appended string is equal to the
-  // source only when each chunk is in its correct position, so a wrong merge changes the output.
+  // The fold is not associative and is sensitive to order, so a wrong merge changes the output.
   @Test void flowFoldPreservesOrderUnderForcedPromotion() { okBase(16, new Res("abcdefgh", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -399,8 +382,7 @@ public class TestZigFlows {
       )}
     """, Base.mutBaseAliases); }
 
-  // .sum, .uSum and .fSum are usual folds, so they use the same path, which does not
-  // re-associate. Forced promotion keeps the split code active around them.
+  // The sums are usual folds, so they use the non-associative path. Forced promotion runs the splits.
   @Test void flowSumsStayCorrect() { okBase(16, new Res("4950|10", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(
@@ -454,7 +436,6 @@ public class TestZigFlows {
         }}
       }
     """;
-  /// A low threshold makes VPF promote often.
   @Test void mutDuplicatedByChainFilter() { okBase(16, new Res("10000 True", "", 0), """
     package test
     Test: Main{sys -> Block#
@@ -523,6 +504,129 @@ public class TestZigFlows {
     Test: Main{sys -> Block#
       .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
       .let[Nat] res = {numbers.flow.chain{n -> List#(n, n)}.fold[Nat]({0}, {a, n -> a + n})}
+      .return {sys.io.println(res.str)}
+      }
+    """, Base.mutBaseAliases); }
+
+  /// The outer flow has one element, so only a split of the inner flow gives parallel work.
+  /// The fold counts up only while the elements arrive as 0, 1, 2, ...
+  @Test void flatMapSkewedInnerSplit() { okBase(16, new Res("200000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] res = {Flow#[Nat](0)
+        .flatMap{_ -> Flow.range(+0, +200000).map{i -> i.nat}}
+        .fold[Nat]({0}, {next, x -> x == next ? {.then -> next + 1, .else -> next}})}
+      .return {sys.io.println(res.str)}
+      }
+    """, Base.mutBaseAliases); }
+  @Test void flatMapSkewedTwoOuter() { okBase(16, new Res("200000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] res = {Flow.range(+0, +2).map{i -> i.nat}
+        .flatMap{n -> Flow.range(+0, +100000).map{i -> i.nat + (n * 100000)}}
+        .fold[Nat]({0}, {next, x -> x == next ? {.then -> next + 1, .else -> next}})}
+      .return {sys.io.println(res.str)}
+      }
+    """, Base.mutBaseAliases); }
+  /// A re-rooted flow can have a `.flatMap` of its own, so the split re-roots again.
+  @Test void flatMapNestedSkewed() { okBase(16, new Res("100000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] res = {Flow#[Nat](0)
+        .flatMap{_ -> Flow#[Nat](0, 1).flatMap{a -> Flow.range(+0, +50000).map{i -> i.nat + (a * 50000)}}}
+        .fold[Nat]({0}, {next, x -> x == next ? {.then -> next + 1, .else -> next}})}
+      .return {sys.io.println(res.str)}
+      }
+    """, Base.mutBaseAliases); }
+  @Test void flatMapPrefixFilterDropsSingle() { okBase(16, new Res("0", "", 0), """
+    package test
+    Test: Main{sys -> sys.io.println(Flow#[Nat](1)
+      .filter{n -> n == 0}
+      .flatMap{_ -> Flow.range(+0, +1000).map{i -> i.nat}}
+      .list.size.str)}
+    """, Base.mutBaseAliases); }
+  @Test void flatMapPrefixMapSingle() { okBase(16, new Res("3499500", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] res = {Flow#[Nat](3)
+        .map{n -> n * 1000}
+        .flatMap{b -> Flow.range(+0, +1000).map{i -> i.nat + b}}
+        .fold[Nat]({0}, {a, x -> a + x})}
+      .return {sys.io.println(res.str)}
+      }
+    """, Base.mutBaseAliases); }
+  /// `.limit` is stateful, so the flow does not split and does not re-root.
+  @Test void flatMapThenLimitNotSplit() { okBase(16, new Res("10", "", 0), """
+    package test
+    Test: Main{sys -> sys.io.println(Flow#[Nat](0)
+      .flatMap{_ -> Flow.range(+0, +200000).map{i -> i.nat}}
+      .limit(10)
+      .list.size.str)}
+    """, Base.mutBaseAliases); }
+  @Test void flatMapSkewedFirst() { okBase(16, new Res("150000", "", 0), """
+    package test
+    Test: Main{sys -> sys.io.println(Flow.range(+0, +2).map{i -> i.nat}
+      .flatMap{n -> Flow.range(+0, +100000).map{i -> i.nat + (n * 100000)}}
+      .filter{x -> x >= 150000}
+      .first
+      .match{
+        .some(n) -> n.str,
+        .empty -> "none",
+        }
+      )}
+    """, Base.mutBaseAliases); }
+  /// Both errors are in the inner flow. The leftmost error is the result.
+  @Test void flatMapSkewedErrorLeftmost() { okBase(16, new Res("", "Program crashed with: left[###]", 1), """
+    package test
+    Test: Main{sys -> sys.io.println(Flow#[Nat](0)
+      .flatMap{_ -> Flow.range(+0, +100000).map{i -> i == +500 ? {
+        .then -> Error.msg "left",
+        .else -> i == +90000 ? {.then -> Error.msg "right", .else -> i}
+        }}}
+      .list.size.str)}
+    """, Base.mutBaseAliases); }
+  /// The inner chain has `mut` elements, so the inner flow is sequential and does not split.
+  /// In order, the first copy of a person sees 1 and the second copy sees 2, so 15000.
+  @Test void flatMapInnerSequentialAliasedMut() { okBase(16, new Res("15000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] res = {Flow#[Nat](0)
+        .flatMap[Nat]{_ -> Block#
+          .let[mut List[mut Person]] ps = {Flow.range(+0, +5000).map{i -> Persons#(i.nat)}.list}
+          .return {List#[mut List[mut Person]](ps, ps).flow
+            .chain[mut Person]{l -> l}
+            .filter{p -> Bump#p >= 0}
+            .map[Nat]{p -> p.visits.get}}
+          }
+        .fold[Nat]({0}, {a, v -> a + v})}
+      .return {sys.io.println(res.str)}
+      }
+    """+mutPersons, Base.mutBaseAliases); }
+  /// Each inner flow has one `read Person` at all positions, and splits. The first fold checks
+  /// the order and the count, and the second fold checks the ids.
+  @Test void chainReadAliasedSplit() { okBase(16, new Res("40000 20000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] ordered = {Flow.range(+0, +2).map{i -> Persons#(i.nat)}
+        .chain[read Person]{p -> Flow.range(+0, +20000).map[read Person]{_ -> p}.list}
+        .fold[Nat]({0}, {acc, p -> p.id == (acc / 20000) ? {.then -> acc + 1, .else -> acc}})}
+      .let[Nat] ids = {Flow.range(+0, +2).map{i -> Persons#(i.nat)}
+        .chain[read Person]{p -> Flow.range(+0, +20000).map[read Person]{_ -> p}.list}
+        .fold[Nat]({0}, {acc, p -> acc + (p.id)})}
+      .return {sys.io.println(ordered.str + " " + (ids.str))}
+      }
+    """+mutPersons, Base.mutBaseAliases); }
+  /// One `imm Str` is at all 50000 positions of an inner flow, so many workers change its
+  /// reference count.
+  @Test void chainImmAliasedObjectSplit() { okBase(16, new Res("200000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] res = {Flow.range(+0, +4).map{i -> i.nat}
+        .chain[Str]{n -> Block#
+          .let[Str] s = {n.str}
+          .return {Flow.range(+0, +50000).map[Str]{_ -> s}.list}
+          }
+        .fold[Nat]({0}, {a, s -> a + (s.size)})}
       .return {sys.io.println(res.str)}
       }
     """, Base.mutBaseAliases); }

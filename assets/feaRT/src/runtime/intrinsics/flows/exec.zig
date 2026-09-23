@@ -1,10 +1,5 @@
-//! Chunk executor -- the opaque-to-APM inner loop.
-//!
-//! `run_chunk` pulls elements from a flow's source and walks each one through
-//! the flat `[]OpDesc` array. User closures are invoked through `objs.call`
-//! (still Fearless frames, so the heartbeat prologue sees them); the walk
-//! itself stays in Zig so per-op dispatch cost is paid once per closure call,
-//! not once per heartbeat check.
+//! Chunk executor. APM cannot see this loop. User closures run through `objs.call`, so they
+//! are Fearless frames and their heartbeat prologues run.
 
 const std = @import("std");
 const objs = @import("../../objs.zig");
@@ -19,31 +14,30 @@ const object = @import("object.zig");
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
 
-// Terminal callback: returns `true` to continue pulling elements, `false` to
-// signal synchronous short-circuit (e.g. `.first` / ordered `.findMap`).
+/// Terminal callback. Returns false to stop the pull of elements.
 pub const AcceptFn = *const fn (ctx: *anyopaque, elem: FatPtr) bool;
 
-// Result of applying one op to one element.
 const Applied = union(enum) {
-    pass: FatPtr, // element (possibly transformed) continues
-    pass_then_stop: FatPtr, // element continues + accepts, then stop pulling
-    skip, // filter rejected; discard this source element
-    done, // op triggered short-circuit (limit exhausted etc)
-    expanded, // op (flat_map / actor) handled the suffix itself
+    pass: FatPtr,
+    /// The element continues, then the pull stops.
+    pass_then_stop: FatPtr,
+    skip,
+    /// The op stops the pull now.
+    done,
+    /// The op ran the remaining ops itself.
+    expanded,
 };
 
-// Per-iteration cancel poll. One iteration can call arbitrary user closures
-// (map, filter, flatMap, ...) of unbounded cost, so a fixed stride could leave
-// the cancel signal unobserved for seconds. The atomic load is a few nanoseconds.
 pub fn run_chunk(flow: *types.FeartFlow, ctx: *anyopaque, accept: AcceptFn) void {
     var stopped = false;
     while (!stopped and types.source_has_next(&flow.source)) {
+        // Poll each element. One element can run user closures of any cost, so a stride can
+        // hide a cancel for seconds.
         if (scope_mod.currentCancelled()) return;
         process_element(flow.ops, types.source_next(&flow.source), ctx, accept, &stopped);
     }
 }
 
-// Walk `ops` applying each to the element; if we run out of ops, invoke accept.
 pub fn process_element(
     ops: []types.OpDesc,
     init_elem: FatPtr,
@@ -73,9 +67,8 @@ pub fn process_element(
     if (stop_after) stopped.* = true;
 }
 
-/// Applies one op to one element. The element arrives owned, because `source_next` shares it,
-/// and a closure only borrows what it is given: an arm that answers `.pass` hands that one
-/// reference on; any other arm releases it.
+/// The element arrives owned, and a closure only borrows it. An arm that returns `.pass`
+/// gives that reference on. All other arms release it.
 fn apply_op(
     op: *types.OpDesc,
     elem: FatPtr,
@@ -144,10 +137,8 @@ fn apply_op(
                 break :blk .done;
             }
             op.state -= 1;
-            // Emitting the last allowed element: pass it through (so it's
-            // accepted) but stop pulling afterwards. Otherwise the next source
-            // pull would run the upstream ops on an element we'd discard --
-            // observable if one of those ops throws (`.map{Error.msg "foo"}.limit(1)`).
+            // Stop after the last element. Another pull runs the upstream ops on an element
+            // that the limit drops, and an error there is visible (`.map{Error.msg "x"}.limit(1)`).
             if (op.state == 0) break :blk .{ .pass_then_stop = elem };
             break :blk .{ .pass = elem };
         },
@@ -196,8 +187,28 @@ fn apply_op(
     };
 }
 
-// Used by flat_map's nested loop: walk `first_ops` first, then `second_ops`,
-// without allocating a concatenated slice.
+/// Applies stateless element ops to one owned element. Returns null when a filter drops it.
+pub fn apply_prefix(ops: []types.OpDesc, elem: FatPtr) ?FatPtr {
+    var current = elem;
+    var dummy: u8 = 0;
+    var stopped = false;
+    for (ops) |*op| {
+        switch (apply_op(op, current, &.{}, @ptrCast(&dummy), &never_accept, &stopped)) {
+            .pass => |next| current = next,
+            .skip => return null,
+            .pass_then_stop, .done, .expanded => unreachable,
+        }
+    }
+    return current;
+}
+
+fn never_accept(ctx: *anyopaque, elem: FatPtr) bool {
+    _ = ctx;
+    _ = elem;
+    unreachable;
+}
+
+/// Applies `first_ops`, then `second_ops`, without a concatenated slice.
 fn process_through(
     first_ops: []types.OpDesc,
     second_ops: []types.OpDesc,
@@ -228,16 +239,12 @@ fn process_through(
     if (stop_after) stopped.* = true;
 }
 
-// ==========================================
-// Opt extractor helper (for mapFilter / findMap)
-// ==========================================
-
 const OptExtractCaptures = extern struct { result_ptr: usize };
 
 fn opt_extract_some(self: FatPtr, val: FatPtr) callconv(.c) FatPtr {
     const caps = objs.deref(OptExtractCaptures, self);
     const ptr: *FatPtr = @ptrFromInt(caps.result_ptr);
-    // The slot outlives the arm, so it keeps a reference of its own.
+    // The slot outlives the arm, so it keeps its own reference.
     ptr.* = val.share().box_transient();
     return object.make_void();
 }
@@ -246,11 +253,7 @@ fn opt_extract_none(_: FatPtr) callconv(.c) FatPtr {
     unreachable;
 }
 
-// Opt's match dispatches via `OptMatch[T,R]: {mut .some(x: T): R, mut .empty: R}`
-// (see assets/base/optionals.fear:55). The body in `Opts.#` ends up calling
-// `m.some(x)` / `m.empty` with whatever modifier the receiver permits -- which
-// in practice is `mut`, but registering all three variants is cheap insurance
-// (mirrors the small runtime helper vtable pattern).
+/// `Opts.#` can call `.some` and `.empty` with any receiver modifier, so the table has all three.
 pub const VT_OptExtract: objs.VTable = .{
     .type_name = "<runtime flow opt extractor>",
     .hashes = &.{
@@ -281,10 +284,6 @@ pub fn extract_some(opt: FatPtr) FatPtr {
     return extracted;
 }
 
-// ==========================================
-// Actor sink -- downstream reinjection for the .actor op callback
-// ==========================================
-
 const ActorSinkCaptures = extern struct {
     remaining_ptr: usize,
     remaining_len: usize,
@@ -299,9 +298,8 @@ fn actor_sink_accept(self: FatPtr, element: FatPtr) callconv(.c) FatPtr {
     const ctx: *anyopaque = @ptrFromInt(caps.ctx_ptr);
     const accept: AcceptFn = @ptrFromInt(caps.accept_ptr);
     const stopped: *bool = @ptrFromInt(caps.stopped_ptr);
-    // The op chain and the terminal own the element they are handed, and this one
-    // is on loan from the Fearless actor body. A transient becomes a heap object,
-    // because the terminal can outlive the frame the actor pushed from.
+    // The ops own their element, but the actor body lends this one. Box it, because the
+    // terminal can outlive the frame of the actor.
     process_element(remaining, element.share().box_transient(), ctx, accept, stopped);
     return object.make_void();
 }
@@ -312,7 +310,7 @@ fn actor_sink_push_error(self: FatPtr, info: FatPtr) callconv(.c) FatPtr {
     if (stopped.*) {
         return object.make_void();
     }
-    // `throwDeterministic` takes the info with it, and this one is on loan.
+    // `throwDeterministic` takes a reference, and `info` is lent.
     unwind.throwDeterministic(info.share());
 }
 

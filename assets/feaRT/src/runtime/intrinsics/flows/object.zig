@@ -1,9 +1,4 @@
-//! Flow object layout + constructors.
-//!
-//! A Flow's FatPtr wraps a `FlowCaptures` whose single field is an integer
-//! pointer to a heap-allocated `FeartFlow`. We keep the flow on the heap
-//! (rather than inline) so append/split can create new flows cheaply without
-//! re-boxing closures.
+//! Flow object layout and constructors.
 
 const std = @import("std");
 const objs = @import("../../objs.zig");
@@ -11,12 +6,15 @@ const gc = @import("../../gc.zig");
 const list_rt = @import("../list.zig");
 const list_storage = @import("../lists/storage.zig");
 const native = @import("../../native.zig");
+const scope_mod = @import("../../scope.zig");
+const worker_mod = @import("../../worker.zig");
 const root = @import("root");
 const pb = root.pkg_base;
 
 const types = @import("types.zig");
 const ops_node = @import("ops_node.zig");
 const string_flows = @import("string_flows.zig");
+const exec = @import("exec.zig");
 const FatPtr = objs.FatPtr;
 
 
@@ -49,8 +47,7 @@ pub fn retain_flow(f: *types.FeartFlow) void {
     _ = f.ref_count.fetchAdd(1, .monotonic);
 }
 
-/// `releasing_worker_id` is the worker on whose behalf this release runs. It
-/// travels down from the start of the drop chain.
+/// `releasing_worker_id` is the worker that started the drop chain.
 pub fn release_flow(f: *types.FeartFlow, releasing_worker_id: u32) void {
     const old_count = f.ref_count.fetchSub(1, .release);
     if (std.debug.runtime_safety) std.debug.assert(old_count != 0);
@@ -61,8 +58,8 @@ pub fn release_flow(f: *types.FeartFlow, releasing_worker_id: u32) void {
     gc.recycleDestroy(types.FeartFlow, f, .flow_release);
 }
 
-/// Drops the one reference the body holds on its source and its ops, and leaves the
-/// storage of the body alone. A body in a caller frame has no allocation to give back.
+/// Drops the references of the body, but not its storage. A body in a caller frame has no
+/// allocation to free.
 pub fn release_flow_body(f: *types.FeartFlow, releasing_worker_id: u32) void {
     release_source(f, releasing_worker_id);
     release_ops(f, releasing_worker_id);
@@ -74,15 +71,9 @@ pub fn flow_drop(header: *anyopaque, releasing_worker_id: u32) callconv(.c) void
     release_flow(@ptrFromInt(self.captures.flow_ptr), releasing_worker_id);
 }
 
-/// Enumerates every reference a flow holds, for the cycle collector.
-///
-/// It follows `release_source` and `release_ops` arm for arm: the collector must
-/// see each reference exactly as many times as the drop releases it, or a live
-/// node reads as garbage.
-///
-/// A flow over a range, or over nothing, reaches this and enumerates nothing.
-/// Only a flow that names user objects -- through its source, through the list
-/// it borrows from, or through a closure in its op chain -- can lie on a cycle.
+/// Visits every reference of a flow, for the cycle collector. It must match `release_source`
+/// and `release_ops` arm for arm. If the collector sees a reference fewer times than the drop
+/// releases it, a live node reads as garbage.
 pub fn flow_trace(header: *anyopaque, visit: objs.VisitFn, ctx: *anyopaque) callconv(.c) void {
     const Layout = objs.GenObjectLayoutType(FlowCaptures);
     const self: *const Layout = @ptrCast(@alignCast(header));
@@ -103,14 +94,12 @@ fn visit_source(f: *const types.FeartFlow, visit: objs.VisitFn, ctx: *anyopaque)
     switch (f.source) {
         .list => |ls| for (ls.items) |item| visit(ctx, item),
         .single => |ss| if (!ss.consumed) visit(ctx, ss.value),
-        .str => unreachable, // handled above
+        .str => unreachable,
         .range_finite, .range_infinite, .empty => {},
     }
 }
 
 fn release_source(f: *types.FeartFlow, releasing_worker_id: u32) void {
-    // String sources own their owner Str directly (graphemes use a stateless
-    // native lookup, so there is no cursor to release).
     switch (f.source) {
         .str => |ss| {
             ss.owner.rc_decrement_as(releasing_worker_id);
@@ -125,11 +114,11 @@ fn release_source(f: *types.FeartFlow, releasing_worker_id: u32) void {
     }
 
     switch (f.source) {
-        // List sources own one reference to every item in their slice; iteration
-        // shares items out instead of moving them.
+        // A list source holds one reference to each item in its slice, also to the items
+        // before `index`. Iteration shares items, and does not move them.
         .list => |ls| for (ls.items) |item| item.rc_decrement_as(releasing_worker_id),
         .single => |ss| if (!ss.consumed) ss.value.rc_decrement_as(releasing_worker_id),
-        .str => unreachable, // handled above
+        .str => unreachable,
         .range_finite, .range_infinite, .empty => {},
     }
 }
@@ -144,8 +133,8 @@ fn retain_source(source: types.Source, source_owner: ?FatPtr) ?FatPtr {
         .single => |ss| {
             if (!ss.consumed) _ = ss.value.share();
         },
-        // The caller bit-copies `source` (including the owner words), so just
-        // bump the owner's refcount to match the new flow's reference.
+        // The caller copies `source` bit for bit, with the owner word, so the owner is the
+        // reference of the new flow.
         .str => |ss| _ = ss.owner.share(),
         .range_finite, .range_infinite, .empty => {},
     }
@@ -200,37 +189,105 @@ fn clone_ops(ops: []types.OpDesc) struct { ops: []types.OpDesc, owner: ?*ops_nod
     return .{ .ops = cloned, .owner = ops_node.make_ops(cloned) };
 }
 
-// Divide-and-conquer source split for the parallel driver.
-//
-// Returns two flows whose elements, iterated in order, reproduce the original
-// flow's element sequence exactly. Both halves share the original `ops` slice
-// by reference (safe because ops arrays are immutable post-`clone_with_op`).
-//
-// Returns null when splitting would violate semantics:
-//   - any op in the chain is stateful (scan/limit/actor); splits would
-//     either duplicate or reorder side-effects;
-//   - the remaining element count is below 2 (nothing to split);
-//   - the source isn't index-addressable (single/empty/range_infinite).
-// Mirrors the Java reference impl in assets/rt/flows/Range.java which
-// also splits both list- and range-backed flows.
-/// The smallest chunk a split will leave behind.
-///
-/// A split costs two flow allocations and two retains of the op chain, and the driver of a
-/// non-associative fold collects each right half into a list. Splitting to single elements
-/// therefore charges that per element, and makes a promotion token stand for one element
-/// rather than a chunk of work, which is what the APM bound assumes it stands for.
+fn concat_ops(a: []types.OpDesc, b: []types.OpDesc) struct { ops: []types.OpDesc, owner: ?*ops_node.FlowOps } {
+    const n = a.len + b.len;
+    if (n == 0) return .{ .ops = &.{}, .owner = null };
+
+    const cloned = gc.recycleAllocSlice(types.OpDesc, n);
+    for (a, 0..) |op, i| cloned[i] = clone_op(op);
+    for (b, 0..) |op, i| cloned[a.len + i] = clone_op(op);
+    return .{ .ops = cloned, .owner = ops_node.make_ops(cloned) };
+}
+
+/// The smallest chunk that a split leaves. A split costs two retains of the op chain, and a
+/// non-associative fold collects each right half into a list. A split to single elements pays
+/// this per element, and a promotion token then stands for one element, not for a chunk of
+/// work as the APM bound assumes.
 pub const SPLIT_MIN = 2;
 
-/// Divides `flow` in two, and writes the halves into `left` and `right`. False when a
-/// split is not possible, and then neither output is written.
+fn source_has_one(s: *const types.Source) bool {
+    return switch (s.*) {
+        .list => |ls| ls.items.len - ls.index == 1,
+        .range_finite => |rs| blk: {
+            const diff = if (rs.step > 0) rs.end - rs.current else rs.current - rs.end;
+            if (diff <= 0) break :blk false;
+            const abs_step: i64 = if (rs.step > 0) rs.step else -rs.step;
+            break :blk @divTrunc(diff + abs_step - 1, abs_step) == 1;
+        },
+        .single => |ss| !ss.consumed,
+        else => false,
+    };
+}
+
+/// When `flow` has one element left and a `flat_map` or `chain` op, replaces `flow` with the
+/// inner flow of that element, followed by the ops after the op. The elements and their order
+/// do not change. The result takes `parallelism` and `serial_from` from the inner flow, so the
+/// call site of the inner flow decides if it splits. The caller must make sure that `flow` may
+/// split, because this runs user code.
 ///
-/// The caller owns the storage of both halves. `driver_split_match` puts them in its own
-/// frame, which outlives every use: the halves reach only the `.some/2` arms it calls, and
-/// a VPF promotion boxes what it takes across a fiber boundary.
+/// When a filter before the op drops the element, the function returns false, but the source
+/// of `flow` is then empty.
+fn reroot_single(flow: *types.FeartFlow) bool {
+    const k = for (flow.ops, 0..) |op, i| {
+        if (op.kind == .flat_map or op.kind == .chain) break i;
+    } else return false;
+    if (!source_has_one(&flow.source)) return false;
+    if (scope_mod.currentCancelled()) return false;
+
+    // Pull before user code runs, so the body stays consistent if user code raises an error.
+    const elem = types.source_next(&flow.source);
+    const kept = exec.apply_prefix(flow.ops[0..k], elem) orelse return false;
+
+    const op = flow.ops[k];
+    const inner_fp = switch (op.kind) {
+        .flat_map => blk: {
+            const fp = objs.call(op.closure, h("read #/1"), .{kept}, @src());
+            kept.rc_decrement();
+            break :blk fp;
+        },
+        .chain => blk: {
+            const list_fp = objs.call(op.closure, h("read #/1"), .{kept}, @src());
+            kept.rc_decrement();
+            const fp = objs.call(list_fp, h("mut .flow/0"), .{}, @src());
+            list_fp.rc_decrement();
+            // The outer flow may split, so this chain has `read` or `imm` elements. Nothing can
+            // mutate them, so one element at many positions is safe on many workers.
+            deref_flow(fp).parallelism = .data_parallel;
+            break :blk fp;
+        },
+        else => unreachable,
+    };
+
+    const inner = deref_flow(inner_fp);
+    const new_ops = concat_ops(inner.ops, flow.ops[k + 1 ..]);
+    const new_owner = retain_source(inner.source, inner.source_owner);
+
+    release_flow_body(flow, worker_mod.currentWorkerId());
+    flow.source = inner.source;
+    flow.source_owner = new_owner;
+    flow.ops = new_ops.ops;
+    flow.ops_owner = new_ops.owner;
+    flow.is_finite = inner.is_finite;
+    flow.parallelism = inner.parallelism;
+    // The inner ops come first in the new chain, so this index stays valid.
+    flow.serial_from = inner.serial_from;
+
+    inner_fp.rc_decrement();
+    return true;
+}
+
+/// Divides `flow` in two, into `left` and `right`. Returns false and writes neither output
+/// when a split is not possible. The caller owns the storage of both halves.
+///
+/// Before the split, `reroot_single` can replace `flow` in place. This runs user code, also
+/// when the function returns false.
 pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *types.FeartFlow) bool {
-    if (flow.parallelism != .data_parallel or flow.serial_from != null) return false;
-    for (flow.ops) |op| {
-        if (!op.flags.stateless) return false;
+    while (true) {
+        if (flow.parallelism != .data_parallel or flow.serial_from != null) return false;
+        for (flow.ops) |op| {
+            if (!op.flags.stateless) return false;
+        }
+        if (!reroot_single(flow)) break;
     }
     switch (flow.source) {
         .list => |ls| {
@@ -264,18 +321,11 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
             return true;
         },
         .range_finite => |rs| {
-            // Element count: ceil((end - current) / abs(step)). Same formula as
-            // flow_size's range arm. Negative step ranges (current > end) work
-            // because we take the absolute step for the count and reuse the
-            // signed step to compute the midpoint coordinate.
             const diff = if (rs.step > 0) rs.end - rs.current else rs.current - rs.end;
             if (diff <= 0) return false;
             const abs_step: i64 = if (rs.step > 0) rs.step else -rs.step;
             const count: i64 = @divTrunc(diff + abs_step - 1, abs_step);
             if (count < SPLIT_MIN) return false;
-            // mid lands on an element boundary even for step != ±1 because we
-            // multiply by a whole element index (count/2) before adding to
-            // current. Half-open semantics: left = [current, mid), right = [mid, end).
             const mid = rs.current + @divTrunc(count, 2) * rs.step;
             retain_ops(flow);
             retain_ops(flow);
@@ -302,12 +352,7 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
             return true;
         },
         .str => |ss| {
-            // Split the live window `[index, bytes_len)` at the first unit
-            // boundary at/after its byte midpoint. Codepoint boundaries are
-            // found in pure Zig (skip continuation bytes); grapheme boundaries
-            // via the one-shot native lookup. Each half is re-based to its own
-            // buffer start with `index = 0` and takes its own reference to
-            // `owner`. Half-open: left = [start, mid), right = [mid, end).
+            // Split at the first codepoint or grapheme boundary at or after the byte midpoint.
             const abs_start = ss.index;
             const abs_end = ss.bytes_len;
             if (abs_end - abs_start < SPLIT_MIN) return false;
@@ -357,15 +402,12 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
             };
             return true;
         },
-        // single (count<=1) and empty have nothing to split. range_infinite
-        // can't produce two finite halves; the Java InfiniteRangeOp also
-        // returns empty from split$mut.
         else => return false,
     }
 }
 
-/// Copies `src` onto the heap, and takes one reference to everything it points at. The
-/// `box_fn` of a flow in a caller frame, which must leave that flow whole.
+/// Copies `src` onto the heap with new references, and leaves `src` whole. This is the
+/// `box_fn` of a flow in a caller frame.
 pub fn copy_flow_body(src: *const types.FeartFlow) *types.FeartFlow {
     const f = gc.recycleAlloc(types.FeartFlow);
     retain_ops(src);
@@ -382,8 +424,7 @@ pub fn copy_flow_body(src: *const types.FeartFlow) *types.FeartFlow {
     return f;
 }
 
-// Immutable-slice append: allocate a fresh ops slice, one longer than the
-// existing, and return a new flow. Source is shared (flows are single-use).
+/// The new flow shares the source, because a flow is used only once.
 pub fn clone_with_op(existing: *types.FeartFlow, new_op: types.OpDesc) *types.FeartFlow {
     const new_flow = gc.recycleAlloc(types.FeartFlow);
     const new_ops = gc.recycleAllocSlice(types.OpDesc, existing.ops.len + 1);
@@ -418,9 +459,8 @@ pub fn clone_with_finiteness(existing: *types.FeartFlow, is_finite: bool) *types
     return new_flow;
 }
 
-/// Takes the one reference `source_owner` holds, which `release_source` drops.
-/// A `.flow` thunk therefore shares its receiver: self is lent to the thunk, not
-/// given to it.
+/// Takes `list_fp` as the reference of `source_owner`. Thus a `.flow` thunk must share its
+/// receiver, because the receiver is lent to it.
 pub fn make_flow_from_list(comptime vt: *const objs.VTable, list_fp: FatPtr) FatPtr {
     const al = list_rt.deref_list(list_fp);
     const flow = create_flow(.{ .list = .{ .items = al.items, .index = 0 } }, true);
@@ -428,9 +468,8 @@ pub fn make_flow_from_list(comptime vt: *const objs.VTable, list_fp: FatPtr) Fat
     return make_flow_fp(vt, flow);
 }
 
-// Flow over a string's codepoints / graphemes. `owner` is the Str whose buffer
-// `bytes` borrows; the StrSource takes the one reference (released on drop) and
-// `source_owner` stays null -- string sources carry their owner in the source.
+/// `bytes` borrows the buffer of `owner`. The source takes the reference to `owner`, and
+/// `source_owner` stays null.
 pub fn make_flow_from_str(comptime vt: *const objs.VTable, owner: FatPtr, bytes: []const u8, mode: string_flows.StrSourceMode) FatPtr {
     const flow = create_flow(.{ .str = .{
         .bytes_ptr = bytes.ptr,
@@ -442,14 +481,9 @@ pub fn make_flow_from_str(comptime vt: *const objs.VTable, owner: FatPtr, bytes:
     return make_flow_fp(vt, flow);
 }
 
-/// A flow over a copy of `items`, used by both factory `#/N` and `ofIso/N`. It
-/// takes the one reference the caller holds on each item.
-///
-/// The copy lives in a `ListStorage`, which the flow names as its source owner.
-/// A split shares that owner rather than the buffer, so the buffer has one owner
-/// however many halves read it, and the last of them gives it back.
-/// The items are lent by the factory method's caller and the flow keeps them, so
-/// each is boxed out of that frame and shared into the storage.
+/// A flow over a copy of `items`, in a `ListStorage` that is the source owner. Splits share
+/// that owner, so the buffer has one owner for all halves. The items are lent, so each is
+/// shared and boxed out of the caller frame.
 pub fn make_flow_from_items(comptime vt: *const objs.VTable, items: []const FatPtr) FatPtr {
     const storage = list_storage.make_storage(items.len);
     for (items) |item| storage.al.appendAssumeCapacity(item.share().box_transient());
@@ -466,7 +500,7 @@ pub fn make_flow_from_infinite(comptime vt: *const objs.VTable, start: i64, step
     return make_flow_fp(vt, create_flow(.{ .range_infinite = .{ .current = start, .end = 0, .step = step } }, false));
 }
 
-/// As `make_flow_from_items`, for the one value a single-element flow keeps.
+/// As `make_flow_from_items`, for one value.
 pub fn make_flow_from_single(comptime vt: *const objs.VTable, value: FatPtr) FatPtr {
     const kept = value.share().box_transient();
     return make_flow_fp(vt, create_flow(.{ .single = .{ .value = kept, .consumed = false } }, true));

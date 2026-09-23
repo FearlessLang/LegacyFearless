@@ -36,9 +36,7 @@ public class TestFlowSemantics {
       }
     """, Base.mutBaseAliases);}
 
-  /*
-   * Fearless errors in flow before a stop are propagated. Fearless errors after the "stop" are ignored.
-   */
+  /// An error before a stop propagates. An error after the stop is ignored.
   @Test void throwInAFlowBeforeStopPar() {ok(new Res("", "Program crashed with: \"2\"[###]", 1), """
     package test
     Test: Main{sys -> Block#
@@ -186,10 +184,8 @@ public class TestFlowSemantics {
       }
     """, Base.mutBaseAliases);}
 
-  /*
-   * Non-deterministic errors bubble up, even if the flow isn't listening anymore because they're only catchable
-   * in Fearless code with a capability anyway.
-   */
+  /// A non-deterministic error propagates also after a stop, because only code with a capability
+  /// can catch it.
   @Disabled("Obviously, nondeterministic")
   @Test void throwInAFlowBeforeStopDP_ND() {ok(new Res("", "Program crashed with: Stack overflowed[###]", 1), """
     package test
@@ -306,9 +302,7 @@ public class TestFlowSemantics {
       }
     """, Base.mutBaseAliases);}
 
-  /// The codepoints flow must emit every codepoint of a string, in order, for all
-  /// UTF-8 lengths from 1 to 4 bytes. The string is long enough that the
-  /// data-parallel machinery splits it, so the split path is covered too.
+  /// All UTF-8 lengths from 1 to 4 bytes, in a string that is long enough to split.
   @Test void mutableStringsCodepointsMixedWidths() {ok(new Res("""
     1024
     1024
@@ -563,7 +557,7 @@ public class TestFlowSemantics {
       .return {sys.io.println(res.str)}
       }
     """+mutPersons, Base.mutBaseAliases);}
-  // `.limit` makes the inner flow PP. The fold advances only on ids in order 0, 1, 2, ..., so it checks order and completeness.
+  // `.limit` makes the inner flow PP. The ids must arrive as 0, 1, 2, ..., so the result checks order and count.
   @Test void chainInnerFlowConvertedToPP() {ok(new Res("100000 100000 True", "", 0), """
     package test
     Test: Main{sys -> Block#
@@ -632,4 +626,133 @@ public class TestFlowSemantics {
         .list.size.str)}
       }
     """+mutPersons, Base.mutBaseAliases);}
+  // A `.chain` with `read` elements can put one object at many positions. No op after the chain
+  // can mutate it.
+  @Test void chainReadCannotMutate() {fail("""
+    In position [###]/Dummy0.fear:4:125
+    [E66 invalidMethodArgumentTypes]
+    Method #/1 called in position [###]/Dummy0.fear:4:125 cannot be called with current parameters of types:
+    [read test.Person[] ()]
+    Attempted signatures:
+    (iso test.Person[]):imm base.Nat[] kind: IsoHProm
+    (iso test.Person[]):imm base.Nat[] kind: IsoProm
+    (mut test.Person[]):imm base.Nat[] kind: Base
+    (iso test.Person[]):imm base.Nat[] kind: ReadHProm
+    (mutH test.Person[]):imm base.Nat[] kind: MutHPromPar(0)
+    """, """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .return {sys.io.println(numbers.flow.map{n -> Persons#n}.chain[read Person]{p -> List#[read Person](p, p)}.filter{p -> Bump#p >= 0}.list.size.str)}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
+  @Test void chainReadCannotReachMutField() {fail("""
+    In position [###]/Dummy0.fear:4:119
+    [E36 undefinedMethod]
+    Method <.visits> with 0 args does not exist in <read test.Person[]>
+    Did you mean <test.Person.visits()>
+
+    Other candidates:
+    test.Person[].id(): imm base.Nat[]
+    base.Infos[].list(imm base.List[imm base.Info[]]): imm base.Info[]
+    base.Bytes[].list(): imm base.List[imm base.Byte[]]
+    base.json._LexerModes[].digits(): mut base.json._LexerMode[]
+    base.iter.Iter[E].list(): mut base.List[E]
+    base.Info[].list(): imm base.List[imm base.Info[]]
+    base.json._LexerCtx[].isDigit(imm base.Str[]): imm base.Bool[]
+    base.json._LexerCtx[].isWhitespace(imm base.Str[]): imm base.Bool[]
+    base.InfoVisitor[R].list(imm base.Info[]): R
+    base._InfoToJson[].list(imm base.Info[]): imm base.json.Json[]
+    """, """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .return {sys.io.println(numbers.flow.map{n -> Persons#n}.chain[read Person]{p -> List#[read Person](p, p)}.map{p -> p.visits}.list.size.str)}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
+  @Test void chainReadFoldCannotMutate() {fail("""
+    In position [###]/Dummy0.fear:4:146
+    [E66 invalidMethodArgumentTypes]
+    Method #/1 called in position [###]/Dummy0.fear:4:146 cannot be called with current parameters of types:
+    [read test.Person[] ()]
+    Attempted signatures:
+    (iso test.Person[]):imm base.Nat[] kind: IsoHProm
+    (iso test.Person[]):imm base.Nat[] kind: IsoProm
+    (mut test.Person[]):imm base.Nat[] kind: Base
+    (iso test.Person[]):imm base.Nat[] kind: ReadHProm
+    (mutH test.Person[]):imm base.Nat[] kind: MutHPromPar(0)
+    """, """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .return {sys.io.println(numbers.flow.map{n -> Persons#n}.chain[read Person]{p -> List#[read Person](p, p)}.fold[Nat]({0}, {acc, p -> acc + (Bump#p)}).str)}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
+
+  @Test void flatMapSkewedInnerSplit() {ok(new Res("200000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] res = {Flow#[Nat](0)
+        .flatMap{_ -> Flow.range(+0, +200000).map{i -> i.nat}}
+        .fold[Nat]({0}, {next, x -> x == next ? {.then -> next + 1, .else -> next}})}
+      .return {sys.io.println(res.str)}
+      }
+    """, Base.mutBaseAliases);}
+  @Test void flatMapSkewedTwoOuter() {ok(new Res("200000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] res = {Flow.range(+0, +2).map{i -> i.nat}
+        .flatMap{n -> Flow.range(+0, +100000).map{i -> i.nat + (n * 100000)}}
+        .fold[Nat]({0}, {next, x -> x == next ? {.then -> next + 1, .else -> next}})}
+      .return {sys.io.println(res.str)}
+      }
+    """, Base.mutBaseAliases);}
+  @Test void flatMapPrefixFilterDropsSingle() {ok(new Res("0", "", 0), """
+    package test
+    Test: Main{sys -> sys.io.println(Flow#[Nat](1)
+      .filter{n -> n == 0}
+      .flatMap{_ -> Flow.range(+0, +1000).map{i -> i.nat}}
+      .list.size.str)}
+    """, Base.mutBaseAliases);}
+  @Test void flatMapPrefixMapSingle() {ok(new Res("3499500", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] res = {Flow#[Nat](3)
+        .map{n -> n * 1000}
+        .flatMap{b -> Flow.range(+0, +1000).map{i -> i.nat + b}}
+        .fold[Nat]({0}, {a, x -> a + x})}
+      .return {sys.io.println(res.str)}
+      }
+    """, Base.mutBaseAliases);}
+  @Test void flatMapThenLimitNotSplit() {ok(new Res("10", "", 0), """
+    package test
+    Test: Main{sys -> sys.io.println(Flow#[Nat](0)
+      .flatMap{_ -> Flow.range(+0, +200000).map{i -> i.nat}}
+      .limit(10)
+      .list.size.str)}
+    """, Base.mutBaseAliases);}
+  @Test void chainReadAliasedSplit() {ok(new Res("40000 20000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] ordered = {Flow.range(+0, +2).map{i -> Persons#(i.nat)}
+        .chain[read Person]{p -> Flow.range(+0, +20000).map[read Person]{_ -> p}.list}
+        .fold[Nat]({0}, {acc, p -> p.id == (acc / 20000) ? {.then -> acc + 1, .else -> acc}})}
+      .let[Nat] ids = {Flow.range(+0, +2).map{i -> Persons#(i.nat)}
+        .chain[read Person]{p -> Flow.range(+0, +20000).map[read Person]{_ -> p}.list}
+        .fold[Nat]({0}, {acc, p -> acc + (p.id)})}
+      .return {sys.io.println(ordered.str + " " + (ids.str))}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
+  @Test void chainImmAliasedObjectSplit() {ok(new Res("200000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[Nat] res = {Flow.range(+0, +4).map{i -> i.nat}
+        .chain[Str]{n -> Block#
+          .let[Str] s = {n.str}
+          .return {Flow.range(+0, +50000).map[Str]{_ -> s}.list}
+          }
+        .fold[Nat]({0}, {a, s -> a + (s.size)})}
+      .return {sys.io.println(res.str)}
+      }
+    """, Base.mutBaseAliases);}
 }
