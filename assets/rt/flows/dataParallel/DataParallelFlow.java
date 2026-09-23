@@ -93,6 +93,10 @@ public final class DataParallelFlow implements Flow_1 {
     return $this.fromOp$imm(_FlatMap_0.$self.$hash$imm(s->s, source_m$, f_m$), Opt_1.$self);
   }
 
+  public Flow_1 chain$mut(F_2 f_m$) {
+    return $this.fromOp$imm(_FlatMap_0.$self.$hash$imm(s->s, source_m$, e -> ((List_1) f_m$.$hash$read(e)).flow$mut()), Opt_1.$self);
+  }
+
   public Opt_1 findMap$mut(F_2 f_m$) {
 //    return _SeqFlow_0.$self.fromOp$imm(source_m$, size_m$).findMap$mut(f_m$);
     return this

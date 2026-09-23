@@ -91,6 +91,14 @@ fn flow_flat_map(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
         .flags = .{},
     }));
 }
+fn flow_chain(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
+    return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
+        .kind = .chain,
+        .closure = f.share().box_transient(),
+        .state = 0,
+        .flags = .{},
+    }));
+}
 fn flow_peek(self: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     return object.make_flow_fp(&VT_Flow, object.clone_with_op(object.deref_flow(self), .{
         .kind = .peek,
@@ -601,6 +609,7 @@ pub const VT_Flow: objs.VTable = .{
         h("mut .map/2"),
         h("mut .filter/1"),
         h("mut .flatMap/1"),
+        h("mut .chain/1"),
         h("mut .limit/1"),
         h("mut .peek/1"),
         h("mut .peek/2"),
@@ -643,6 +652,7 @@ pub const VT_Flow: objs.VTable = .{
         @as(*const anyopaque, @ptrCast(&flow_map2)),
         @as(*const anyopaque, @ptrCast(&flow_filter)),
         @as(*const anyopaque, @ptrCast(&flow_flat_map)),
+        @as(*const anyopaque, @ptrCast(&flow_chain)),
         @as(*const anyopaque, @ptrCast(&flow_limit)),
         @as(*const anyopaque, @ptrCast(&flow_peek)),
         @as(*const anyopaque, @ptrCast(&flow_peek2)),
@@ -685,6 +695,7 @@ pub const VT_Flow: objs.VTable = .{
         "mut .map/2",
         "mut .filter/1",
         "mut .flatMap/1",
+        "mut .chain/1",
         "mut .limit/1",
         "mut .peek/1",
         "mut .peek/2",

@@ -437,4 +437,93 @@ public class TestZigFlows {
         })
       }
     """, Base.mutBaseAliases); }
+
+  /// `Bump` is a non-atomic read-modify-write with a delay. Two concurrent bumps on one person lose an update.
+  private static final String mutPersons = """
+    Person: {mut .visits: mut Count[Nat], read .id: Nat}
+    Persons: {#(n: Nat): mut Person -> Block#
+      .let[mut Count[Nat]] c = {Count.nat 0}
+      .return {mut Person{.visits -> c, .id -> n}}
+      }
+    Spin: {#(n: Nat): Nat -> n == 0 ? {.then -> 0, .else -> this#(n - 1)}}
+    Bump: {#(p: mut Person): Nat -> p.visits.update{v -> Block#(Spin#100, v + 1)}}
+    Ctxs: F[Nat, mut Ctx]{n -> Block#
+      .return {mut Ctx: base.ToIso[Ctx]{'ctx
+        .iso -> Ctxs#(n + 1),
+        .self -> ctx,
+        }}
+      }
+    """;
+  /// A low threshold makes VPF promote often.
+  @Test void mutDuplicatedByChainFilter() { okBase(16, new Res("10000 True", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .let[mut List[mut Person]] res = {numbers.flow
+        .map{n -> Persons#n}
+        .chain{p -> List#(p, p)}
+        .filter{p -> Bump#p == 0}
+        .list}
+      .return {sys.io.println(res.size.str + " " + (res.flow.all{p -> p.visits.get == 2}.str))}
+      }
+    """+mutPersons, Base.mutBaseAliases); }
+  @Test void mutAliasedListFilter() { okBase(new Res("20000 True", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[mut List[mut Person]] ps = {Flow.range(+0, +10000).map{i -> Persons#(i.nat)}.list}
+      .let[mut List[mut Person]] twice = {List#[mut List[mut Person]](ps, ps).flow.chain[mut Person]{l -> l}.list}
+      .let[mut List[mut Person]] res = {twice.flow.filter{p -> Bump#p >= 0}.list}
+      .return {sys.io.println(res.size.str + " " + (res.flow.all{p -> p.visits.get == 2}.str))}
+      }
+    """+mutPersons, Base.mutBaseAliases); }
+  /// The ctx peek is after the chain, so it does not cut the pipeline.
+  @Test void mutDuplicatedByChainTwoFiltersAroundCut() { okBase(new Res("20000 True", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .let[mut List[mut Person]] res = {numbers.flow
+        .map{n -> Persons#n}
+        .chain{p -> List#(p, p)}
+        .filter{p -> Bump#p >= 0}
+        .peek[Ctx](Ctxs#0, {_, _ -> {}})
+        .filter{p -> Bump#p >= 0}
+        .list}
+      .return {sys.io.println(res.size.str + " " + (res.flow.all{p -> p.visits.get == 4}.str))}
+      }
+    """+mutPersons, Base.mutBaseAliases); }
+  /// In element order the fold sees 1 then 2 for each person, so 30000.
+  @Test void mutDuplicatedByChainFilterThenFold() { okBase(new Res("30000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .let[Nat] res = {numbers.flow
+        .map{n -> Persons#n}
+        .chain{p -> List#(p, p)}
+        .filter{p -> Bump#p >= 0}
+        .fold[Nat]({0}, {acc, p -> acc + (p.visits.get)})}
+      .return {sys.io.println(res.str)}
+      }
+    """+mutPersons, Base.mutBaseAliases); }
+  /// The ctx peek is before the chain, so the ops before the chain run in stages.
+  @Test void chainAfterCut() { okBase(new Res("30000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .let[Nat] res = {numbers.flow
+        .map{n -> Persons#n}
+        .peek[Ctx](Ctxs#0, {_, _ -> {}})
+        .chain{p -> List#(p, p)}
+        .filter{p -> Bump#p >= 0}
+        .fold[Nat]({0}, {acc, p -> acc + (p.visits.get)})}
+      .return {sys.io.println(res.str)}
+      }
+    """+mutPersons, Base.mutBaseAliases); }
+  @Test void chainImmElements() { okBase(16, new Res("99990000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .let[Nat] res = {numbers.flow.chain{n -> List#(n, n)}.fold[Nat]({0}, {a, n -> a + n})}
+      .return {sys.io.println(res.str)}
+      }
+    """, Base.mutBaseAliases); }
 }

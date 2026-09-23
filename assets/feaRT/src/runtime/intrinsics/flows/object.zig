@@ -38,6 +38,8 @@ pub fn create_flow(source: types.Source, is_finite: bool) *types.FeartFlow {
         .ops = &.{},
         .ops_owner = null,
         .is_finite = is_finite,
+        .parallelism = .sequential,
+        .serial_from = null,
         .ref_count = std.atomic.Value(u32).init(1),
     };
     return f;
@@ -185,7 +187,7 @@ fn clone_op(op: types.OpDesc) types.OpDesc {
             copy.closure = op.closure.share();
         },
         .limit => {},
-        .map, .filter, .peek, .map_filter, .flat_map => copy.closure = op.closure.share(),
+        .map, .filter, .peek, .map_filter, .flat_map, .chain => copy.closure = op.closure.share(),
     }
     return copy;
 }
@@ -226,6 +228,7 @@ pub const SPLIT_MIN = 2;
 /// frame, which outlives every use: the halves reach only the `.some/2` arms it calls, and
 /// a VPF promotion boxes what it takes across a fiber boundary.
 pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *types.FeartFlow) bool {
+    if (flow.parallelism != .data_parallel or flow.serial_from != null) return false;
     for (flow.ops) |op| {
         if (!op.flags.stateless) return false;
     }
@@ -244,6 +247,8 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 .ops = flow.ops,
                 .ops_owner = flow.ops_owner,
                 .is_finite = true,
+                .parallelism = flow.parallelism,
+                .serial_from = flow.serial_from,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
             right.* = .{
@@ -252,6 +257,8 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 .ops = flow.ops,
                 .ops_owner = flow.ops_owner,
                 .is_finite = true,
+                .parallelism = flow.parallelism,
+                .serial_from = flow.serial_from,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
             return true;
@@ -278,6 +285,8 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 .ops = flow.ops,
                 .ops_owner = flow.ops_owner,
                 .is_finite = true,
+                .parallelism = flow.parallelism,
+                .serial_from = flow.serial_from,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
             right.* = .{
@@ -286,6 +295,8 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 .ops = flow.ops,
                 .ops_owner = flow.ops_owner,
                 .is_finite = true,
+                .parallelism = flow.parallelism,
+                .serial_from = flow.serial_from,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
             return true;
@@ -324,6 +335,8 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 .ops = flow.ops,
                 .ops_owner = flow.ops_owner,
                 .is_finite = true,
+                .parallelism = flow.parallelism,
+                .serial_from = flow.serial_from,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
             right.* = .{
@@ -338,6 +351,8 @@ pub fn split_flow_into(flow: *types.FeartFlow, left: *types.FeartFlow, right: *t
                 .ops = flow.ops,
                 .ops_owner = flow.ops_owner,
                 .is_finite = true,
+                .parallelism = flow.parallelism,
+                .serial_from = flow.serial_from,
                 .ref_count = std.atomic.Value(u32).init(1),
             };
             return true;
@@ -360,6 +375,8 @@ pub fn copy_flow_body(src: *const types.FeartFlow) *types.FeartFlow {
         .ops = src.ops,
         .ops_owner = src.ops_owner,
         .is_finite = src.is_finite,
+        .parallelism = src.parallelism,
+        .serial_from = src.serial_from,
         .ref_count = std.atomic.Value(u32).init(1),
     };
     return f;
@@ -378,6 +395,8 @@ pub fn clone_with_op(existing: *types.FeartFlow, new_op: types.OpDesc) *types.Fe
         .ops = new_ops,
         .ops_owner = ops_node.make_ops(new_ops),
         .is_finite = existing.is_finite,
+        .parallelism = existing.parallelism,
+        .serial_from = existing.serial_from,
         .ref_count = std.atomic.Value(u32).init(1),
     };
     return new_flow;
@@ -392,6 +411,8 @@ pub fn clone_with_finiteness(existing: *types.FeartFlow, is_finite: bool) *types
         .ops = ops_clone.ops,
         .ops_owner = ops_clone.owner,
         .is_finite = is_finite,
+        .parallelism = existing.parallelism,
+        .serial_from = existing.serial_from,
         .ref_count = std.atomic.Value(u32).init(1),
     };
     return new_flow;

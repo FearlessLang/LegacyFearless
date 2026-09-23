@@ -128,6 +128,8 @@ public sealed interface MIR {
       PipelineParallelFlow,
       DataParallelFlow,
       SafeMutSourceFlow,
+      /// This call's op and all later ops run one element at a time, in order, on the terminal's thread.
+      SequentialFlow,
       VPFParallelisable;
 
       public boolean isStandard() { return this == Standard; }

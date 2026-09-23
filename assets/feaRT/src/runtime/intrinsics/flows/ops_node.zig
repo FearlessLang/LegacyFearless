@@ -96,7 +96,7 @@ fn visit_op(op: types.OpDesc, visit: objs.VisitFn, ctx: *anyopaque) void {
             visit(ctx, op.closure);
         },
         .limit => {},
-        .map, .filter, .peek, .map_filter, .flat_map => visit(ctx, op.closure),
+        .map, .filter, .peek, .map_filter, .flat_map, .chain => visit(ctx, op.closure),
     }
 }
 
@@ -126,7 +126,7 @@ fn release_op_children(op: types.OpDesc, releasing_worker_id: u32) void {
             op.closure.rc_decrement_as(releasing_worker_id);
         },
         .limit => {},
-        .map, .filter, .peek, .map_filter, .flat_map => op.closure.rc_decrement_as(releasing_worker_id),
+        .map, .filter, .peek, .map_filter, .flat_map, .chain => op.closure.rc_decrement_as(releasing_worker_id),
     }
 }
 
@@ -143,6 +143,6 @@ fn free_op_state(op: types.OpDesc) void {
         .scan => gc.recycleDestroy(types.ScanCell, @as(*types.ScanCell, @ptrFromInt(op.state)), .flow_op_release),
         .actor => gc.recycleDestroy(types.ActorState, @as(*types.ActorState, @ptrFromInt(op.state)), .flow_op_release),
         .map_ctx, .peek_ctx => gc.recycleDestroy(types.CtxCell, @as(*types.CtxCell, @ptrFromInt(op.state)), .flow_op_release),
-        .limit, .map, .filter, .peek, .map_filter, .flat_map => {},
+        .limit, .map, .filter, .peek, .map_filter, .flat_map, .chain => {},
     }
 }

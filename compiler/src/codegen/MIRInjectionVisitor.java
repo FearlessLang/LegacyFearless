@@ -339,6 +339,14 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
       return EnumSet.of(MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
     }
 
+    // A `.chain` list can hold one `mut` object at many positions. Two ops must not get it at the same time.
+    if (recvIT.name().equals(new Id.DecId("base.flows.Flow", 1)) && e.name().equals(new Id.MethName(".chain", 1))) {
+      var chainElem = e.ts().getFirst();
+      if (!chainElem.mdf().is(Mdf.read, Mdf.imm, Mdf.readImm)) {
+        return EnumSet.of(MIR.MCall.CallVariant.SequentialFlow);
+      }
+    }
+
     // `.merge` and `.mergeFold` are always parallelisable. `ComputeVPFMode` refuses them on its
     // own, because their args are `mut` methods on `this`. See `base.flows._FeartDriver`.
     if (recvIT.name().equals(Magic.FeartDriver) && (e.name().equals(new Id.MethName(".merge", 2))

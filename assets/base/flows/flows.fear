@@ -77,7 +77,10 @@ _NonTerminalOps[E:*]: {
   mut .peek[C](ctx: iso ToIso[C], f: read F[iso C, E, Void]): mut Flow[E] ->
     this.map(ctx, {c, e -> Block#(f#(c, e), e)}),
 
-  mut .flatMap[R:*](f: read F[E, mut Flow[R]]): mut Flow[R],
+  /// Replaces each element with the elements of the flow that `f` returns. Use `.chain` for `mut` elements.
+  mut .flatMap[R](f: read F[E, mut Flow[R]]): mut Flow[R],
+  /// Replaces each element with the elements of the list that `f` returns.
+  mut .chain[R:*](f: read F[E, mut List[R]]): mut Flow[R],
   /// Combine this flow with another flow, producing a flow of pairs. The resulting flow will stop when either of the source
   /// flows stop. Currently disabled, see [operators/with.fear] for more info.
 //  mut .with[EB:*](other: mut Flow[EB]): mut Flow[mut Pair[E,EB]],
@@ -157,7 +160,8 @@ EmptyFlow[E:*]: Flow[E]{//TODO: why the types are repeated?
   mut .map[R:*](f: read F[E, R]): mut Flow[R] -> mut EmptyFlow[R],
   .map(_,_) -> this.map({_ -> Unreachable!}),
 
-  mut .flatMap[R:*](f: read F[E, mut Flow[R]]): mut Flow[R] -> mut EmptyFlow[R],
+  mut .flatMap[R](f: read F[E, mut Flow[R]]): mut Flow[R] -> mut EmptyFlow[R],
+  mut .chain[R:*](f: read F[E, mut List[R]]): mut Flow[R] -> mut EmptyFlow[R],
   mut .actor[S:*,R:*](state: iso S, f: read ActorImpl[S,E,R]): mut Flow[imm R] -> mut EmptyFlow[imm R],
   mut .actorMut[S:*,R:*](state: iso S, f: read ActorImplMut[S,E,R]): mut Flow[R] -> mut EmptyFlow[R],
   .limit(_) -> this,

@@ -549,6 +549,10 @@ public record JavaMagicImpls(
     return (m, args, variants, _)->{
       var call = (MIR.MCall) e;
       assert call.variant() == variants; // TODO: if this holds remove the variants param here
+      if (variants.contains(MIR.MCall.CallVariant.SequentialFlow)) {
+        return Optional.of("rt.flows.FlowCreator.sequential(%s)".formatted(
+          call.withVariants(EnumSet.of(MIR.MCall.CallVariant.Standard)).accept(gen, true)));
+      }
       var parallelConstr = FlowSelector.bestParallelConstr(call);
 
       if (isMagic(Magic.FlowK, call.recv())) {

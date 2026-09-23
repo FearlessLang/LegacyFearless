@@ -47,7 +47,7 @@ FTestRunner: F[mut System, mut TestRunner]{sys -> Block#
            .flatMap{subSuite->subSuite.results.flow}
            .list,
           suiteResults.flow
-            .flatMap{subSuite->subSuite.nestedResults.flow}
+            .chain{subSuite->subSuite.nestedResults.flow.list}
             .list
           )}
         }

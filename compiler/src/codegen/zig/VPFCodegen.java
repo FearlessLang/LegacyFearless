@@ -728,7 +728,7 @@ class VPFCodegen {
           return tmp;
         })
         .collect(Collectors.joining(", "));
-      return delegate.withTransientPrelude(prelude, fRef + "(" + args + ")");
+      return delegate.withTransientPrelude(prelude, delegate.withFlowParallelism(call, fRef + "(" + args + ")"));
     }
     @Override public String visitBox(MIR.Box box, boolean checkMagic) {
       return delegate.boxExpr(box.inner(), this, checkMagic);

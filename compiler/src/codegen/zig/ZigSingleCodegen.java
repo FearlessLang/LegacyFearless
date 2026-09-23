@@ -1696,10 +1696,24 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     if (checkMagic && magicImpl.isPresent()) {
       var impl = magicImpl.get()
         .call(call.name(), call.args(), call.variant(), call.t());
-      if (impl.isPresent()) { return impl.get(); }
+      if (impl.isPresent()) { return withFlowParallelism(call, impl.get()); }
     }
 
     return emitMCall(call, this, checkMagic);
+  }
+
+  /// Applies the call-site variant's parallelism to the returned flow. A FeaRT flow is sequential
+  /// unless a variant allows more.
+  String withFlowParallelism(MIR.MCall call, String expr) {
+    var v = call.variant();
+    if (v.contains(MIR.MCall.CallVariant.SequentialFlow)) { return "flow_rt.serial_from_last_op(" + expr + ")"; }
+    if (v.contains(MIR.MCall.CallVariant.DataParallelFlow)) { return "flow_rt.allow_parallelism(" + expr + ", .data_parallel)"; }
+    if (v.contains(MIR.MCall.CallVariant.PipelineParallelFlow)) { return "flow_rt.allow_parallelism(" + expr + ", .pipeline)"; }
+    return expr;
+  }
+
+  String withFlowParallelism(MIR.StaticCall call, String expr) {
+    return call.original() instanceof MIR.MCall m ? withFlowParallelism(m, expr) : expr;
   }
 
   /// The intrinsic module of a receiver whose every runtime value is a `.primitive`, so a call
@@ -1926,7 +1940,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var target = intrinsic
       .map(module -> "rt.dispatch_primitive(" + module + ", " + hashExpr + ", " + ops.recv() + ", " + argsTuple + ")")
       .orElseGet(() -> "rt.call(" + ops.recv() + ", " + hashExpr + ", " + argsTuple + ", @src())");
-    return withTransientPrelude(ops.prelude(), target);
+    return withTransientPrelude(ops.prelude(), withFlowParallelism(call, target));
   }
 
   /// The per-literal wrapper of the one concrete receiver type, called directly. It reads its
@@ -1939,7 +1953,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     all.addAll(ops.args());
     var callee = shapes.calleeOf(call).map(MIR.Fun::name).orElse(null);
     return withTransientPrelude(ops.prelude(),
-      methCallRef(call.concreteType(), original, callee, all));
+      withFlowParallelism(original, methCallRef(call.concreteType(), original, callee, all)));
   }
 
   @Override
@@ -1986,7 +2000,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
         shapes.calleeOfAlt(call).map(MIR.Fun::name).orElse(null), names)));
     sb.append(" else rt.call(").append(recvName).append(", ").append(hashExpr).append(", ")
       .append(argsTuple).append(", @src());\n}");
-    return withTransientPrelude(ops.prelude(), sb.toString());
+    return withTransientPrelude(ops.prelude(), withFlowParallelism(original, sb.toString()));
   }
 
   /// No magic check: the pass that makes a `DirectCall` does so only for a receiver with no
@@ -2061,7 +2075,7 @@ public class ZigSingleCodegen implements MIRVisitor<String> {
     var fRef = funRef(call.fun());
     var prelude = new ArrayList<String>();
     var args = staticCallArgs(call, this, checkMagic, prelude, true);
-    return withTransientPrelude(prelude, callRef(call.fun(), fRef, args));
+    return withTransientPrelude(prelude, withFlowParallelism(call, callRef(call.fun(), fRef, args)));
   }
 
 

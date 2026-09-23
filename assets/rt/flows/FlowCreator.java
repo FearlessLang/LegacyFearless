@@ -25,6 +25,14 @@ public interface FlowCreator {
     return fromFlowOp(intended, op, size);
   }
 
+  /// A sequential flow over the ops of `original`. For a DP flow, all ops become sequential.
+  /// For a PP flow, the upstream stages stay and the later ops run on one thread.
+  static Flow_1 sequential(Flow_1 original) {
+    var size = original.size$read();
+    var op = original.unwrapOp$mut(_UnwrapFlowToken_0.$self);
+    return _SeqFlow_0.$self.fromOp$imm(op, size);
+  }
+
   static Flow_1 fromFlowOp(_FlowFactory_0 intended, FlowOp_1 op, long size) {
     var isSequentialised = IS_SEQUENTIALISED.isBound();
     if (isSequentialised) {

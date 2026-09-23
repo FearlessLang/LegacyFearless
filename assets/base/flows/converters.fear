@@ -19,6 +19,7 @@ _RestrictFlowReuse: {
       .filter(predicate) -> Block#(_CheckFlowReuse#isTail, flow.filter(predicate)),
       .findMap(f) -> Block#(_CheckFlowReuse#isTail, flow.findMap(f)),
       .flatMap(f) -> Block#(_CheckFlowReuse#isTail, flow.flatMap(f)),
+      .chain(f) -> Block#(_CheckFlowReuse#isTail, flow.chain(f)),
       .fold(acc, f) -> Block#(_CheckFlowReuse#isTail, flow.fold(acc, f)),
       .limit(n) -> Block#(_CheckFlowReuse#isTail, flow.limit(n)),
       .map(f) -> Block#(_CheckFlowReuse#isTail, flow.map(f)),

@@ -162,6 +162,19 @@ fn apply_op(
             inner_fp.rc_decrement();
             break :blk .expanded;
         },
+        .chain => blk: {
+            const list_fp = objs.call(op.closure, h("read #/1"), .{elem}, @src());
+            elem.rc_decrement();
+            const inner_fp = objs.call(list_fp, h("mut .flow/0"), .{}, @src());
+            list_fp.rc_decrement();
+            const inner = object.deref_flow(inner_fp);
+            while (!stopped.* and types.source_has_next(&inner.source)) {
+                const inner_elem = types.source_next(&inner.source);
+                process_through(inner.ops, remaining, inner_elem, ctx, accept, stopped);
+            }
+            inner_fp.rc_decrement();
+            break :blk .expanded;
+        },
         .actor => blk: {
             defer elem.rc_decrement();
             const state: *types.ActorState = @ptrFromInt(op.state);

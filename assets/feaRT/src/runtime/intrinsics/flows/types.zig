@@ -19,6 +19,7 @@ pub const OpKind = enum(u8) {
     peek,
     map_filter,
     flat_map,
+    chain,
     scan,
     limit,
     actor,
@@ -57,6 +58,9 @@ pub const Source = union(enum) {
     empty: void,
 };
 
+/// The most parallel mode that a flow can use.
+pub const Parallelism = enum(u8) { sequential, pipeline, data_parallel };
+
 pub const FeartFlow = struct {
     source: Source,
     // When non-null, the source's items live inside this FatPtr's storage (a
@@ -70,6 +74,9 @@ pub const FeartFlow = struct {
     /// repeated here so that iteration reads it without a second indirection.
     ops_owner: ?*ops_node.FlowOps = null,
     is_finite: bool,
+    parallelism: Parallelism,
+    /// The first op that must run in element order on the terminal's fiber.
+    serial_from: ?usize,
     // Body refcount. Always 1 today: each FatPtr owns its own body, and
     // `flow_drop` releases through this.
     ref_count: std.atomic.Value(u32),

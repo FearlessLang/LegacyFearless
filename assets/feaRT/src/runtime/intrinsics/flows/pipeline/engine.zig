@@ -4,6 +4,10 @@
 //! connect adjacent stages. The calling fiber consumes the last ring and runs the
 //! trailing stateless ops and the terminal.
 //!
+//! A flow pipelines only when its `parallelism` is not `.sequential`. Only cuts
+//! before `serial_from` make stages. Ops from `serial_from` onward, cut ops
+//! included, run in the tail.
+//!
 //! Deliberately shares no control flow with the DP flow driver: stateful chains
 //! never split, so `_FeartDriver`'s splitMatch already collapses them to the
 //! sequential leaf -- this engine simply upgrades that leaf. `limit` neither
@@ -35,8 +39,14 @@ fn isCut(op: types.OpDesc) bool {
     };
 }
 
+/// The number of leading ops that can run in stages.
+fn stageLimit(flow: *const types.FeartFlow) usize {
+    return flow.serial_from orelse flow.ops.len;
+}
+
 pub fn shouldPipeline(flow: *types.FeartFlow) bool {
-    for (flow.ops) |op| {
+    if (flow.parallelism == .sequential) return false;
+    for (flow.ops[0..stageLimit(flow)]) |op| {
         if (isCut(op)) return true;
     }
     return false;
@@ -46,15 +56,15 @@ const Plan = struct {
     /// Op slice per stage fiber. stages[0] runs the source too (its slice is
     /// the leading stateless run and may be empty -- a pure source pump).
     stages: [][]types.OpDesc,
-    /// Trailing stateless ops after the last cut; run on the calling fiber
-    /// together with the terminal accept.
+    /// Ops after the last stage. They run on the calling fiber with the terminal accept.
     tail: []types.OpDesc,
 };
 
-fn partition(ops: []types.OpDesc) Plan {
+/// Cuts `ops` into stages at each cut op before index `limit`.
+fn partition(ops: []types.OpDesc, limit: usize) Plan {
     var stages: std.ArrayList([]types.OpDesc) = .empty;
     var seg_start: usize = 0;
-    for (ops, 0..) |op, i| {
+    for (ops[0..limit], 0..) |op, i| {
         if (!isCut(op)) continue;
         // Leading run becomes stage 0 even when empty (the source pump);
         // between-cut runs only get a fiber when non-empty.
@@ -73,7 +83,7 @@ fn partition(ops: []types.OpDesc) Plan {
 /// stage fibers have been joined -- the flow is fully quiescent on return or
 /// unwind, upholding the blocking-flow world-freeze invariant).
 pub fn run(flow: *types.FeartFlow, ctx: *anyopaque, accept: exec.AcceptFn) void {
-    const plan = partition(flow.ops);
+    const plan = partition(flow.ops, stageLimit(flow));
     const n = plan.stages.len;
 
     const rings = gc.allocator.alloc(*Ring, n) catch @panic("OOM");

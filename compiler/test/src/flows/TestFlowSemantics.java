@@ -7,6 +7,7 @@ import org.junit.jupiter.api.condition.OS;
 
 import utils.Base;
 
+import static codegen.java.RunJavaProgramTests.fail;
 import static codegen.java.RunJavaProgramTests.ok;
 import static utils.RunOutput.Res;
 
@@ -500,4 +501,135 @@ public class TestFlowSemantics {
           }}
       )}
     """, Base.mutBaseAliases);}
+
+  private static final String mutPersons = """
+    Person: {mut .visits: mut Count[Nat], read .id: Nat}
+    Persons: {#(n: Nat): mut Person -> Block#
+      .let[mut Count[Nat]] c = {Count.nat 0}
+      .return {mut Person{.visits -> c, .id -> n}}
+      }
+    Spin: {#(n: Nat): Nat -> n == 0 ? {.then -> 0, .else -> this#(n - 1)}}
+    Bump: {#(p: mut Person): Nat -> p.visits.update{v -> Block#(Spin#200, v + 1)}}
+    """;
+  @Test void mutDuplicatedByChainFilterDP() {ok(new Res("10000 True", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .let[mut List[mut Person]] res = {numbers.flow
+        .map{n -> Persons#n}
+        .chain{p -> List#(p, p)}
+        .filter{p -> Bump#p == 0}
+        .list}
+      .return {sys.io.println(res.size.str + " " + (res.flow.all{p -> p.visits.get == 2}.str))}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
+  @Test void mutDuplicatedByChainFilterPP() {ok(new Res("10000 True", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .let[mut List[mut Person]] res = {numbers.flow
+        .limit(1_000_000)
+        .map{n -> Persons#n}
+        .chain{p -> List#(p, p)}
+        .filter{p -> Bump#p == 0}
+        .list}
+      .return {sys.io.println(res.size.str + " " + (res.flow.all{p -> p.visits.get == 2}.str))}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
+  @Test void mutDuplicatedByChainTwoFiltersPP() {ok(new Res("20000 True", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .let[mut List[mut Person]] res = {numbers.flow
+        .limit(1_000_000)
+        .map{n -> Persons#n}
+        .chain{p -> List#(p, p)}
+        .filter{p -> Bump#p >= 0}
+        .filter{p -> Bump#p >= 0}
+        .list}
+      .return {sys.io.println(res.size.str + " " + (res.flow.all{p -> p.visits.get == 4}.str))}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
+  // In element order the fold sees 1 then 2 for each person, so 30000.
+  @Test void mutDuplicatedByChainFilterThenFoldDP() {ok(new Res("30000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .let[Nat] res = {numbers.flow
+        .map{n -> Persons#n}
+        .chain{p -> List#(p, p)}
+        .filter{p -> Bump#p >= 0}
+        .fold[Nat]({0}, {acc, p -> acc + (p.visits.get)})}
+      .return {sys.io.println(res.str)}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
+  // `.limit` makes the inner flow PP. The fold advances only on ids in order 0, 1, 2, ..., so it checks order and completeness.
+  @Test void chainInnerFlowConvertedToPP() {ok(new Res("100000 100000 True", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] outer = {Flow.range(+0, +100).map{i -> i.nat}.list}
+      .let[List[Nat]] inner = {Flow.range(+0, +1000).map{i -> i.nat}.list}
+      .let[mut List[mut Person]] res = {outer.flow
+        .chain{n -> inner.flow.map{m -> Persons#(n * 1000 + m)}.limit(1000).list}
+        .filter{p -> Bump#p == 0}
+        .list}
+      .let[Nat] inOrder = {res.flow.fold[Nat]({0}, {next, p -> p.id == next ? {.then -> next + 1, .else -> next}})}
+      .return {sys.io.println(res.size.str + " " + (inOrder.str) + " " + (res.flow.all{p -> p.visits.get == 1}.str))}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
+  @Test void chainInnerFlowConvertedToPPDuplicates() {ok(new Res("100000 True", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] outer = {Flow.range(+0, +100).map{i -> i.nat}.list}
+      .let[List[Nat]] inner = {Flow.range(+0, +500).map{i -> i.nat}.list}
+      .let[mut List[mut Person]] res = {outer.flow
+        .chain{n -> inner.flow
+          .map{m -> Persons#(n * 1000 + m)}
+          .chain{p -> List#(p, p)}
+          .filter{p -> Bump#p >= 0}
+          .limit(1000)
+          .list}
+        .filter{p -> Bump#p >= 0}
+        .list}
+      .return {sys.io.println(res.size.str + " " + (res.flow.all{p -> p.visits.get == 4}.str))}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
+  @Test void chainImmElements() {ok(new Res("99990000", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .let[Nat] res = {numbers.flow.chain{n -> List#(n, n)}.fold[Nat]({0}, {a, n -> a + n})}
+      .return {sys.io.println(res.str)}
+      }
+    """, Base.mutBaseAliases);}
+  @Test void flatMapRejectsMutElements() {fail("""
+    In position [###]/Dummy0.fear:4:58
+    [E5 invalidMdfBound]
+    Type bound related to .flatMap/1:
+    The type mut test.Person[] is not valid because its capability is not in the required bounds. The allowed modifiers are: imm.
+    """, """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .return {sys.io.println(numbers.flow.map{n -> Persons#n}.flatMap{p -> List#(p, p).flow}.list.size.str)}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
+  // `downstream` is `mutH`, so its argument must be `iso`.
+  @Test void actorMutCannotSendElementTwice() {fail("""
+    In position [###]/Dummy0.fear:6:95
+    [E66 invalidMethodArgumentTypes]
+    Method #/1 called in position [###]/Dummy0.fear:6:95 cannot be called with current parameters of types:
+    [mut test.Person[] ()]
+    Attempted signatures:
+    (iso test.Person[]):imm base.Void[] kind: MutHPromRec
+    """, """
+    package test
+    Test: Main{sys -> Block#
+      .let[List[Nat]] numbers = {Flow.range(+0, +10000).map{i -> i.nat}.list}
+      .return {sys.io.println(numbers.flow
+        .map{n -> Persons#n}
+        .actorMut[mut Var[Nat], mut Person](Vars#[Nat]0, {downstream, state, p -> Block#(downstream#p, downstream#p, base.flows.ActorRes.continue)})
+        .list.size.str)}
+      }
+    """+mutPersons, Base.mutBaseAliases);}
 }
