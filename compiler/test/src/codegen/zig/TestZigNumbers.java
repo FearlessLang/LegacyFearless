@@ -250,8 +250,7 @@ public class TestZigNumbers {
       }
     """, Base.mutBaseAliases);}
 
-  /// A mismatch must reach the helper's formatting, not pass silently.
-  @Test void natAssertEqFails() { okBase(
+  @Test void natAssertEqMismatchReachesTheHelperFormatting() { okBase(
     new Res("", "Program crashed with: Expected: 1[###]Actual: 2[###]", 1), """
     package test
     Test:Main{ sys -> 1 .assertEq 2 }

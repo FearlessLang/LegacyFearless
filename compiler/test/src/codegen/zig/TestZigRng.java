@@ -16,8 +16,6 @@ public class TestZigRng {
     alias base.rng.Random as Random,
     """;
 
-  /// The seed must never be zero: `FRandom` errors on a zero seed, so the
-  /// capability redraws until it gets one.
   @Test void seedIsNonZero() { okBase(new Res("ok", "", 0), """
     package test
     Test:Main{ sys -> Block#
@@ -27,7 +25,6 @@ public class TestZigRng {
       }
     """, Base.mutBaseAliases);}
 
-  /// The seed feeds the pure-Fearless LCG, which must then advance.
   @Test void drawsAdvance() { okBase(new Res("ok", "", 0), """
     package test
     Test:Main{ sys -> Block#
@@ -39,13 +36,11 @@ public class TestZigRng {
       }
     """, Base.mutBaseAliases);}
 
-  /// The seed is a plain `Nat`, so it prints without a magic-specific path.
   @Test void seedPrints() { okBase(new Res("[###]", "", 0), """
     package test
     Test:Main{ sys -> sys.io.println(sys.rng#.str) }
     """, Base.mutBaseAliases);}
 
-  /// Two draws from the same seeder are independent seeds.
   @Test void repeatedSeedsDiffer() { okBase(new Res("ok", "", 0), """
     package test
     Test:Main{ sys -> Block#
@@ -57,7 +52,6 @@ public class TestZigRng {
       }
     """, Base.mutBaseAliases, RNG_ALIASES);}
 
-  /// A fixed seed is fully deterministic, matching the Java backend.
   @Test void fixedSeedNat() { okBase(new Res("570564682", "", 0), """
     package test
     Test:Main{ sys -> sys.io.println((FRandom#1337).nat.str) }
@@ -77,8 +71,7 @@ public class TestZigRng {
       }
     """, Base.mutBaseAliases, RNG_ALIASES);}
 
-  /// `.nat(min, max)` goes through `.float`, exercising the Float path.
-  @Test void fixedSeedRange() { okBase(new Res("10 18 17 16 7 14 15 18 17 6", "", 0), """
+  @Test void fixedSeedRangeGoesThroughFloat() { okBase(new Res("10 18 17 16 7 14 15 18 17 6", "", 0), """
     package test
     Test:Main{ sys -> Rng#(FRandom#1337, sys.io, Count.nat(10)) }
     Rng: {#(rng: mut Random, io: mut IO, n: mut Count[Nat]): Void -> Block#
@@ -96,14 +89,11 @@ public class TestZigRng {
       }
     """, Base.mutBaseAliases, RNG_ALIASES);}
 
-  /// A zero seed is rejected by `FRandom` itself, so the program crashes.
   @Test void zeroSeedErrors() { okBase(new Res("", "Program crashed with: Seed may not be zero[###]", 1), """
     package test
     Test:Main{ sys -> sys.io.println((FRandom#0).nat.str) }
     """, Base.mutBaseAliases, RNG_ALIASES);}
 
-  /// `.iso` snapshots the generator's position: the copy continues the sequence
-  /// from where the original stood, and the two then advance independently.
   @Test void isoSnapshotsPosition() { okBase(new Res("1499355484\n1499355484", "", 0), """
     package test
     Test:Main{ sys -> Block#
@@ -116,7 +106,6 @@ public class TestZigRng {
       }
     """, Base.mutBaseAliases, RNG_ALIASES);}
 
-  /// `.self` is the identity, so draws through it share the one generator.
   @Test void selfSharesState() { okBase(new Res("570564682\n1499355484", "", 0), """
     package test
     Test:Main{ sys -> Block#
