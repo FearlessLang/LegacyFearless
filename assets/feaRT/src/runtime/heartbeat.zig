@@ -33,20 +33,24 @@ const ARE_HEARTBEATS_ENABLED = @import("build_options").enable_vpf;
 /// Section 4 of Automatic Parallelism Management, Westrick et al.
 pub inline fn tryPromote() void {
     comptime if (!ARE_HEARTBEATS_ENABLED) return;
-    // Generated code always runs on a fiber stack. The flag suppresses promotion.
     const fiber = fiber_mod.currentFiber();
-    if (!fiber.vpf_enabled) return;
-    // Relaxed: a plain load and store on the owner's path. A thief credit that
-    // lands between them is lost; see `Fiber.tokens`.
-    const tokens = fiber.tokens.load(.monotonic);
+    // Unordered lets LLVM keep the value in a register across inlined polls.
+    // See `Fiber.tokens` for why a lost thief credit is sound.
+    const tokens = fiber.tokens.load(.unordered);
     if (tokens >= TOKENS_THRESHOLD) {
+        // Test the flag only at the threshold, so that the common path does
+        // not load it.
+        if (!fiber.vpf_enabled) {
+            fiber.tokens.store(0, .unordered);
+            return;
+        }
         // Both tests are inline, so a miss makes no call. Do not add work to
         // this path. A promotion into a cancelled subtree wastes a thief fiber.
         if (hasPromotableFrame(fiber) and !scope_mod.cancelledOn(fiber)) {
             const remainder = (tokens - TOKENS_THRESHOLD) / 2;
             if (doPromote(fiber, remainder)) {
                 op_counters.bump(.promotion);
-                fiber.tokens.store(remainder, .monotonic);
+                fiber.tokens.store(remainder, .unordered);
                 return;
             }
         } else {
@@ -61,9 +65,8 @@ pub inline fn tryPromote() void {
             periodicDrain(tokens);
         }
     }
-    // The threshold check above bounds this below U32_MAX, so it cannot overflow.
     op_counters.bump(.token_granted);
-    fiber.tokens.store(tokens + 1, .monotonic);
+    fiber.tokens.store(tokens +% 1, .unordered);
 }
 
 inline fn hasPromotableFrame(fiber: *const Fiber) bool {

@@ -16,7 +16,7 @@ pub const STACK_SIZE = 2 * 1024 * 1024;
 const GUARD_SIZE = std.heap.page_size_min;
 
 /// Stamped into every `Fiber` header so `currentFiber` can tell a real fiber
-/// mapping from whatever a masked stack pointer lands on. Cleared before the
+/// mapping from whatever a masked stack address lands on. Cleared before the
 /// mapping goes away, which catches a use after destroy.
 pub const FIBER_MAGIC: u64 = 0xF1BE_4A11_0000_F00D;
 
@@ -26,25 +26,29 @@ pub const FIBER_REGION = std.mem.alignForward(usize, @sizeOf(Fiber), std.heap.pa
 
 /// The fiber whose stack the caller is running on.
 ///
-/// A fiber's mapping is `STACK_SIZE`-aligned with the `Fiber` at its base, so
-/// masking the stack pointer finds it in two instructions with no memory access
-/// -- and, unlike a thread-local, it cannot go stale when a fiber resumes on a
-/// different OS thread.
+/// A fiber's mapping is `STACK_SIZE`-aligned with the `Fiber` at its base.
+/// Masking an address on the stack finds it with no memory access. Unlike a
+/// thread-local, the result stays correct when a fiber resumes on a different
+/// OS thread.
 ///
-/// Valid only on a mapped fiber stack. Generated Fearless code always is, which
-/// is what lets this skip any validity check. NOT valid on a worker's scheduler
-/// fiber, which runs on the OS thread stack.
+/// On aarch64, the address is `@frameAddress()`. LLVM knows that this value is
+/// constant in a function, so it computes the `Fiber` one time for each
+/// function and not for each inlined `tryPromote` poll. An `sp` read in asm
+/// prevents this. On x86_64, `@frameAddress()` forces a frame pointer in each
+/// generated function, so it is not free there.
+///
+/// Valid only on a mapped fiber stack. Generated Fearless code always runs on
+/// one. Not valid on a worker's scheduler fiber, which runs on the OS thread
+/// stack.
 pub inline fn currentFiber() *Fiber {
-	const sp: usize = switch (builtin.cpu.arch) {
+	const stack_addr: usize = switch (builtin.cpu.arch) {
 		.x86_64 => asm ("mov %%rsp, %[ret]"
 			: [ret] "=r" (-> usize),
 		),
-		.aarch64 => asm ("mov %[ret], sp"
-			: [ret] "=r" (-> usize),
-		),
+		.aarch64 => @frameAddress(),
 		else => @compileError("Unsupported architecture"),
 	};
-	const f: *Fiber = @ptrFromInt(sp & ~@as(usize, STACK_SIZE - 1));
+	const f: *Fiber = @ptrFromInt(stack_addr & ~@as(usize, STACK_SIZE - 1));
 	// Free in ReleaseFast. In a safe mode, a call from a non-fiber stack panics
 	// instead of corrupting memory.
 	if (std.debug.runtime_safety) {
@@ -56,9 +60,9 @@ pub inline fn currentFiber() *Fiber {
 /// The fiber the calling thread is running, or null on a worker's scheduler
 /// stack.
 ///
-/// For paths that may run off a fiber stack, where masking `sp` would land on
-/// unrelated memory. It costs the thread-local read that `currentFiber` avoids,
-/// so keep it off the hot paths. On the recovery stack it deliberately gives the
+/// For paths that may run off a fiber stack, where masking a stack address would
+/// land on unrelated memory. It costs the thread-local read that `currentFiber`
+/// avoids, so keep it off the hot paths. On the recovery stack it deliberately gives the
 /// *faulting* fiber, which is the one an unwind must walk.
 pub fn currentFiberOrNull() ?*Fiber {
 	const worker = @import("worker.zig").getCurrentWorker() orelse return null;
@@ -125,13 +129,14 @@ pub const Fiber = struct {
 	trace_frames: [if (build_options.trace_frames) TRACE_CAP else 0]TraceFrame = undefined,
 	trace_top: usize = 0,
 
-	/// APM tokens. Incremented by `tryPromote`, halved on a promotion attempt.
+	/// APM tokens.
 	///
-	/// Atomic because a thief credits it from its own thread while the owner runs:
-	/// each thief credits when its own work finishes, not when the parent joins.
-	/// The owner uses a relaxed load/store pair, so a credit that lands between
-	/// them is lost. APM 5.3 already forfeits the tokens of a fiber that never
-	/// fulfills, and a refund can only move tokens, never make them.
+	/// Atomic because a thief adds its join credit from its own thread when its
+	/// work ends, while the owner can still run. The owner does an unordered load
+	/// and store, not an atomic add, so a credit that lands between them is lost.
+	/// LLVM can keep the value in a register across inlined polls, so this window
+	/// can be many polls long. This is sound: APM 5.3 already forfeits the tokens
+	/// of a fiber that does not fulfill, and a refund only moves tokens.
 	tokens: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
 	/// False wherever promotion must be suppressed: a scheduler fiber, a fiber
@@ -149,7 +154,7 @@ pub const Fiber = struct {
 
 	/// The worker running this fiber, as its id plus one, or 0 for a fiber no
 	/// worker has picked up. The worker writes it before each switch in, so
-	/// reference counting reads it off the masked stack pointer rather than a
+	/// reference counting reads it off the masked stack address rather than a
 	/// thread-local.
 	worker_id: u32 = 0,
 
