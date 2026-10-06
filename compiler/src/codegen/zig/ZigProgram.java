@@ -175,8 +175,8 @@ class ZigProgramBuilder {
     sb.append('\n');
 
     for (var pkgName : packageFiles.keySet()) {
-      var fieldName = "pkg_" + pkgName.replace(".", "_");
-      var fileName = pkgName.replace(".", "_") + ".zig";
+      var fieldName = "pkg_" + ZigStringIds.manglePkg(pkgName);
+      var fileName = ZigStringIds.manglePkg(pkgName) + ".zig";
       sb.append("pub const ").append(fieldName).append(" = @import(\"generated/").append(fileName).append("\");\n");
     }
     sb.append('\n');
@@ -195,7 +195,7 @@ class ZigProgramBuilder {
   private void appendReExportIfPresent(StringBuilder sb, ZigSingleCodegen gen, String vtName, Id.DecId decId) {
     var owningPkg = gen.typeToPackage.get(decId);
     if (owningPkg != null && packageFiles.containsKey(owningPkg)) {
-      var fieldName = "pkg_" + owningPkg.replace(".", "_");
+      var fieldName = "pkg_" + ZigStringIds.manglePkg(owningPkg);
       sb.append("pub const ").append(vtName).append(" = &").append(fieldName).append(".").append(vtName).append(";\n");
     }
   }
@@ -214,7 +214,7 @@ class ZigProgramBuilder {
     var entryPkg = gen.typeToPackage.get(entryDecId);
     String entryVtRef;
     if (entryPkg != null) {
-      entryVtRef = "pkg_" + entryPkg.replace(".", "_") + ".VT_" + entryVtName;
+      entryVtRef = "pkg_" + ZigStringIds.manglePkg(entryPkg) + ".VT_" + entryVtName;
     } else {
       entryVtRef = "VT_" + entryVtName;
     }
@@ -248,15 +248,29 @@ class ZigProgramBuilder {
       var llistPkg = gen.typeToPackage.get(llistDecId);
       String llistVtRef;
       if (llistPkg != null) {
-        llistVtRef = "pkg_" + llistPkg.replace(".", "_") + ".VT_" + llistVtName;
+        llistVtRef = "pkg_" + ZigStringIds.manglePkg(llistPkg) + ".VT_" + llistVtName;
       } else {
         llistVtRef = "VT_" + llistVtName;
       }
-      sb.append("const args = rt.obj_k_singleton(&").append(llistVtRef).append(");\n");
+      // The list holds the process arguments after the program name. Pushing from the last
+      // argument to the first keeps their order. `pushFront` borrows its receiver and its
+      // argument, so the loop releases each string and each superseded list.
+      sb.append("const argv = process.launch_args();\n");
+      sb.append("var args = rt.obj_k_singleton(&").append(llistVtRef).append(");\n");
+      sb.append("var i: usize = argv.len;\n");
+      sb.append("while (i > 1) {\n");
+      sb.append("i -= 1;\n");
+      sb.append("const arg = str_rt.make_str_copy(std.mem.span(argv[i]));\n");
+      sb.append("const next = rt.call(args, comptime rt.hash_signature(\"imm .pushFront/1\"), .{arg}, @src());\n");
+      sb.append("arg.rc_decrement();\n");
+      sb.append("args.rc_decrement();\n");
+      sb.append("args = next;\n");
+      sb.append("}\n");
       sb.append("const result = rt.call(entry, ").append(hashExpr).append(", .{args}, @src());\n");
       sb.append("const str_data = str_rt.deref_str(result);\n");
       sb.append("_ = std.posix.system.write(std.posix.STDOUT_FILENO, str_data.ptr, str_data.len);\n");
       sb.append("_ = std.posix.system.write(std.posix.STDOUT_FILENO, \"\\n\", 1);\n");
+      sb.append("args.rc_decrement();\n");
     }
 
     sb.append("worker_mod.global_done.store(true, .release);\n");

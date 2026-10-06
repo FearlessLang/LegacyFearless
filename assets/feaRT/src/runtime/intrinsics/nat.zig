@@ -202,8 +202,8 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
 		h("imm .bitwiseOr/1") => bitwise_or(self, args[0]),
 		h("imm .offset/1") => offset(self, args[0]),
 		h("read .hash/1") => hash(self, args[0]),
-		h("imm .assertEq/1") => num_assert.assert_eq("_NatAssertionHelper_0", self, args[0]),
-		h("imm .assertEq/2") => num_assert.assert_eq_msg("_NatAssertionHelper_0", self, args[0], args[1]),
+		h("imm .assertEq/1") => num_assert.assert_eq("_ZuNatAssertionHelper_0", self, args[0]),
+		h("imm .assertEq/2") => num_assert.assert_eq_msg("_ZuNatAssertionHelper_0", self, args[0], args[1]),
 		else => objs.primitive_dispatch_failed(VT_Nat.type_name, target_method),
 	};
 }

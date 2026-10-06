@@ -12,7 +12,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.TreeSet;
 
-/// Turns a short-circuiting boolean operator into the same branch `.if` becomes.
+/// Turns a short-circuiting boolean operator into the same conditional `BoolIf` produces.
 ///
 /// Every `&&` and `||` implementation in `base` is `.if`-shaped, so the call costs two dispatches
 /// where a branch on the receiver's vtable does the same work. The thunk is a literal at the call

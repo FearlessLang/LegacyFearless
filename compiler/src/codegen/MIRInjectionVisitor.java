@@ -44,11 +44,6 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     }
   }
 
-  /// `declaredTs` and `bounds` are what the cycle collector's green analysis needs and what
-  /// {@link MIR.MT} cannot hold: the type a name was declared with, and the bounds of the
-  /// generics in scope. Lowering keeps a generic's use-site modifier and drops the generic, so
-  /// the answer has to be taken here, where both are still present. Both are keyed by the
-  /// source-level name, the way `xXs` is.
   public record Ctx(Map<String, MIR.X> xXs, Map<String, T> declaredTs, XBs bounds) {
     public static Ctx EMPTY = new Ctx();
     public Ctx {
@@ -63,7 +58,6 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     }
     private Ctx() { this(Map.of(), Map.of(), XBs.empty()); }
 
-    /// Whether the name `x` was declared with a type that admits only `imm` values.
     public boolean isImm(String x) {
       return ImmGuaranteed.of(declaredTs.get(x), bounds);
     }
@@ -173,8 +167,6 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     var sig = visitSig(cm);
     var captures = captures(cm.m(), ctx);
 
-    // Gamma uses source-level names, because bodies refer to params by their name before the
-    // renaming. A "_" param has no name, so it stays out of Gamma.
     var mCtx = ctx.with(
       Mapper.of(xXs->{
         xXs.putAll(ctx.xXs());
@@ -191,7 +183,6 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
       ctx.bounds().addBounds(cm.sig().gens(), cm.sig().bounds()));
 
     var x = ctx.xXs().get(selfNameOf(cm.c().name()));
-    // The self-arg is always present, also when it is not captured, to keep the signatures equal
     Stream<MIR.X> selfArg =Stream.of(x);
     var args = Streams.of(sig.xs().stream(), selfArg, captures.stream().filter(xi->!xi.name().equals(x.name()))).toList();
 
@@ -201,7 +192,6 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     return new TopLevelRes(bodyRes.defs(), Push.of(bodyRes.funs(), fun));
   }
   public MIR.Meth visitMeth(CM.CoreCM cm, MIR.Sig sig) {
-    // An uncallable method can be abstract
     if (cm.isAbs()) {
       return new MIR.Meth(cm.c().name(), sig, false, Collections.emptySortedSet(), Optional.empty());
     }
@@ -283,42 +273,52 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     return p.of(d).lambda().selfName();
   }
 
+  private EnumSet<MIR.MCall.CallVariant> flowVariants(
+      MIR.MCall.CallVariant first, MIR.MCall.CallVariant... rest) {
+    var variants = EnumSet.of(first, rest);
+    if (System.getenv("FEARLESS_SEQ_FLOWS") == null) { return variants; }
+    variants.remove(MIR.MCall.CallVariant.DataParallelFlow);
+    variants.remove(MIR.MCall.CallVariant.PipelineParallelFlow);
+    if (variants.isEmpty()) { variants.add(MIR.MCall.CallVariant.Standard); }
+    return variants;
+  }
+
   private EnumSet<MIR.MCall.CallVariant> getVariants(MIR.E recv, E.MCall e) {
     var recvT = (MIR.MT.Usual) recv.t();
     var recvIT = recvT.it();
     Optional<String> literal = Magic.getLiteral(p, recvIT.name());
     var isStrFlowSource = e.name().name().equals(".codepoints") || e.name().name().equals(".graphemes");
     if (isStrFlowSource && (literal.map(Magic::isStringLiteral).orElse(recvIT.name().equals(Magic.Str)))) {
-      return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
+      return flowVariants(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
     }
     if (e.name().name().equals(".flow")) {
       if (recvIT.name().equals(new Id.DecId("base.LList", 1))) {
         var flowElem = recvIT.ts().getFirst();
         if (recvT.mdf().is(Mdf.read, Mdf.imm)) {
-          return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
+          return flowVariants(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
         }
         if (flowElem.mdf().is(Mdf.read, Mdf.imm, Mdf.readImm)) {
-          return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
+          return flowVariants(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
         }
         return EnumSet.of(MIR.MCall.CallVariant.Standard);
       }
       if (recvIT.name().equals(Magic.UList)) {
         var flowElem = recvIT.ts().getFirst();
         if (recvT.mdf().is(Mdf.read, Mdf.imm)) {
-          return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
+          return flowVariants(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
         }
         if (flowElem.mdf().is(Mdf.read, Mdf.imm)) {
-          return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
+          return flowVariants(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
         }
         return EnumSet.of(MIR.MCall.CallVariant.Standard);
       }
       if (recvIT.name().equals(Magic.FList)) {
         var flowElem = recvIT.ts().getFirst();
         if (recvT.mdf().is(Mdf.read, Mdf.imm)) {
-          return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
+          return flowVariants(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
         }
         if (flowElem.mdf().is(Mdf.read, Mdf.imm)) {
-          return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
+          return flowVariants(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow);
         }
         return EnumSet.of(MIR.MCall.CallVariant.Standard);
       }
@@ -326,21 +326,19 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     if (recvIT.name().equals(Magic.FlowK) && e.name().name().equals("#")) {
       var flowElem = e.ts().getFirst();
       if (flowElem.mdf().is(Mdf.read, Mdf.imm)) {
-        return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
+        return flowVariants(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
       }
     }
     if (recvIT.name().equals(Magic.FlowK) && (e.name().name().equals(".ofIso") || e.name().name().equals(".ofIsos"))) {
-      return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
+      return flowVariants(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
     }
     if (recvIT.name().equals(Magic.FlowK) && e.name().equals(new Id.MethName(".range", 2))) {
-      return EnumSet.of(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
+      return flowVariants(MIR.MCall.CallVariant.DataParallelFlow, MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
     }
     if (recvIT.name().equals(Magic.FlowK) && e.name().equals(new Id.MethName(".range", 1))) {
-      return EnumSet.of(MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
+      return flowVariants(MIR.MCall.CallVariant.PipelineParallelFlow, MIR.MCall.CallVariant.SafeMutSourceFlow);
     }
 
-    // `.merge` and `.mergeFold` are always parallelisable. `ComputeVPFMode` refuses them on its
-    // own, because their args are `mut` methods on `this`. See `base.flows._FeartDriver`.
     if (recvIT.name().equals(Magic.FeartDriver) && (e.name().equals(new Id.MethName(".merge", 2))
       || e.name().equals(new Id.MethName(".merge", 3))
       || e.name().equals(new Id.MethName(".mergeFold", 3)))) {
@@ -365,8 +363,6 @@ public class MIRInjectionVisitor implements CtxVisitor<MIRInjectionVisitor.Ctx, 
     fv.visitMeth(m);
     return Collections.unmodifiableSortedSet(fv.res());
   }
-  /// The captures the type system answered `imm` for, by the name they carry in the capture
-  /// set. A name it has no answer for stays out, which reads as "not proved" downstream.
   private Set<String> immCaptures(Collection<String> freeVariables, Ctx ctx) {
     return freeVariables.stream()
       .filter(ctx::isImm)

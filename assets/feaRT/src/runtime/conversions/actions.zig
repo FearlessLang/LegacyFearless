@@ -1,4 +1,3 @@
-//! Generate VTables for base.Action/1 for usage from intrinsic/native code
 
 const objs = @import("../objs.zig");
 const pb = @import("root").pkg_base;
@@ -6,13 +5,8 @@ const pb = @import("root").pkg_base;
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
 
-/// Signature of a native `Action.run`. Takes ownership of `self` (the receiver
-/// is consumed by the call), dispatches to the `ActionMatch` `m`, and returns
-/// `m`'s result.
 pub const RunFn = *const fn (self: FatPtr, m: FatPtr) callconv(.c) FatPtr;
 
-// The default `base.Action` bodies take the receiver last (as `this`), so each
-// trampoline forwards `(arg..., self)` to the emitted `_Zfun` static.
 fn map(self_m: FatPtr, f_m: FatPtr) callconv(.c) FatPtr {
     return pb.Action_1__Zdotmap_1_mut_Zfun(f_m, self_m);
 }
@@ -26,16 +20,12 @@ fn bang(self_m: FatPtr) callconv(.c) FatPtr {
     return pb.Action_1__Zbang_0_mut_Zfun(self_m);
 }
 fn ok(self_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__Zdotok_0_mut_Zfun(self_m);
+    return pb.Action_1__Zdotok_0_mut_Zfun_boxed(self_m);
 }
 fn info(self_m: FatPtr) callconv(.c) FatPtr {
-    return pb.Action_1__Zdotinfo_0_mut_Zfun(self_m);
+    return pb.Action_1__Zdotinfo_0_mut_Zfun_boxed(self_m);
 }
 
-/// Build the VTable for a native `base.Action[T]` whose only bespoke pieces are
-/// `run` and `drop_fn`. `type_name` should follow the `<runtime ...>`
-/// convention: the instance is a fresh anonymous type implementing
-/// `base.Action/1`, not `base.Action/1` itself.
 pub fn ActionVTable(
     comptime type_name: []const u8,
     comptime run: RunFn,

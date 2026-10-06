@@ -1,4 +1,4 @@
-package codegen.optimisations;
+package codegen.zig;
 
 import codegen.MIR;
 
@@ -9,8 +9,9 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-/// The functions codegen reaches as an arm of a branch that never builds the literal the arm
-/// belongs to, and the parameter slot that stands in for its receiver.
+/// A map from Mearless functions used as conditional arms to the index of the receiver parameter,
+/// which takes a stand-in singleton when `BoolIf`/`SumMatch` call the arm without building its
+/// matcher literal.
 ///
 /// `BoolIfOptimisation` replaces a call to `Bool.if` with a test on the condition's vtable and a
 /// call to the selected arm, and `SumMatchOptimisation` does the same for a matcher literal. No

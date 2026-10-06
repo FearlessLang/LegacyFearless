@@ -4,7 +4,10 @@ import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import utils.Base;
 
+import java.util.List;
+
 import static codegen.zig.RunZigProgramTests.ok;
+import static codegen.zig.RunZigProgramTests.okWithArgs;
 import static utils.RunOutput.Res;
 
 public class TestZigProgramImm {
@@ -48,6 +51,15 @@ public class TestZigProgramImm {
         .else -> this#(n - 1) + (this#(n - 2))
         }
       }
+    """);}
+
+  @Test void oneLaunchArgumentGivesAListOfSizeOne() {
+    // The immutable `Main` takes the launch arguments as an `LList[Str]`. One launch argument
+    // gives a list of size 1.
+    okWithArgs(new Res("1", "", 0), List.of("argument"), """
+    package test
+    alias base.Main as Main,
+    Test:Main{ args -> args.size.str }
     """);}
 
   @Disabled("A bit computationally heavy, but the test should always pass")

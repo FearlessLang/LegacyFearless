@@ -101,11 +101,13 @@ pub const Worker = struct {
 			const obl = self.obligation_pool[self.obligation_pool_len].?;
 			self.obligation_pool[self.obligation_pool_len] = null;
 			obl.* = JoinObligation.init();
+			op_counters.bump(.obligation_alloc);
 			log.trace_scheduling(.obl_alloc, @intFromPtr(obl), 0, self.id);
 			return obl;
 		}
 		const obl = gc.allocator.create(JoinObligation) catch return null;
 		obl.* = JoinObligation.init();
+		op_counters.bump(.obligation_alloc);
 		log.trace_scheduling(.obl_alloc, @intFromPtr(obl), 0, self.id);
 		return obl;
 	}
@@ -129,6 +131,7 @@ pub const Worker = struct {
 	}
 
 	pub fn recycleObligation(self: *Worker, obl: *JoinObligation) void {
+		op_counters.bump(.obligation_free);
 		if (self.obligation_pool_len < OBL_POOL_CAP) {
 			self.obligation_pool[self.obligation_pool_len] = obl;
 			self.obligation_pool_len += 1;
@@ -389,6 +392,37 @@ pub const WorkerPool = struct {
 
 		for (self.threads) |t| {
 			t.join();
+		}
+
+		if (op_counters.ENABLED) self.settle();
+	}
+
+	/// Retires the work that is still queued when the workers stop. The operation
+	/// counters at exit then show only the objects that the program did not
+	/// release.
+	///
+	/// This function runs only after every worker thread has stopped, so one
+	/// thread touches every deque and every merge queue.
+	///
+	/// A task that is still in a deque lost its claim to its promoter. It holds a
+	/// retained copy of the locals. This function retires each such task and
+	/// releases that copy.
+	///
+	/// Then this function releases the objects in every merge queue. One release
+	/// can put an object on the merge queue of another worker, so the drain
+	/// repeats until all merge queues are empty.
+	fn settle(self: *WorkerPool) void {
+		for (self.workers) |*worker| {
+			while (worker.task_queue.take()) |task| worker.recycleTask(task);
+		}
+		var drained = true;
+		while (drained) {
+			drained = false;
+			for (self.workers) |*worker| {
+				if (worker.merge_queue_head.load(.monotonic) == null) continue;
+				objs.drainMergeQueue(&worker.merge_queue_head, worker.workerId());
+				drained = true;
+			}
 		}
 	}
 };

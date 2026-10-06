@@ -16,7 +16,6 @@ pub const IsoCell = extern struct {
     value: std.atomic.Value(?*FatPtr),
 };
 
-/// Enumerates the one reference the pod holds, for the cycle collector.
 fn isopod_trace(node: *anyopaque, visit: objs.VisitFn, ctx: *anyopaque) callconv(.c) void {
     const cell: *IsoCell = @ptrCast(@alignCast(node));
     if (cell.value.load(.monotonic)) |box| visit(ctx, box.*);
@@ -31,8 +30,6 @@ pub const VT_IsoPod: objs.VTable = .{
     .trace_fn = isopod_trace,
 };
 
-/// Takes `value` on loan and keeps one reference of its own. See
-/// [`FatPtr.box_transient`] for why the order is `share` then `box_transient`.
 pub fn make(value: FatPtr) FatPtr {
     const val_ptr = gc.allocator.create(FatPtr) catch @panic("OOM");
     val_ptr.* = value.share().box_transient();
@@ -44,13 +41,10 @@ pub fn make(value: FatPtr) FatPtr {
     return .{ .data = .{ .iso_cell = cell }, .vt = &VT_IsoPod };
 }
 
-/// Releases the one reference a dead pod holds. Part of the collector's
-/// `Release`, which runs as soon as the count reaches zero.
 pub fn drop_children(cell: *IsoCell, releasing_worker_id: u32) void {
     if (cell.value.load(.monotonic)) |box| box.*.rc_decrement_as(releasing_worker_id);
 }
 
-/// Gives a dead pod's storage back. Part of the collector's `Free`.
 pub fn free_cell(cell: *IsoCell, releasing_worker_id: u32) void {
     _ = releasing_worker_id;
     if (cell.value.swap(null, .monotonic)) |box| gc.recycleDestroy(FatPtr, box, .isopod_release);
@@ -62,8 +56,6 @@ fn is_alive(self: FatPtr) FatPtr {
     return bool_intrinsics.to_bool(val != null);
 }
 
-/// Borrows the viewer and lends it the stored value. The pod holds that value
-/// and outlives the call, so the arm needs no reference of its own.
 fn peek(self: FatPtr, viewer: FatPtr) FatPtr {
     const val = self.data.iso_cell.value.load(.monotonic);
     if (val) |ptr| {
@@ -93,7 +85,6 @@ fn consume(self: FatPtr) FatPtr {
     unreachable;
 }
 
-/// Borrows `new_value` and keeps it, releasing the reference it replaces.
 fn next(self: FatPtr, new_value: FatPtr) FatPtr {
     cycles.noteStore(self, new_value);
     const cell = self.data.iso_cell;
@@ -122,11 +113,25 @@ const VT_TestVoid: objs.VTable = .{
     .storage_mode = .singleton,
 };
 
-/// Call the generated Fearless body of an IsoPod method.
 fn fearlessBody(comptime name: []const u8, args: anytype) FatPtr {
     if (comptime @hasDecl(root, "pkg_base")) {
         if (comptime @hasDecl(root.pkg_base, name)) {
-            return @call(.auto, @field(root.pkg_base, name), args);
+            const res = @call(.auto, @field(root.pkg_base, name), args);
+            if (comptime @TypeOf(res) != FatPtr) @compileError(name ++ " must return a FatPtr");
+            return res;
+        }
+    }
+    @panic("This base has no Fearless body for the requested IsoPod method");
+}
+
+/// Bool is a scalar sum: a `u8` tag in variant name order, so `False` is 0 and `True` is 1.
+fn fearlessBoolBody(comptime name: []const u8, args: anytype) FatPtr {
+    if (comptime @hasDecl(root, "pkg_base")) {
+        if (comptime @hasDecl(root.pkg_base, name)) {
+            const res = @call(.auto, @field(root.pkg_base, name), args);
+            if (comptime @TypeOf(res) != u8) @compileError(name ++ " must return a u8 Bool tag");
+            if (res == 0) return objs.obj_k_singleton(&root.pkg_base.VT_False_0);
+            return objs.obj_k_singleton(&root.pkg_base.VT_True_0);
         }
     }
     @panic("This base has no Fearless body for the requested IsoPod method");
@@ -139,7 +144,7 @@ pub fn dispatch(comptime target_method: u64, self: FatPtr, args: anytype) FatPtr
         h("mut !/0") => consume(self),
         h("mut .next/1") => next(self, args[0]),
         h("read .look/1") => fearlessBody("IsoPod_1__Zdotlook_1_read_Zfun", .{ args[0], self }),
-        h("read .isDead/0") => fearlessBody("IsoPod_1__ZdotisDead_0_read_Zfun", .{self}),
+        h("read .isDead/0") => fearlessBoolBody("IsoPod_1__ZdotisDead_0_read_Zfun", .{self}),
         h("mut .consume/1") => fearlessBody("IsoPod_1__Zdotconsume_1_mut_Zfun", .{ args[0], self }),
         h("mut :=/1") => fearlessBody("IsoPod_1__Zcolon_Zeq_1_mut_Zfun", .{ args[0], self }),
         h("mut .mutate/1") => fearlessBody("IsoPod_1__Zdotmutate_1_mut_Zfun", .{ args[0], self }),
@@ -162,9 +167,6 @@ test "IsoPod consume transfers exactly once and next releases overwritten value"
     var pod = make(a);
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
 
-    // `consume` and `next` borrow their receiver and their value alike: neither
-    // releases either. `next` keeps a share of its own for what it stores, so the
-    // counts below are the test's own reference plus the pod's.
     var consumed = consume(pod);
     try testing.expectEqual(@as(u32, 2), a.boxed_value().refCountForTest());
     consumed.rc_decrement();

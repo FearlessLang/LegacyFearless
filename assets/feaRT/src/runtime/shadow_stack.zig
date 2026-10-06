@@ -2,8 +2,9 @@ const std = @import("std");
 
 pub const MAX_SHADOW_DEPTH = 256;
 
-/// The application claimed this frame before the signal handler did. The value
-/// is `@ptrFromInt(alignof)` so it satisfies the pointer alignment.
+/// Marks a frame that its own fiber claimed. A promoted frame holds its join
+/// obligation instead. The value is `@ptrFromInt(alignof)` to satisfy pointer
+/// alignment.
 pub const CLAIMED: *JoinObligation = @ptrFromInt(@alignOf(JoinObligation));
 
 pub const JoinObligation = @import("sync/join_obligation.zig").JoinObligation;
@@ -18,42 +19,33 @@ const fiber_mod = @import("fiber.zig");
 const scope_mod = @import("scope.zig");
 
 pub const LocalsRetainHook = *const fn (*anyopaque, *anyopaque) void;
-/// Releases the reference-counted fields of a promoted frame's locals. The
-/// second argument is the worker to release on behalf of, because
-/// `Worker.recycleTask` runs this off a fiber stack.
+/// Releases the reference-counted fields of the locals. The worker id is a
+/// parameter because `Worker.recycleTask` runs this off a fiber stack.
 pub const LocalsDropHook = *const fn (*anyopaque, releasing_worker_id: u32) void;
 
 pub const ShadowFrame = struct {
 	target_method: u64,
-	join_obligation: std.atomic.Value(?*JoinObligation),
+	join_obligation: ?*JoinObligation,
 	child_obligation: std.atomic.Value(?*JoinObligation),
 	locals: *anyopaque,
 	locals_size: usize,
 	retain_fn: LocalsRetainHook,
-	/// Called on drop by the reference counting system. It may never run if the
-	/// GC reclaims the object first, which only leaves the GC more to do later.
 	drop_fn: LocalsDropHook,
 	thief_fn: *const fn (*anyopaque, ?*JoinObligation) FatPtr,
-	/// The task a promotion of this frame published, so the owning fiber can take
-	/// the work back if nobody stole it. Only that fiber writes it; the thief
-	/// side never reaches the frame.
+	/// The published task, so the owning fiber can take back unstolen work. Only
+	/// the owning fiber writes it.
 	task: std.atomic.Value(?*worker_mod.StolenTask) = std.atomic.Value(?*worker_mod.StolenTask).init(null),
-	/// The cancellation scope in effect where the frame was pushed. A promotion
-	/// gives this to the thief, and not the scope the fiber has reached by then:
-	/// a nested flow terminal below this frame pushes a scope of its own and
-	/// cancels it on a short circuit, which must not reach the stolen work.
+	/// The cancellation scope at push time. The thief gets this scope, not the
+	/// current one: a nested flow terminal below this frame can cancel its own
+	/// scope, and that must not reach the stolen work.
 	scope: ?*scope_mod.Scope = null,
 };
 
-/// Both indices in one struct, so push, pop and the heartbeat reach them off a
-/// single fiber pointer.
 pub const ShadowCursor = struct {
 	top: usize = 0,
 
-	/// Promoted frames form a prefix: `pushFrame` appends an un-promoted frame at
-	/// `top` and promotion claims the lowest un-promoted frame, so `[0,
-	/// lowest_unpromoted)` is promoted and `[lowest_unpromoted, top)` is not.
-	/// `lowest_unpromoted >= top` is thus the whole "nothing to promote" test.
+	/// Promoted frames are a prefix: `[0, lowest_unpromoted)` is promoted and
+	/// `[lowest_unpromoted, top)` is not.
 	lowest_unpromoted: usize = 0,
 };
 
@@ -61,10 +53,9 @@ pub const TRACE_CAP = 256;
 
 /// Null off a fiber stack.
 ///
-/// Only `pushFrame` and `popAndClaim` mask the stack pointer directly, because
-/// only they are emitted per call and are always reached from generated code.
-/// Everything else resolves the fiber through the worker: a mask on a stack that
-/// is not a fiber's lands on unrelated memory rather than reading as absent.
+/// Only `pushFrame` and `popAndClaim` mask the stack pointer, because only
+/// generated code calls them. Other code must get the fiber from the worker: a
+/// mask on a non-fiber stack reads unrelated memory.
 pub fn getShadowStack() ?*[MAX_SHADOW_DEPTH]ShadowFrame {
 	const f = fiber_mod.currentFiberOrNull() orelse return null;
 	return &f.shadow_frames;
@@ -90,45 +81,45 @@ pub inline fn pushFrame(frame: ShadowFrame) ?usize {
 	return idx;
 }
 
-/// Null when this fiber claimed the frame, or the join obligation when a thief
-/// had already taken it.
+/// Null when this fiber claimed the frame. Otherwise the join obligation of the
+/// promotion.
 pub inline fn popAndClaim(frame_idx: usize) ?*JoinObligation {
 	const f = fiber_mod.currentFiber();
 	const cursor = &f.shadow_cursor;
 	const frame = &f.shadow_frames[frame_idx];
-	const prev = frame.join_obligation.cmpxchgStrong(null, CLAIMED, .acquire, .acquire);
+	// Plain, not atomic: only the owning fiber writes this field, and a fiber
+	// runs on one worker at a time. On migration, the `resume_gate`
+	// release/acquire pair publishes it, as for `ShadowCursor`.
+	const prev = frame.join_obligation;
+	if (prev == null) frame.join_obligation = CLAIMED;
 	cursor.top -= 1;
-	// The popped frame leaves the stack CLAIMED either way, so the prefix
-	// boundary follows the top down when every frame was promoted.
+	// Keeps the prefix boundary at or below `top`.
 	cursor.lowest_unpromoted = @min(cursor.lowest_unpromoted, cursor.top);
 	return if (prev) |obl| obl else null;
 }
 
-/// To the current worker's freelist, or `c_allocator.destroy` on a full pool.
 pub fn freeObligation(obl: *JoinObligation) void {
 	if (worker_mod.getCurrentWorker()) |w| {
 		w.recycleObligation(obl);
 	} else {
+		op_counters.bump(.obligation_free);
 		std.heap.c_allocator.destroy(obl);
 	}
 }
 
-/// Take back a promotion no worker picked up. True when this fiber won the race
-/// and must run the work itself; false when a thief owns it and the caller waits
-/// on `obligation` as usual.
+/// Takes back a promotion that no worker took. True: this fiber must run the
+/// work. False: a thief owns it, and the caller waits on `obligation`.
 ///
-/// The task cannot be retired underneath this call. A thief finishes only by
-/// waiting on the child obligation, which the caller fulfills strictly after a
-/// false return, so a lost claim leaves the task alive; a won claim leaves it in
-/// its queue for the dequeuing worker to retire.
+/// The task stays alive during this call. A thief finishes only after the
+/// caller fulfills the child obligation, which is after a false return. After a
+/// true return, the dequeuing worker retires the task.
 pub fn reclaimPromotion(frame_idx: usize, obligation: *JoinObligation) bool {
 	const frame = &getShadowStack().?[frame_idx];
 	const task = frame.task.load(.acquire) orelse return false;
 	if (task.claimed.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return false;
 
 	op_counters.bump(.promotion_reclaimed);
-	// The obligations belong to the winner: a thief that lost the claim never
-	// touches them, and nothing else holds either pointer.
+	// The winner owns both obligations. No other code holds them.
 	freeObligation(obligation);
 	if (frame.child_obligation.load(.acquire)) |child_obl| freeObligation(child_obl);
 	frame.child_obligation.store(null, .monotonic);

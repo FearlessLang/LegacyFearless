@@ -3,19 +3,22 @@ package codegen.zig;
 import codegen.MIR;
 import codegen.optimisations.RcFreeTypes;
 import id.Id.DecId;
+import utils.Bug;
 import visitors.MIRVisitor;
 
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-/// VPF (Very Parallel Fearless) codegen: finds the VPF-eligible calls of a function body
-/// and emits thief functions with shadow-frame instrumentation.
+/// Emits code for VPF-capable calls. The type checker certifies them ([ComputeVPFMode], criteria A/B).
+/// Each call pushes one promotable frame for its combiner. The runtime promotes the oldest frame when its fiber holds H tokens.
+/// A thief runs the stolen task. This class sets no promotion policy.
 class VPFCodegen {
   private final ZigSingleCodegen parent;
   private int vpfCounter = 0;
 
-  /// Must match StolenTask.locals_copy in worker.zig.
+  /// Maximum locals size in bytes to copy on promotion. Deepening stops above this size.
+  /// Equals the size of `locals_copy` in worker.zig.
   static final int LOCALS_COPY_LIMIT = 256;
 
   VPFCodegen(ZigSingleCodegen parent) {
@@ -24,17 +27,11 @@ class VPFCodegen {
 
   record VPFCallInfo(
     MIR.MCall vpfCall,
-    MIR.BoolExpr boolExpr, // null unless a BoolExpr wraps the call
-    List<SubExprInfo> subExprs, // receiver at index 0, then the args
-    List<SubExprInfo> plainExprs, // the sub-exprs that add no stack frame
+    MIR.BoolExpr boolExpr,
+    List<SubExprInfo> subExprs,
+    List<SubExprInfo> plainExprs,
     String hashName,
-    /// The one concrete receiver type, when devirtualisation resolved the combining call, so
-    /// the combiner calls the wrapper directly. The hash stays necessary: `pushFrame` reports
-    /// it as the target method.
     Optional<DecId> directTarget,
-    /// The one implementation the receiver type's own package writes, when the combining call
-    /// was guarded. The combiner tests the receiver vtable and calls that wrapper, and keeps
-    /// the virtual call for any other implementation.
     Optional<DecId> guardTarget
   ) {}
 
@@ -54,7 +51,7 @@ class VPFCodegen {
       case MIR.GuardedCall gc when gc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable) ->
         buildGuardedVPFInfo(gc);
       case MIR.BoolExpr boolExpr -> {
-        // The recursive case, and so the VPF call, is usually the else-branch.
+        // A VPF call can sit one if-level down, in the else arm.
         var elseFun = parent.funMap.get(boolExpr.else_());
         if (elseFun != null) {
           var inner = findVPFCallInner(elseFun.body());
@@ -68,8 +65,6 @@ class VPFCodegen {
     };
   }
 
-  /// True when the body holds a VPFParallelisable call, through a BoolExpr branch included.
-  /// Inlining such a branch would discard the branch function's instrumentation.
   boolean containsVPFCall(MIR.FName fName) {
     return containsVPFCall(fName, new HashSet<>());
   }
@@ -84,8 +79,6 @@ class VPFCodegen {
     return res;
   }
 
-  /// A VPF call in the receiver or args of another call is not reported, by design:
-  /// de-inlining a BoolExpr branch cannot help it, so searching there de-inlines too much.
   private boolean containsVPFCall(MIR.E body, Set<MIR.FName> visited) {
     return switch (body) {
       case MIR.Box box -> containsVPFCall(box.inner(), visited);
@@ -99,8 +92,16 @@ class VPFCodegen {
     };
   }
 
-  void emitVPFFun(MIR.Fun fun, String name, ZigSingleCodegen.FunSignature signature,
-                  List<ZigSingleCodegen.Drop> dropNames, VPFCallInfo vpf) {
+  /// Emits the parent side of a VPF join: pushes a promotable frame and computes r1, then combines
+  /// sequentially if never promoted, reclaims the task if unclaimed, else sends r1 and waits.
+  /// A call in an else arm returns the then value first.
+  void emitVPFFun(
+      MIR.Fun fun,
+      String name,
+      ZigSingleCodegen.FunSignature signature,
+      List<ZigSingleCodegen.Drop> dropNames,
+      VPFCallInfo vpf
+  ) {
     int vpfId = vpfCounter++;
     var localsName = name + "_" + vpfId + "_Locals";
     var thiefName = name + "_" + vpfId + "_thief";
@@ -111,7 +112,8 @@ class VPFCodegen {
     var funParamExprs = thiefParamExprs(fun);
 
     var localsFields = new StringBuilder(localsFieldDecls(fun));
-    localsFields.append("r1: rt.FatPtr,\n");
+    var firstResultExpr = frameAddingExprs.isEmpty() ? null : frameAddingExprs.getFirst().expr();
+    localsFields.append("r1: ").append(resultType(firstResultExpr)).append(",\n");
     parent.currentState().captureStructs.put(
       new DecId(localsName, 0),
       "const " + localsName + " = extern struct {\n" + localsFields + "};"
@@ -120,15 +122,32 @@ class VPFCodegen {
 
     var remaining = frameAddingExprs.subList(1, frameAddingExprs.size());
     if (remaining.size() >= 2 && canDeepenVPF(fun, 1)) {
-      emitVPFThiefFunction(thiefName, localsName, fun, vpf, frameAddingExprs,
-        remaining, funParamExprs, List.of());
+      emitVPFThiefFunction(
+        thiefName,
+        localsName,
+        fun,
+        vpf,
+        frameAddingExprs,
+        remaining,
+        funParamExprs,
+        List.of()
+      );
     } else {
-      emitSimpleThiefFunction(thiefName, localsName, fun, vpf, frameAddingExprs,
-        funParamExprs, List.of());
+      emitSimpleThiefFunction(
+        thiefName,
+        localsName,
+        fun,
+        vpf,
+        frameAddingExprs,
+        funParamExprs,
+        List.of()
+      );
     }
 
     var sb = new StringBuilder();
-    sb.append("pub fn ").append(name).append("(").append(params).append(") callconv(.c) rt.FatPtr {\n");
+    sb.append("pub fn ").append(name).append("(").append(params).append(") callconv(.c) ")
+      .append(parent.funResultShape(fun.name()).map(ZigSingleCodegen.Scalar::zigType).orElse("rt.FatPtr"))
+      .append(" {\n");
     sb.append(signature.prologue());
     if (!paramNames.isEmpty()) {
       sb.append("_ = .{ ");
@@ -136,7 +155,6 @@ class VPFCodegen {
       sb.append(" };\n");
     }
 
-    // Before the base-case check, so it always runs.
     sb.append("heartbeat.tryPromote();\n");
     for (var drop : dropNames) {
       sb.append("defer ").append(parent.generateDecrement(drop.name(), drop.t())).append(";\n");
@@ -145,9 +163,12 @@ class VPFCodegen {
     if (vpf.boolExpr != null) {
       var cond = vpf.boolExpr.condition().accept(parent, true);
       var thenBranch = vpf.boolExpr.then();
-      String thenBody = parent.deInlinedBranch(thenBranch, parent, true)
+      var deInlined = parent.deInlinedBranch(thenBranch, parent, true);
+      String thenBody = deInlined
         .orElseGet(() -> parent.returnExpr(parent.funMap.get(thenBranch).body(), true));
-      sb.append("if (").append(cond).append(".vt == &").append(parent.vtableRef(new DecId("base.True", 0))).append(") return ").append(thenBody).append(";\n");
+      sb.append("if (").append(parent.boolCondition(vpf.boolExpr.condition(), cond)).append(") return ")
+        .append(earlyReturnResult(fun, thenBranch, thenBody, deInlined.isPresent()))
+        .append(";\n");
     }
 
     sb.append("var locals = ").append(localsName).append("{ ");
@@ -159,10 +180,6 @@ class VPFCodegen {
     }
     sb.append(".r1 = undefined };\n");
 
-    // The slot for the first frame-adding expr, when its callee has a `_transient` variant.
-    // The declaration sits before the fence and its drop-defer at function scope, so the slot
-    // outlives the combiner and the wait on a stolen frame: `fulfillChildObligation` hands
-    // `locals.r1` to the thief by value and this fiber then blocks until the thief is done.
     var firstSlot = frameAddingExprs.isEmpty()
       ? Optional.<ZigSingleCodegen.VPFResultSlot>empty()
       : parent.vpfResultSlot(frameAddingExprs.getFirst().expr);
@@ -171,47 +188,43 @@ class VPFCodegen {
       sb.append(slot.dropDefer());
     });
 
-    // Writes the locals to memory before the frame push.
+    // Pins locals init before the push; a promotion can copy them at any nested call.
     sb.append("asm volatile (\"\" ::: .{ .memory = true });\n");
 
+    // The calls inside r1 can promote this frame, so the push comes first.
     emitPushFrame(sb, vpf.hashName, "locals", localsName, thiefName);
 
     if (!frameAddingExprs.isEmpty()) {
       if (firstSlot.isPresent()) {
         sb.append(firstSlot.get().operandStatements());
-        sb.append("locals.r1 = ").append(firstSlot.get().call()).append(";\n");
+        sb.append("locals.r1 = ").append(nativeResult(firstResultExpr, firstSlot.get().call(), parent)).append(";\n");
       } else {
         var firstExprCode = frameAddingExprs.getFirst().expr.accept(parent, true);
-        sb.append("locals.r1 = ").append(firstExprCode).append(";\n");
+        sb.append("locals.r1 = ").append(nativeResult(firstResultExpr, firstExprCode, parent)).append(";\n");
       }
     }
 
     sb.append("if (frame_idx_opt) |frame_idx| {\n");
     sb.append("    if (shadow_stack_mod.popAndClaim(frame_idx)) |obligation| {\n");
-    // A promotion nobody stole is cheaper to run here than to wait for: it skips the thief
-    // fiber and its stack, and bounds the population of promoted-but-unstolen tasks. A lost
-    // race means a thief owns the work, so fall through and wait.
     sb.append("        if (!shadow_stack_mod.reclaimPromotion(frame_idx, obligation)) {\n");
-    sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, locals.r1);\n");
+    sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, ")
+      .append(boxedResult(firstResultExpr, "locals.r1")).append(");\n");
     sb.append("        const wait_result = obligation.wait(worker_mod.getCurrentWorker().?);\n");
     sb.append("        shadow_stack_mod.freeObligation(obligation);\n");
-    // Usually the thief's combined result, but a thief that unwound fulfilled the obligation
-    // with a tag-typed error payload. Unwind again here, so the error goes up a level instead
-    // of entering the combiner as a value.
     sb.append("        if (error_rt.tagOf(wait_result) != .none) errors.feart_unwind(wait_result);\n");
-    sb.append("        return wait_result;\n");
+    sb.append("        return ").append(declaredResult(fun, Optional.empty(), "wait_result")).append(";\n");
     sb.append("        }\n");
     sb.append("    }\n");
     sb.append("}\n");
 
+    // Never promoted or reclaimed: compute the rest here.
     for (int i = 1; i < frameAddingExprs.size(); i++) {
       var expr = frameAddingExprs.get(i);
-      sb.append("const r").append(i + 1).append(" = ").append(expr.expr.accept(parent, true)).append(";\n");
+      var code = expr.expr.accept(parent, true);
+      sb.append("const r").append(i + 1).append(" = ").append(nativeResult(expr.expr, code, parent)).append(";\n");
     }
 
     var resultMap = new HashMap<Integer, String>();
-    // Every operand of the combining call is lent, so a value this frame built for it is
-    // this frame's to release once the call has returned.
     var owned = new ArrayList<ZigSingleCodegen.Drop>();
     for (int i = 0; i < frameAddingExprs.size(); i++) {
       var resultRef = i == 0 ? "locals.r1" : "r" + (i + 1);
@@ -221,9 +234,6 @@ class VPFCodegen {
         owned.add(new ZigSingleCodegen.Drop(resultRef, resultExpr.t()));
       }
     }
-    // The combining call lends every operand, receiver included, so a name passes as it
-    // stands and a value this frame builds is bound and released below. A value that needs no
-    // reference stays inline: a direct target's wrapper drops a receiver it does not need.
     for (var sub : vpf.plainExprs) {
       if (sub.expr instanceof MIR.X || parent.isRcFree(sub.expr)) {
         resultMap.put(sub.index, sub.expr.accept(parent, true));
@@ -240,13 +250,36 @@ class VPFCodegen {
     for (var drop : owned) {
       sb.append(parent.generateDecrement(drop.name(), drop.t())).append(";\n");
     }
-    sb.append("return ").append(combined).append(";\n");
+    sb.append("return ")
+      .append(declaredResult(fun, parent.scalarSumOf(vpf.vpfCall().t()), combined))
+      .append(";\n");
 
     sb.append("}");
     parent.currentState().functions.add(sb.toString());
   }
 
-  /// As findVPFCall, but does not look through a BoolExpr.
+  /// Converts an owned value to the declared result representation of `fun`.
+  /// `source` is the scalar that the value holds, or empty for a boxed value.
+  private String declaredResult(MIR.Fun fun, Optional<ZigSingleCodegen.Scalar> source, String code) {
+    var target = parent.funResultShape(fun.name());
+    if (target.isEmpty()) {
+      return source.map(scalar -> parent.toBoxedOwned(scalar, code)).orElse(code);
+    }
+    return source
+      .map(scalar -> parent.reshapeScalarOwned(scalar, target.orElseThrow(), code))
+      .orElseGet(() -> parent.toScalarOwned(target.orElseThrow(), code));
+  }
+
+  /// Converts the owned value of a conditional arm that returns early to the declared result representation of `fun`.
+  private String earlyReturnResult(MIR.Fun fun, MIR.FName arm, String code, boolean deInlined) {
+    if (deInlined) { return declaredResult(fun, parent.funResultShape(arm), code); }
+    var body = parent.funMap.get(arm).body();
+    var expression = body instanceof MIR.Block block ? block.original() : body;
+    return parent.funResultShape(fun.name())
+      .map(target -> parent.scalarOwned(target, expression, code, parent, true))
+      .orElseGet(() -> parent.boxedOwned(expression, code));
+  }
+
   private VPFCallInfo findVPFCallInner(MIR.E body) {
     if (body instanceof MIR.Box box) {
       return findVPFCallInner(box.inner());
@@ -268,8 +301,15 @@ class VPFCodegen {
 
   private VPFCallInfo buildGuardedVPFInfo(MIR.GuardedCall call) {
     var info = buildVPFInfo(call.original(), Optional.empty());
-    return new VPFCallInfo(info.vpfCall(), info.boolExpr(), info.subExprs(), info.plainExprs(),
-      info.hashName(), info.directTarget(), Optional.of(call.concreteType()));
+    return new VPFCallInfo(
+      info.vpfCall(),
+      info.boolExpr(),
+      info.subExprs(),
+      info.plainExprs(),
+      info.hashName(),
+      info.directTarget(),
+      Optional.of(call.concreteType())
+    );
   }
 
   private VPFCallInfo buildVPFInfo(MIR.MCall call, Optional<DecId> directTarget) {
@@ -280,34 +320,53 @@ class VPFCodegen {
       subExprs.add(new SubExprInfo(arg, isFrameAddingExpr(arg), i + 1));
     }
 
-    var sig = new MIR.Sig(call.name(),
+    var sig = new MIR.Sig(
+      call.name(),
       call.args().stream().map(a -> new MIR.X("_", a.t())).toList(),
-      call.originalRet());
+      call.originalRet()
+    );
     var hashExpr = parent.sigBuilder.inlineHash(sig);
 
     var plainExprs = subExprs.stream().filter(s -> !s.isFrameAdding).toList();
+    // Holds [isInfallibleExpr]: a plain part that can fail must not move past parts to its right.
+    plainExprs.stream()
+      .map(SubExprInfo::expr)
+      .filter(e -> !isInfallibleExpr(e))
+      .findFirst()
+      .ifPresent(e -> { throw Bug.of("VPF sub-expression " + e.getClass().getSimpleName()
+        + " can fail but is not frame-adding, so it would be reordered past the parts to its right"); });
     return new VPFCallInfo(call, null, subExprs, plainExprs, hashExpr, directTarget, Optional.empty());
   }
 
-  /// Only a call and a BoolExpr add a stack frame; a Box is transparent. A `DirectCall` and a
-  /// `GuardedCall` count, being the devirtualised forms of an `MCall`: leaving one out would drop
-  /// the shadow frame that lets a thief steal it.
   private boolean isFrameAddingExpr(MIR.E expr) {
     if (expr instanceof MIR.Box box) {
       return isFrameAddingExpr(box.inner());
     }
     return expr instanceof MIR.MCall || expr instanceof MIR.DirectCall
-      || expr instanceof MIR.GuardedCall || expr instanceof MIR.BoolExpr;
+      || expr instanceof MIR.GuardedCall || expr instanceof MIR.BoolExpr
+      || expr instanceof MIR.SumMatch;
   }
 
-  /// An instrumented thief: computes one sub-expr, then pushes a shadow frame for the inner
-  /// thief. Stolen, it waits for the inner thief's result; not stolen, it computes the
-  /// remaining sub-exprs in sequence.
-  private void emitVPFThiefFunction(String thiefName, String localsName, MIR.Fun fun,
-                                     VPFCallInfo vpf, List<SubExprInfo> allFrameAddingExprs,
-                                     List<SubExprInfo> remainingFrameAdding,
-                                     Map<String, String> funParamExprs,
-                                     List<String> forwardedChildOblFields) {
+  /// Codegen computes a plain part after all promotable parts, whatever its
+  /// position. This is sound only if the part cannot fail: its failure must win over a failure
+  /// on its right.
+  private static boolean isInfallibleExpr(MIR.E expr) {
+    if (expr instanceof MIR.Box(MIR.E inner)) { return isInfallibleExpr(inner); }
+    return expr instanceof MIR.X || expr instanceof MIR.CreateObj;
+  }
+
+  /// Emits a thief for one operand when a call has more than two promotable operands.
+  /// It computes its operand, pushes a frame for the remainder, then runs the tail which joins and combines.
+  private void emitVPFThiefFunction(
+      String thiefName,
+      String localsName,
+      MIR.Fun fun,
+      VPFCallInfo vpf,
+      List<SubExprInfo> allFrameAddingExprs,
+      List<SubExprInfo> remainingFrameAdding,
+      Map<String, String> funParamExprs,
+      List<String> forwardedChildOblFields
+  ) {
     int innerVpfId = vpfCounter++;
     var innerLocalsName = thiefName + "_" + innerVpfId + "_Locals";
     var innerThiefName = thiefName + "_" + innerVpfId + "_thief";
@@ -325,7 +384,7 @@ class VPFCodegen {
     var newFwdFieldName = "fwd_child_obl_" + forwardedChildOblFields.size();
     innerFields.append(newFwdFieldName).append(": usize,\n");
     newForwardedFields.add(newFwdFieldName);
-    innerFields.append("r_thief: rt.FatPtr,\n");
+    innerFields.append("r_thief: ").append(resultType(myExpr.expr())).append(",\n");
 
     parent.currentState().captureStructs.put(
       new DecId(innerLocalsName, 0),
@@ -335,11 +394,26 @@ class VPFCodegen {
 
     var innerRemaining = remainingFrameAdding.subList(1, remainingFrameAdding.size());
     if (innerRemaining.size() >= 2 && canDeepenVPF(fun, newForwardedFields.size())) {
-      emitVPFThiefFunction(innerThiefName, innerLocalsName, fun, vpf,
-        allFrameAddingExprs, innerRemaining, funParamExprs, newForwardedFields);
+      emitVPFThiefFunction(
+        innerThiefName,
+        innerLocalsName,
+        fun,
+        vpf,
+        allFrameAddingExprs,
+        innerRemaining,
+        funParamExprs,
+        newForwardedFields
+      );
     } else {
-      emitSimpleThiefFunction(innerThiefName, innerLocalsName, fun, vpf,
-        allFrameAddingExprs, funParamExprs, newForwardedFields);
+      emitSimpleThiefFunction(
+        innerThiefName,
+        innerLocalsName,
+        fun,
+        vpf,
+        allFrameAddingExprs,
+        funParamExprs,
+        newForwardedFields
+      );
     }
 
     int fwdCount = forwardedChildOblFields.size();
@@ -365,13 +439,14 @@ class VPFCodegen {
 
     emitPushFrame(sb, vpf.hashName, "thief_locals", innerLocalsName, innerThiefName);
 
-    sb.append("thief_locals.r_thief = ").append(myExpr.expr.accept(thiefGen, true)).append(";\n");
+    var myExprCode = myExpr.expr.accept(thiefGen, true);
+    sb.append("thief_locals.r_thief = ").append(nativeResult(myExpr.expr, myExprCode, thiefGen)).append(";\n");
 
-    // Stolen: give the result to the inner thief, then wait for its combined result.
     sb.append("if (frame_idx_opt) |frame_idx| {\n");
     sb.append("    if (shadow_stack_mod.popAndClaim(frame_idx)) |inner_obl| {\n");
     sb.append("        if (!shadow_stack_mod.reclaimPromotion(frame_idx, inner_obl)) {\n");
-    sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, thief_locals.r_thief);\n");
+    sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, ")
+      .append(boxedResult(myExpr.expr, "thief_locals.r_thief")).append(");\n");
     sb.append("        const wait_result = inner_obl.wait(worker_mod.getCurrentWorker().?);\n");
     sb.append("        shadow_stack_mod.freeObligation(inner_obl);\n");
     sb.append("        if (error_rt.tagOf(wait_result) != .none) errors.feart_unwind(wait_result);\n");
@@ -380,24 +455,23 @@ class VPFCodegen {
     sb.append("    }\n");
     sb.append("}\n");
 
-    emitThiefTail(sb, thiefGen, remainingFrameAdding.subList(1, remainingFrameAdding.size()),
-      allFrameAddingExprs, vpf, fwdCount, myGlobalIdx, forwardedChildOblFields);
+    emitThiefTail(
+      sb,
+      thiefGen,
+      remainingFrameAdding.subList(1, remainingFrameAdding.size()),
+      allFrameAddingExprs,
+      vpf,
+      fwdCount,
+      myGlobalIdx,
+      forwardedChildOblFields
+    );
 
     sb.append("}");
     parent.currentState().functions.add(sb.toString());
   }
 
-  /// A locals field that carries a reference count, with the storage-mode strategy its
-  /// reference-count operations take.
   private record LocalsField(String name, RcFreeTypes.Strategy strategy) {}
 
-  /// The retain and drop hooks a thief runs over a stolen frame's locals. A field that
-  /// carries no reference count is left out of both: it can be neither transient nor
-  /// counted, so the plain struct copy already transfers it correctly.
-  ///
-  /// The strategy comes from {@link ZigSingleCodegen#paramStrategy}, not from the field type
-  /// alone, because the receiver of a `BoolExpr` arm holds a stand-in singleton rather than a
-  /// value of its declared type.
   private void emitLocalsHooks(String localsName, MIR.Fun fun) {
     var args = fun.args();
     var shape = parent.funShape(fun.name());
@@ -415,6 +489,7 @@ class VPFCodegen {
       retain.append("_ = .{ copy, parent };\n");
     } else {
       for (var field : fatPtrFields) {
+        // A transient field lives on the parent stack, so box it before the copy shares it.
         retain.append("if (parent.").append(field.name()).append(".is_transient()) parent.").append(field.name()).append(" = parent.").append(field.name()).append(".box_transient();\n");
         retain.append("copy.").append(field.name()).append(" = ").append(parent.generateShare("parent." + field.name(), field.strategy())).append(";\n");
       }
@@ -423,9 +498,6 @@ class VPFCodegen {
     parent.currentState().functions.add(retain.toString());
 
     var drop = new StringBuilder();
-    // The worker comes in as a parameter rather than off the stack pointer:
-    // `Worker.recycleTask` drops a promotion's locals from the scheduler stack,
-    // where there is no fiber to read.
     drop.append("fn ").append(localsName).append("_drop(locals_ptr: *anyopaque, releasing_worker_id: u32) void {\n");
     drop.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
     if (fatPtrFields.isEmpty()) {
@@ -440,19 +512,30 @@ class VPFCodegen {
     parent.currentState().functions.add(drop.toString());
   }
 
-  /// The innermost thief: computes its sub-exprs in sequence, waits for its parent's
-  /// obligation and then the forwarded ones, and calls the full combiner.
-  private void emitSimpleThiefFunction(String thiefName, String localsName, MIR.Fun fun,
-                                        VPFCallInfo vpf, List<SubExprInfo> frameAddingExprs,
-                                        Map<String, String> funParamExprs,
-                                        List<String> forwardedChildOblFields) {
+  /// Emits the last thief. It computes the remaining operands, waits on all obligations, then combines.
+  private void emitSimpleThiefFunction(
+      String thiefName,
+      String localsName,
+      MIR.Fun fun,
+      VPFCallInfo vpf,
+      List<SubExprInfo> frameAddingExprs,
+      Map<String, String> funParamExprs,
+      List<String> forwardedChildOblFields
+  ) {
     var thiefGen = new ThiefCodegen(parent, funParamExprs);
     int fwdCount = forwardedChildOblFields.size();
 
-    // The body comes first, because it shows whether a locals decl is necessary.
     var body = new StringBuilder();
-    emitThiefTail(body, thiefGen, frameAddingExprs.subList(fwdCount + 1, frameAddingExprs.size()),
-      frameAddingExprs, vpf, fwdCount, -1, forwardedChildOblFields);
+    emitThiefTail(
+      body,
+      thiefGen,
+      frameAddingExprs.subList(fwdCount + 1, frameAddingExprs.size()),
+      frameAddingExprs,
+      vpf,
+      fwdCount,
+      -1,
+      forwardedChildOblFields
+    );
 
     var sb = new StringBuilder();
     sb.append("fn ").append(thiefName).append("(locals_ptr: *anyopaque, child_obl_opt: ?*JoinObligation) rt.FatPtr {\n");
@@ -467,34 +550,53 @@ class VPFCodegen {
     parent.currentState().functions.add(sb.toString());
   }
 
-  /// The shared tail of a thief function.
-  private void emitThiefTail(StringBuilder sb, ThiefCodegen thiefGen,
-                              List<SubExprInfo> exprsToCompute,
-                              List<SubExprInfo> allFrameAdding,
-                              VPFCallInfo vpf,
-                              int fwdCount, int myGlobalIdx,
-                              List<String> forwardedChildOblFields) {
+  private void emitThiefTail(
+      StringBuilder sb,
+      ThiefCodegen thiefGen,
+      List<SubExprInfo> exprsToCompute,
+      List<SubExprInfo> allFrameAdding,
+      VPFCallInfo vpf,
+      int fwdCount,
+      int myGlobalIdx,
+      List<String> forwardedChildOblFields
+  ) {
     for (var expr : exprsToCompute) {
       int globalIdx = allFrameAdding.indexOf(expr);
+      var code = expr.expr.accept(thiefGen, true);
       sb.append("const r").append(globalIdx + 1).append(" = ")
-        .append(expr.expr.accept(thiefGen, true)).append(";\n");
+        .append(nativeResult(expr.expr, code, thiefGen)).append(";\n");
     }
-    sb.append("const r1 = child_obl_opt.?.wait(worker_mod.getCurrentWorker().?);\n");
+    sb.append("const r1_boxed = child_obl_opt.?.wait(worker_mod.getCurrentWorker().?);\n");
     sb.append("shadow_stack_mod.freeObligation(child_obl_opt.?);\n");
-    // The parent's sub-expr value, or a tag-typed error if the parent unwound. Unwind again
-    // here to send it up.
-    sb.append("if (error_rt.tagOf(r1) != .none) errors.feart_unwind(r1);\n");
-    emitWaitForwardedObligations(sb, forwardedChildOblFields);
+    sb.append("if (error_rt.tagOf(r1_boxed) != .none) errors.feart_unwind(r1_boxed);\n");
+    var parentExpr = allFrameAdding.get(fwdCount).expr();
+    sb.append("const r1 = ").append(fromObligation(parentExpr.t(), "r1_boxed")).append(";\n");
+    emitWaitForwardedObligations(sb, forwardedChildOblFields, allFrameAdding);
     var resultMap = buildThiefCombinerMap(allFrameAdding, fwdCount, myGlobalIdx);
-    sb.append("return ").append(emitCombinerFromMap(vpf, resultMap, thiefGen)).append(";\n");
+    var owned = allFrameAdding.stream()
+      .filter(sub -> !parent.isRcFree(sub.expr()))
+      .map(sub -> new ZigSingleCodegen.Drop(resultMap.get(sub.index()), sub.expr().t()))
+      .collect(Collectors.toCollection(ArrayList::new));
+    for (var sub : vpf.plainExprs) {
+      if (sub.expr instanceof MIR.X || parent.isRcFree(sub.expr)) { continue; }
+      var tmp = parent.freshName("fear_vpf_arg_");
+      sb.append("const ").append(tmp).append(" = ").append(sub.expr.accept(thiefGen, true)).append(";\n");
+      resultMap.put(sub.index, tmp);
+      owned.add(new ZigSingleCodegen.Drop(tmp, sub.expr.t()));
+    }
+    var combined = parent.freshName("fear_vpf_res_");
+    sb.append("const ").append(combined).append(" = ")
+      .append(emitCombinerFromMap(vpf, resultMap, thiefGen)).append(";\n");
+    for (var drop : owned) {
+      sb.append(parent.generateDecrement(drop.name(), drop.t())).append(";\n");
+    }
+    sb.append("return ").append(boxedResult(vpf.vpfCall(), combined)).append(";\n");
   }
 
-  private void emitPushFrame(StringBuilder sb, String hashName,
-                              String localsVar, String localsTypeName,
-                              String thiefFnName) {
+  private void emitPushFrame(StringBuilder sb, String hashName, String localsVar, String localsTypeName, String thiefFnName) {
     sb.append("const frame_idx_opt = shadow_stack_mod.pushFrame(.{\n");
     sb.append("    .target_method = ").append(hashName).append(",\n");
-    sb.append("    .join_obligation = std.atomic.Value(?*JoinObligation).init(null),\n");
+    sb.append("    .join_obligation = null,\n");
     sb.append("    .child_obligation = std.atomic.Value(?*JoinObligation).init(null),\n");
     sb.append("    .locals = @ptrCast(&").append(localsVar).append("),\n");
     sb.append("    .locals_size = @sizeOf(").append(localsTypeName).append("),\n");
@@ -504,28 +606,30 @@ class VPFCodegen {
     sb.append("});\n");
   }
 
-  private void emitWaitForwardedObligations(StringBuilder sb,
-                                              List<String> forwardedChildOblFields) {
+  private void emitWaitForwardedObligations(StringBuilder sb, List<String> forwardedChildOblFields, List<SubExprInfo> frameAddingExprs) {
+    // The first error tag seen here unwinds, which selects the error that goes up, so keeps this order.
+    // VPF is an unobservable optimisation, so the error must match sequential left-to-right evaluation.
     for (int i = forwardedChildOblFields.size() - 1; i >= 0; i--) {
       var field = forwardedChildOblFields.get(i);
       sb.append("const fwd_obl_").append(i).append(": ?*JoinObligation = @ptrFromInt(locals.").append(field).append(");\n");
-      sb.append("const fwd_r").append(i).append(" = fwd_obl_").append(i).append(".?.wait(worker_mod.getCurrentWorker().?);\n");
-      sb.append("if (error_rt.tagOf(fwd_r").append(i).append(") != .none) errors.feart_unwind(fwd_r").append(i).append(");\n");
+      sb.append("const fwd_r").append(i).append("_boxed = fwd_obl_").append(i).append(".?.wait(worker_mod.getCurrentWorker().?);\n");
+      sb.append("shadow_stack_mod.freeObligation(fwd_obl_").append(i).append(".?);\n");
+      sb.append("if (error_rt.tagOf(fwd_r").append(i).append("_boxed) != .none) errors.feart_unwind(fwd_r")
+        .append(i).append("_boxed);\n");
+      sb.append("const fwd_r").append(i).append(" = ")
+        .append(fromObligation(frameAddingExprs.get(i).expr().t(), "fwd_r" + i + "_boxed")).append(";\n");
     }
   }
 
-  private Map<Integer, String> buildThiefCombinerMap(List<SubExprInfo> frameAddingExprs,
-                                                      int fwdCount, int myGlobalIdx) {
+  private Map<Integer, String> buildThiefCombinerMap(List<SubExprInfo> frameAddingExprs, int fwdCount, int myGlobalIdx) {
     var resultMap = new HashMap<Integer, String>();
 
-    // A forwarded obligation holds the sub-expr of the same index: fwd_child_obl_0 holds e0.
     for (int i = 0; i < fwdCount; i++) {
       resultMap.put(frameAddingExprs.get(i).index, "fwd_r" + i);
     }
 
     resultMap.put(frameAddingExprs.get(fwdCount).index, "r1");
 
-    // A simple thief computes no sub-expr of its own, so it has no index here.
     if (myGlobalIdx >= 0) {
       resultMap.put(frameAddingExprs.get(myGlobalIdx).index, "thief_locals.r_thief");
     }
@@ -542,12 +646,14 @@ class VPFCodegen {
 
   private String emitCombinerFromMap(VPFCallInfo vpf, Map<Integer, String> resultMap, MIRVisitor<String> codegen) {
     var allArgs = new String[vpf.subExprs.size()];
+    var nativeSums = new boolean[vpf.subExprs.size()];
     for (var sub : vpf.subExprs) {
       if (resultMap.containsKey(sub.index)) {
         allArgs[sub.index] = resultMap.get(sub.index);
+        // A frame-adding result and a variable hold the native sum. Each other operand holds a box.
+        nativeSums[sub.index] = (sub.isFrameAdding || sub.expr instanceof MIR.X)
+          && parent.scalarSumOf(sub.expr.t()).isPresent();
       } else {
-        // The combiner lends every operand, receiver and argument alike, so a locals field
-        // passes as it stands.
         allArgs[sub.index] = (sub.expr instanceof MIR.X x)
           ? "locals." + parent.id.varName(x.name())
           : sub.expr.accept(codegen, true);
@@ -565,20 +671,57 @@ class VPFCodegen {
       var all = new ArrayList<String>();
       all.add(recvStr);
       all.addAll(argStrs);
-      return parent.methWrapperRef(target, methName) + "("
-        + String.join(", ", parent.unboxArgs(target, vpf.vpfCall.name(), vpf.vpfCall.mdf(), all))
+      var prelude = new ArrayList<String>();
+      var direct = parent.methWrapperRef(target, methName) + "("
+        + String.join(
+          ", ",
+          parent.marshalWrapperArgs(target, vpf.vpfCall(), all, nativeSums, codegen, prelude)
+        )
         + ")";
+      return parent.withTransientPrelude(
+        prelude,
+        parent.guardedArm(target, vpf.vpfCall(), parent.scalarSumOf(vpf.vpfCall().t()), direct)
+      );
     }
     if (vpf.guardTarget.isPresent()) {
-      return emitGuardedCombiner(vpf, recvStr, argStrs);
+      return emitGuardedCombiner(vpf, recvStr, argStrs, nativeSums, codegen);
     }
-    var argsTuple = argStrs.isEmpty() ? ".{}" : ".{ " + String.join(", ", argStrs) + " }";
-    return "rt.call(" + recvStr + ", " + vpf.hashName + ", " + argsTuple + ", @src())";
+    var prelude = new ArrayList<String>();
+    var boxedArgs = new ArrayList<String>();
+    for (int i = 0; i < argStrs.size(); i++) {
+      boxedArgs.add(boxCombinerOperand(
+        vpf.vpfCall().args().get(i),
+        argStrs.get(i),
+        nativeSums[i + 1],
+        prelude
+      ));
+    }
+    var argsTuple = boxedArgs.isEmpty() ? ".{}" : ".{ " + String.join(", ", boxedArgs) + " }";
+    var result = "rt.call("
+      + boxCombinerOperand(vpf.vpfCall().recv(), recvStr, nativeSums[0], prelude) + ", "
+      + vpf.hashName + ", " + argsTuple + ", @src())";
+    var scalar = parent.scalarSumOf(vpf.vpfCall().t());
+    return parent.withTransientPrelude(prelude,
+      scalar.map(value -> parent.toScalarOwned(value, result)).orElse(result));
   }
 
-  /// The combining call of a guarded VPF site. Every operand binds to a name first, because
-  /// both arms read them and an operand that shares a reference must run once.
-  private String emitGuardedCombiner(VPFCallInfo vpf, String recvStr, List<String> argStrs) {
+  private String boxCombinerOperand(
+      MIR.E expression,
+      String code,
+      boolean nativeSum,
+      List<String> prelude
+  ) {
+    if (!nativeSum) { return parent.boxedBorrowed(expression, code, prelude); }
+    return parent.borrowedBox(parent.scalarSumOf(expression.t()).orElseThrow(), code, prelude);
+  }
+
+  private String emitGuardedCombiner(
+      VPFCallInfo vpf,
+      String recvStr,
+      List<String> argStrs,
+      boolean[] nativeSums,
+      MIRVisitor<String> codegen
+  ) {
     var target = vpf.guardTarget.get();
     var block = parent.freshName("fear_blk_");
     var names = new ArrayList<String>();
@@ -592,32 +735,64 @@ class VPFCodegen {
       sb.append("const ").append(argName).append(" = ").append(arg).append(";\n");
     }
     var argNames = names.subList(1, names.size());
-    var argsTuple = argNames.isEmpty() ? ".{}" : ".{ " + String.join(", ", argNames) + " }";
+    var boxPrelude = new ArrayList<String>();
+    var boxedArgs = new ArrayList<String>();
+    for (int i = 0; i < argNames.size(); i++) {
+      boxedArgs.add(boxCombinerOperand(
+        vpf.vpfCall().args().get(i),
+        argNames.get(i),
+        nativeSums[i + 1],
+        boxPrelude
+      ));
+    }
+    var argsTuple = boxedArgs.isEmpty() ? ".{}" : ".{ " + String.join(", ", boxedArgs) + " }";
+    var boxedRecv = boxCombinerOperand(vpf.vpfCall().recv(), recvName, nativeSums[0], boxPrelude);
     var methName = parent.id.getMName(vpf.vpfCall.mdf(), vpf.vpfCall.name());
+    var fallback = "rt.call(" + boxedRecv + ", " + vpf.hashName + ", " + argsTuple + ", @src())";
+    var resultScalar = parent.scalarSumOf(vpf.vpfCall().t());
+    if (resultScalar.isPresent()) {
+      fallback = parent.toScalarOwned(resultScalar.orElseThrow(), fallback);
+    }
+    var arm = parent.methWrapperRef(target, methName) + "("
+      + String.join(
+        ", ",
+        parent.marshalWrapperArgs(target, vpf.vpfCall(), names, nativeSums, codegen, boxPrelude)
+      ) + ")";
+    boxPrelude.forEach(line -> sb.append(line).append("\n"));
     sb.append("break :").append(block)
-      .append(" if (").append(parent.guardTest(recvName, target)).append(") ")
-      .append(parent.methWrapperRef(target, methName))
-      .append("(")
-      .append(String.join(", ",
-        parent.unboxArgs(target, vpf.vpfCall.name(), vpf.vpfCall.mdf(), names)))
-      .append(")")
-      .append(" else rt.call(").append(recvName).append(", ").append(vpf.hashName).append(", ")
-      .append(argsTuple).append(", @src());\n}");
+      .append(" if (").append(parent.guardTest(boxedRecv, target)).append(") ")
+      .append(parent.guardedArm(target, vpf.vpfCall(), resultScalar, arm))
+      .append(" else ").append(fallback).append(";\n}");
     return sb.toString();
   }
 
-  /// True when one more thief level keeps the locals inside the runtime buffer.
+  private String resultType(MIR.E expr) {
+    return expr == null ? "rt.FatPtr"
+      : parent.scalarSumOf(expr.t()).map(ZigSingleCodegen.Scalar::zigType).orElse("rt.FatPtr");
+  }
+
+  private String nativeResult(MIR.E expr, String code, MIRVisitor<String> gen) {
+    if (expr == null) { return code; }
+    return parent.scalarSumOf(expr.t())
+      .map(shape -> parent.scalarOwned(shape, expr, code, gen, true))
+      .orElse(code);
+  }
+
+  /// Boxes an owned result that moves into an obligation or a return. The box consumes the native value.
+  private String boxedResult(MIR.E expr, String code) {
+    if (expr == null) { return code; }
+    var shape = parent.scalarSumOf(expr.t());
+    return shape.map(value -> parent.toBoxedOwned(value, code)).orElse(code);
+  }
+
+  private String fromObligation(MIR.MT type, String code) {
+    return parent.scalarSumOf(type).map(value -> parent.toScalarOwned(value, code)).orElse(code);
+  }
+
   private boolean canDeepenVPF(MIR.Fun fun, int nextFwdCount) {
     return localsSize(fun, nextFwdCount) <= LOCALS_COPY_LIMIT;
   }
 
-  /// The bytes a `_Locals` of `fun` takes, laid out the way an `extern struct` lays its fields
-  /// out: one field per argument the shape keeps, `nextFwdCount` `usize` obligation fields, and
-  /// the trailing result `FatPtr`.
-  ///
-  /// A field is rounded up to its own alignment, so a `u8` between two `FatPtr`s costs eight
-  /// bytes and not one. Under-counting would let a frame past the runtime's copy buffer, which
-  /// the assert in `heartbeat.zig` catches at run time.
   int localsSize(MIR.Fun fun, int nextFwdCount) {
     var shape = parent.funShape(fun.name());
     int size = 0;
@@ -626,6 +801,7 @@ class VPFCodegen {
       if (slot.elided()) { continue; }
       size = align(size, slot.align()) + slot.bytes();
     }
+    // +16 for r1/r_thief, +8 per forwarded obligation.
     size = align(size, 8) + nextFwdCount * 8 + 16;
     return size;
   }
@@ -634,8 +810,6 @@ class VPFCodegen {
     return (offset + to - 1) / to * to;
   }
 
-  /// The fields a `_Locals` of `fun` declares for its arguments, following the shape the
-  /// function's own signature takes.
   private String localsFieldDecls(MIR.Fun fun) {
     var shape = parent.funShape(fun.name());
     var out = new StringBuilder();
@@ -648,9 +822,6 @@ class VPFCodegen {
     return out.toString();
   }
 
-  /// The expression a thief reads each parameter of `fun` back with. A thief holds its
-  /// parameters in the stolen locals struct, so a boxed one is a field read, an unboxed one is
-  /// that field boxed again, and an elided one is the singleton the arm never reads.
   private Map<String, String> thiefParamExprs(MIR.Fun fun) {
     var shape = parent.funShape(fun.name());
     var out = new LinkedHashMap<String, String>();
@@ -660,13 +831,12 @@ class VPFCodegen {
       var field = "locals." + parent.id.varName(arg.name());
       out.put(arg.name(), slot.elided()
         ? parent.standInSelf()
-        : slot.scalar().map(sc -> sc.rtModule() + ".make(" + field + ")").orElse(field));
+        : slot.scalar().map(sc -> sc.isSum() ? field : sc.rtModule() + ".make(" + field + ")")
+          .orElse(field));
     }
     return out;
   }
 
-  /// Gives each param name the "locals." prefix: a thief reads its params through the locals
-  /// struct pointer.
   static class ThiefCodegen implements MIRVisitor<String> {
     private final ZigSingleCodegen delegate;
     private final Map<String, String> paramExprs;
@@ -691,29 +861,17 @@ class VPFCodegen {
       return delegate.emitGuardedCall(call, this, checkMagic);
     }
     @Override public String visitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
-      // The parent emits the type, the vtable and the magic.
-      String parentResult = delegate.visitCreateObj(createObj, checkMagic);
-
-      if (createObj.captures().isEmpty()) { return parentResult; }
-      if (parentResult.contains("obj_k_singleton") || !parentResult.contains("obj_k(")) { return parentResult; }
-
-      // Rebuild the captures through this visitX, so each one takes the `locals.` prefix.
-      var objId = createObj.concreteT().id();
-      var captures = createObj.captures().stream()
-        .map(x -> "." + delegate.id.varName(x.name()) + " = " + this.visitX(x, checkMagic))
-        .collect(Collectors.joining(", "));
-      return "rt.obj_k(" + delegate.capturesRef(objId) + ", &" + delegate.vtableRef(objId) + ", .{ " + captures + " })";
+      return delegate.createObj(createObj, this, checkMagic);
     }
     @Override public String visitBoolExpr(MIR.BoolExpr expr, boolean checkMagic) {
       return delegate.boolExpr(expr, this, checkMagic, false);
     }
+    @Override public String visitSumMatch(MIR.SumMatch e, boolean checkMagic) {
+      return delegate.sumMatch(e, this, checkMagic);
+    }
     @Override public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
       var fRef = delegate.funRef(call.fun());
       var prelude = new ArrayList<String>();
-      // The callee lends every position, so a name passes as it stands and a value built here
-      // binds to a temporary the enclosing block releases. Statement-emitting operands bind to
-      // prelude temporaries in argument order, which keeps them evaluating left to right; only
-      // an owned value adds a `defer`.
       var args = call.args().stream()
         .map(a -> {
           if (delegate.isTransientCreateObj(a)) {

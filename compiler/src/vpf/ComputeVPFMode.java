@@ -6,7 +6,6 @@ import failure.FailOr;
 import id.Mdf;
 import program.typesystem.ETypeSystem;
 import program.typesystem.Gamma;
-import program.typesystem.TsT;
 
 import java.util.List;
 import java.util.Optional;
@@ -23,7 +22,6 @@ public interface ComputeVPFMode {
   /// B. All arguments except one can be type-checked in an environment where all mut, mutH, read, and readH bindings are
   /// not present in Gamma.
   static VPFCallMode of(ETypeSystem ts, E.MCall call) {
-    // must have at least 2 sub-calls (incl. receiver)
     var subCalls = callArgsInclRecv(call)
       .filter(e -> e instanceof E.MCall)
       .limit(2)
@@ -43,9 +41,10 @@ public interface ComputeVPFMode {
     return VPFCallMode.Sequential;
   }
 
-  /** Create a disposable ETypeSystem with a fresh resolvedCalls map so VPF probing doesn't corrupt the real one. */
+  /// A fresh resolvedCalls map, so VPF probes do not write to the real one.
   private static ETypeSystem disposableTs(ETypeSystem ts, Gamma g) {
-    return ETypeSystem.of(ts.p(), g, ts.xbs(), ts.expectedT(), new ConcurrentHashMap<>(), ts.cache(), ts.depth());
+    var restrictions = ts.callRestrictions().or(() -> Optional.of(ts.resolvedCalls()));
+    return ETypeSystem.of(ts.p(), g, ts.xbs(), ts.expectedT(), new ConcurrentHashMap<>(), ts.cache(), ts.depth(), restrictions);
   }
 
   private static VPFCallMode canPromoteNoMut(ETypeSystem ts, E.MCall call) {

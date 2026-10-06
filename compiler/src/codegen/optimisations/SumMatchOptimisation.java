@@ -18,7 +18,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-/// Turns a call on a church encoded sum into a test on the receiver.
+/// Turns a call on a church-encoded sum into a test on the receiver.
 ///
 /// `Opt` is the shape this is written for. Its two implementations each answer `.match` by
 /// forwarding straight to a method of the matcher: the empty one with `m.empty`, and the one
@@ -125,12 +125,15 @@ public class SumMatchOptimisation implements MIRCloneVisitor {
     if (params.isEmpty()) { return Optional.empty(); }
     if (!(unwrap(forward.recv()) instanceof MIR.X recv)) { return Optional.empty(); }
     if (!recv.name().equals(params.getFirst().name())) { return Optional.empty(); }
-    // Every argument of the forward must be a name the receiver carries, so a reader can take it
-    // off the receiver. Anything computed there would have to run before the arm, which is work
-    // this rewrite has nowhere to put.
+    // Every argument of the forward must be a capture of the receiver, so a reader can take it
+    // off the receiver. The receiver itself and the declared parameters are not captures.
+    // Anything computed there would have to run before the arm, which is work this rewrite has
+    // nowhere to put.
+    var carried = ImplInfo.receiverCaptures(fun.get());
     var captures = new ArrayList<String>();
     for (var arg : forward.args()) {
       if (!(unwrap(arg) instanceof MIR.X x)) { return Optional.empty(); }
+      if (!carried.contains(x.name())) { return Optional.empty(); }
       captures.add(x.name());
     }
     return Optional.of(new Forward(forward.name(), captures));
@@ -143,13 +146,21 @@ public class SumMatchOptimisation implements MIRCloneVisitor {
       .flatMap(f -> f.toName().map(to -> new Forward(to, f.args())));
   }
 
-  /// The arm a forward names, where the matcher writes that method with a body of its own.
+  /// The arm a forward names, where the matcher writes exactly one method of that name and arity,
+  /// with a body of its own.
+  ///
+  /// A forward read from the lowered program names its method with a receiver capability, so it
+  /// matches one method. A forward read from an implInfo names its method without one, so it
+  /// matches every method of that name and arity. A matcher can write two such methods when their
+  /// receiver capabilities differ. The forward does not say which of them the variant calls, so
+  /// the call stays dynamic.
   private Optional<MIR.SumArm> armFor(Id.DecId impl, MIR.CreateObj matcher, Forward forward) {
-    return matcher.meths().stream()
+    var named = matcher.meths().stream()
       .filter(m -> m.sig().name().equals(forward.to())
         && m.sig().name().num() == forward.captures().size())
-      .findFirst()
-      .flatMap(MIR.Meth::fName)
+      .toList();
+    if (named.size() != 1) { return Optional.empty(); }
+    return named.getFirst().fName()
       .map(armName -> new MIR.SumArm(impl, armName, forward.captures()));
   }
 

@@ -32,6 +32,11 @@ public record ZigBuildOpts(
     return new ZigBuildOpts(tokensThreshold, true, true, false, true);
   }
 
+  /// A copy of these options with `vpfEnabled` replaced.
+  public ZigBuildOpts withVpfEnabled(boolean vpfEnabled) {
+    return new ZigBuildOpts(tokensThreshold, vpfEnabled, stackTraces, debug, fastTestBuild);
+  }
+
   public String optimizeMode() {
     if (fastTestBuild) { return "Debug"; }
     return debug ? "ReleaseSafe" : "ReleaseFast";

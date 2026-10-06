@@ -29,17 +29,26 @@ public class RunZigProgramTests {
     assertResMatch(logicMain.run(), expected);
   }
   public static void okBase(Res expected, String... content) {
-    okBaseStrings(expected, Arrays.asList(content), null);
+    okBaseStrings(expected, Arrays.asList(content), ZigBuildOpts.forTests(null));
   }
   public static void okBase(Res expected, Path... content) {
-    okBaseStrings(expected, Arrays.stream(content).map(ResolveResource::read).toList(), null);
+    okBaseStrings(
+      expected,
+      Arrays.stream(content).map(ResolveResource::read).toList(),
+      ZigBuildOpts.forTests(null)
+    );
   }
-  /// As {@link #okBase(Res, String...)}, but it sets the heartbeat promotion threshold. A low
-  /// threshold makes VPF promote often, and thus tests the work-stealing joins.
+  /// As {@link #okBase(Res, String...)}, with a promotion threshold. A low threshold makes VPF
+  /// promote often, which tests the work-stealing joins.
   public static void okBase(int tokensThreshold, Res expected, String... content) {
-    okBaseStrings(expected, Arrays.asList(content), tokensThreshold);
+    okBaseStrings(expected, Arrays.asList(content), ZigBuildOpts.forTests(tokensThreshold));
   }
-  private static void okBaseStrings(Res expected, List<String> content, Integer tokensThreshold) {
+  /// As {@link #okBase(int, Res, String...)}, with VPF compiled out. Use it as the sequential
+  /// control.
+  public static void okBaseNoVpf(Res expected, String... content) {
+    okBaseStrings(expected, Arrays.asList(content), ZigBuildOpts.forTests(null).withVpfEnabled(false));
+  }
+  private static void okBaseStrings(Res expected, List<String> content, ZigBuildOpts buildOpts) {
     Main.resetAll();
     var verbosity = new CompilerFrontEnd.Verbosity(false, false, CompilerFrontEnd.ProgressVerbosity.None);
     var workingDir = ResolveResource.freshTmpPath(verbosity.printCodegen());
@@ -51,22 +60,19 @@ public class RunZigProgramTests {
       workingDir,
       ResolveResource.artefact("/cachedBase")
     );
-    var logicMain = LogicMainZig.of(io, verbosity, tokensThreshold, true);
+    var logicMain = LogicMainZig.of(io, verbosity, buildOpts);
     assertResMatch(logicMain.run(), expected);
   }
 
-  /// The Zig source that the last test compile in this fork generated for `pkg`. A test can
-  /// assert on the emitted code, which is necessary when the test must show that an optimisation
-  /// occurred.
+  /// The Zig source that the last test compile in this fork generated for `pkg`.
   public static String generatedZig(String pkg) {
     var dir = new ZigCompiler(null, null, ZigBuildOpts.forTests(null)).workDir().resolve("src/generated");
-    return IoErr.of(() -> Files.readString(dir.resolve(pkg.replace(".", "_") + ".zig")));
+    return IoErr.of(() -> Files.readString(dir.resolve(ZigStringIds.manglePkg(pkg) + ".zig")));
   }
 
-  /// As {@link #okBase(Res, String...)}, but it runs the binary in a new tmp dir that holds the
-  /// `fixtures` files, and gives `args` on the command line. The Zig backend does not set
-  /// `ProcessBuilder.directory`, so without this the binary uses the working directory of the
-  /// JVM and a relative path finds no fixture.
+  /// As {@link #okBase(Res, String...)}, but runs the binary with `args` in a new tmp dir that
+  /// holds `fixtures`. The Zig backend does not set `ProcessBuilder.directory`, so otherwise a
+  /// relative path resolves against the JVM working directory.
   public static void okBaseInDir(Res expected, Map<String, String> fixtures, List<String> args, String... content) {
     Main.resetAll();
     var verbosity = new CompilerFrontEnd.Verbosity(true, false, CompilerFrontEnd.ProgressVerbosity.None);

@@ -6,18 +6,15 @@ import utils.Base;
 import java.util.regex.Pattern;
 
 import static codegen.zig.RunZigProgramTests.okBase;
+import static codegen.zig.RunZigProgramTests.okBaseNoVpf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static utils.RunOutput.Res;
 
-/// The behaviour of a VPF join point under forced promotion. RSum is a divide-and-conquer range
-/// sum. Its combiner {@code this#(lo, mid) + (this#(mid, hi))} has two recursive sub-calls, and
-/// is thus VPF-parallelisable. The low promotion threshold of {@code okBase(16, ...)} makes the
-/// thieves steal subtrees. An {@code Error!} from a stolen branch must then go back through a
-/// work-stealing join, an obligation wait, and unwind again on the fiber of the waiter. The leaf
-/// {@code lo == 127} throws only when the range includes 127.
+/// VPF join points under forced promotion. {@code okBase(16, ...)} makes thieves steal subtrees
+/// of RSum. An {@code Error!} from a stolen branch must unwind again on the fiber of the waiter.
+/// Leaf 127 throws.
 public class TestZigVPF {
-  // The control test. The range excludes 127, so nothing throws and forced promotion must give
-  // the correct sum of 0..126.
+  // Control: the range excludes 127, so nothing throws.
   @Test void vpfSumUnderForcedPromotion() { okBase(16, new Res("8001", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(RSum#(0, 127).str)}
@@ -29,8 +26,7 @@ public class TestZigVPF {
       }
     """, Base.mutBaseAliases); }
 
-  // A deterministic Error! from a branch that a thief usually steals. Try catches it and sends
-  // it to the .info arm.
+  // An Error! from a branch that a thief usually steals.
   @Test void vpfErrorCaughtUnderForcedPromotion() { okBase(16, new Res("boom", "", 0), """
     package test
     Test:Main{sys -> sys.io.println(Try#[Nat]{RSum#(0, 128)}.run{
@@ -45,8 +41,7 @@ public class TestZigVPF {
       }
     """, Base.mutBaseAliases); }
 
-  // The same Error!, but with no Try. It unwinds through the VPF joins to the top-level boundary,
-  // and the program stops.
+  // As above, with no Try: the error unwinds to the top-level boundary.
   @Test void vpfErrorUncaughtUnderForcedPromotion() { okBase(16, new Res("", "Program crashed with: boom[###]", 1), """
     package test
     Test:Main {sys -> sys.io.println(RSum#(0, 128).str)}
@@ -58,9 +53,8 @@ public class TestZigVPF {
       }
     """, Base.mutBaseAliases); }
 
-  // A guard `.if` around the split, the usual form of a divide-and-conquer. `BoolIfOptimisation`
-  // inlines only one level, so the split is two levels deep and its arm becomes its own
-  // function. The instrumentation stays only because the code really calls that function.
+  // `BoolIfOptimisation` inlines one level only, so the split is in an arm function. VPF must
+  // instrument that arm.
   @Test void vpfNestedIf() { okBase(16, new Res("8128", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(RSum#(0, 128).str)}
@@ -75,8 +69,7 @@ public class TestZigVPF {
       }
     """, Base.mutBaseAliases); assertInstrumented(); }
 
-  // The recursive case is in `.then`, not in `.else`. No code looks for a VPF call in a `.then`
-  // arm, so this works only through the instrumentation of the arm.
+  // The recursive case is in `.then`, not in `.else`.
   @Test void vpfCallInThenBranch() { okBase(16, new Res("8128", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(RSum#(0, 128).str)}
@@ -88,8 +81,7 @@ public class TestZigVPF {
       }
     """, Base.mutBaseAliases); assertInstrumented(); }
 
-  // Four `.if` levels, with non-parallelisable layers between them. Each level becomes a call in
-  // turn, until the level with the split.
+  // Four `.if` levels, with non-parallelisable layers between them.
   @Test void vpfDeeplyNestedIf() { okBase(16, new Res("8128", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(RSum#(0, 128).str)}
@@ -110,8 +102,7 @@ public class TestZigVPF {
       }
     """, Base.mutBaseAliases); assertInstrumented(); }
 
-  // The de-inlining puts a stack frame between the stolen branch that unwinds and the `Try` that
-  // catches it. The obligation waits must unwind through that frame.
+  // An arm frame is between the stolen branch and the `Try`. The unwind must go through it.
   @Test void vpfNestedIfErrorCaught() { okBase(16, new Res("boom", "", 0), """
     package test
     Test:Main{sys -> sys.io.println(Try#[Nat]{RSum#(0, 128)}.run{
@@ -129,12 +120,82 @@ public class TestZigVPF {
       }
     """, Base.mutBaseAliases); }
 
-  /// A correct but sequential program passes the output assertions above, with VPF or without
-  /// it. This is why the nested `.if` stayed defective. Codegen emits a thief function and its
-  /// locals struct only for an instrumented call, and a nested split lives in a `.then` or
-  /// `.else` arm. Thus a thief that an arm owns is the proof that VPF went past the outer `.if`.
-  /// The patterns match the arm-name mangling, and not a symbol with a `vpfCounter` number, so a
-  /// change of the numbers does not break them.
+  // The leftmost failure wins. Leaves 3 and 100 throw in different subtrees, so a thief usually
+  // runs the two failures in parallel.
+  @Test void vpfLeftmostErrorWins() { okBase(16, new Res("left", "", 0), """
+    package test
+    Test:Main{sys -> sys.io.println(Try#[Nat]{RSum#(0, 128)}.run{
+      .ok(n) -> n.str,
+      .info(err) -> err.msg,
+      })}
+    RSum: {
+      #(lo: Nat, hi: Nat): Nat -> (hi - lo) == 1 ? {
+        .then -> lo == 3 ? {
+          .then -> Error.msg[Nat] "left",
+          .else -> lo == 100 ? { .then -> Error.msg[Nat] "right", .else -> lo }
+          },
+        .else -> this#(lo, (lo + hi) / 2) + (this#((lo + hi) / 2, hi))
+        }
+      }
+    """, Base.mutBaseAliases); }
+
+  // As above, for a receiver that `SumMatchOptimisation` rewrote. Receiver and argument throw.
+  private static final String SUM_MATCH_BOTH_THROW = """
+    package test
+    Test:Main{sys -> sys.io.println(Try#[Nat]{Both#}.run{
+      .ok(n) -> n.str,
+      .info(err) -> err.msg,
+      })}
+    Choice:Sealed{ .match[R:*](m: mut ChoiceMatch[R]): R }
+    ChoiceMatch[R:*]:{ mut .a: R, mut .b: R }
+    A:Choice{ .match(m) -> m.a }
+    B:Choice{ .match(m) -> m.b }
+    Boom:{ #: Nat -> Error.msg[Nat] "right" }
+    Both:{ #: Nat -> A.match[Nat]{ .a -> Error.msg[Nat] "left", .b -> 0 } + (Boom#) }
+    """;
+
+  @Test void vpfSumMatchReceiverKeepsLeftmostError() {
+    okBase(16, new Res("left", "", 0), SUM_MATCH_BOTH_THROW, Base.mutBaseAliases);
+  }
+
+  // Sequential control for the test above.
+  @Test void sumMatchReceiverErrorWithoutVpf() {
+    okBaseNoVpf(new Res("left", "", 0), SUM_MATCH_BOTH_THROW, Base.mutBaseAliases);
+  }
+
+  // The mirror case: the matcher is the argument, and must not win from the right.
+  @Test void vpfSumMatchArgumentLosesToReceiverError() {
+    okBase(16, new Res("left", "", 0), """
+      package test
+      Test:Main{sys -> sys.io.println(Try#[Nat]{Both#}.run{
+        .ok(n) -> n.str,
+        .info(err) -> err.msg,
+        })}
+      Choice:Sealed{ .match[R:*](m: mut ChoiceMatch[R]): R }
+      ChoiceMatch[R:*]:{ mut .a: R, mut .b: R }
+      A:Choice{ .match(m) -> m.a }
+      B:Choice{ .match(m) -> m.b }
+      Boom:{ #: Nat -> Error.msg[Nat] "left" }
+      Both:{ #: Nat -> Boom# + (A.match[Nat]{ .a -> Error.msg[Nat] "right", .b -> 0 }) }
+      """, Base.mutBaseAliases);
+    assertMatchArmInThief();
+  }
+
+  /// Output cannot show if a thief takes the rewritten matcher or the victim runs it early. A
+  /// thief function must call a match arm of `ChoiceMatch` (mangled `Zdota`, `Zdotb`).
+  private static void assertMatchArmInThief() {
+    var zig = RunZigProgramTests.generatedZig("test");
+    var thief = Pattern.compile("^fn \\w+_thief\\(.*?^\\}$", Pattern.MULTILINE | Pattern.DOTALL);
+    var matcher = thief.matcher(zig);
+    while (matcher.find()) {
+      if (matcher.group().contains("Zdota")) { return; }
+    }
+    throw new AssertionError("no thief function computes a match arm:\n" + zig);
+  }
+
+  /// A sequential program passes the output assertions. A thief and `_Locals` that an arm owns
+  /// show that VPF instrumented the arm. The patterns do not match `vpfCounter` numbers, which
+  /// are not stable.
   private static void assertInstrumented() {
     var zig = RunZigProgramTests.generatedZig("test");
     var thief = Pattern.compile("^fn \\w+_Zdot(then|else)\\w*_thief\\(", Pattern.MULTILINE);

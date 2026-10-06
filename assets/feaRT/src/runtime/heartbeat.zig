@@ -24,29 +24,24 @@ const StolenTask = worker_mod.StolenTask;
 pub const TOKENS_THRESHOLD: u32 = @import("build_options").tokens_threshold;
 const ARE_HEARTBEATS_ENABLED = @import("build_options").enable_vpf;
 
-/// Runs at the top of every stack frame, so once per reduction step. Each step
-/// grants one token. A promotion costs `TOKENS_THRESHOLD` tokens, which are
-/// destroyed; what survives the charge splits evenly between parent and child.
-/// The charge is what bounds promotions at `W / TOKENS_THRESHOLD` (APM Theorem
-/// 4.1 with C/N = 1/TOKENS_THRESHOLD); the split alone bounds nothing. Tokens
-/// are spent only on a promotion that published, so a frame with nothing to
-/// promote keeps saving towards the next promotable one.
+/// Runs once per reduction step and grants one token. A promotion destroys
+/// `TOKENS_THRESHOLD` tokens, and parent and child split the remainder. The
+/// charge bounds promotions at `W / TOKENS_THRESHOLD` (APM Theorem 4.1 with
+/// C/N = 1/TOKENS_THRESHOLD); the split alone bounds nothing. Only a published
+/// promotion spends tokens.
 ///
 /// Section 4 of Automatic Parallelism Management, Westrick et al.
 pub inline fn tryPromote() void {
     comptime if (!ARE_HEARTBEATS_ENABLED) return;
-    // Generated code always runs on a fiber stack, so the header is always
-    // there to be found; the flag is what suppresses promotion.
+    // Generated code always runs on a fiber stack. The flag suppresses promotion.
     const fiber = fiber_mod.currentFiber();
     if (!fiber.vpf_enabled) return;
     // Relaxed: a plain load and store on the owner's path. A thief credit that
     // lands between them is lost; see `Fiber.tokens`.
     const tokens = fiber.tokens.load(.monotonic);
     if (tokens >= TOKENS_THRESHOLD) {
-        // Both tests are inline and reject without a call, which is what keeps
-        // a miss cheap; nothing else may run on the healthy path. Promoting
-        // into a cancelled subtree only burns a thief fiber on work that is
-        // about to abort.
+        // Both tests are inline, so a miss makes no call. Do not add work to
+        // this path. A promotion into a cancelled subtree wastes a thief fiber.
         if (hasPromotableFrame(fiber) and !scope_mod.cancelledOn(fiber)) {
             const remainder = (tokens - TOKENS_THRESHOLD) / 2;
             if (doPromote(fiber, remainder)) {
@@ -71,17 +66,15 @@ pub inline fn tryPromote() void {
     fiber.tokens.store(tokens + 1, .monotonic);
 }
 
-/// True when the fiber has an un-promoted shadow frame.
 inline fn hasPromotableFrame(fiber: *const Fiber) bool {
     const cursor = &fiber.shadow_cursor;
     return cursor.lowest_unpromoted < cursor.top;
 }
 
-/// A fiber that runs a long time without reaching the scheduler still has to
-/// hand its reference-counting chains to the collector. The inline rejection
-/// above skips `doPromote` and its checkpoint, so keep that liveness on a coarse
-/// cadence: a fiber that never returns to the scheduler would otherwise stall
-/// every epoch.
+/// A fiber that does not reach the scheduler must still give its
+/// reference-counting chains to the collector. The inline rejection skips the
+/// checkpoint in `doPromote`, so this does it on a coarse cadence. Otherwise
+/// such a fiber stalls every epoch.
 inline fn periodicDrain(tokens: u32) void {
     if (tokens & 0xFFFF == 0) checkpointOnly();
 }
@@ -91,9 +84,8 @@ noinline fn checkpointOnly() void {
     worker.checkpoint();
 }
 
-/// Promote the oldest un-promoted frame of the running fiber. True only when the
-/// promotion published its join obligation, which is what makes it worth
-/// charging for; every early return leaves the work to the parent.
+/// Promotes the oldest un-promoted frame. True only when the join obligation is
+/// published; a false return leaves the work to the parent.
 noinline fn doPromote(fiber: *Fiber, child_initial_tokens: u32) bool {
     const worker = worker_mod.getCurrentWorker() orelse {
         op_counters.bump(.promotion_miss_no_fiber);
@@ -107,7 +99,6 @@ noinline fn doPromote(fiber: *Fiber, child_initial_tokens: u32) bool {
 
     log.trace_scheduling(.hb_entry, worker.id, cursor.top, @intFromPtr(worker.current_fiber));
 
-    // Re-test: the frame state can change between the inline check and here.
     if (frame_idx >= cursor.top) {
         op_counters.bump(.promotion_miss_no_frame);
         return false;
@@ -142,8 +133,7 @@ noinline fn doPromote(fiber: *Fiber, child_initial_tokens: u32) bool {
     task.initial_tokens = child_initial_tokens;
     task.parent = fiber;
     task.scope = frame.scope;
-    // The thief fiber shows this call chain beneath a fiber boundary if it
-    // crashes.
+    // A crash on the thief shows this call chain under the fiber boundary.
     if (build_options.trace_frames) {
         @memcpy(task.trace_frames[0..], fiber.trace_frames[0..]);
         task.trace_top = fiber.trace_top;
@@ -157,45 +147,30 @@ noinline fn doPromote(fiber: *Fiber, child_initial_tokens: u32) bool {
     };
     frame.child_obligation.store(child_obl, .monotonic);
     task.child_obligation = child_obl;
-    // Published before the task can be dequeued, so the join point always finds
-    // the task it has to race for.
+    // Before the enqueue, so the join point always finds the task to race for.
     frame.task.store(task, .monotonic);
 
     log.trace_scheduling(.hb_promote, frame_idx, @intFromPtr(obligation), @intFromPtr(child_obl));
 
-    // Strictly before the task can be dequeued: from here another worker may
-    // build a thief for it, and that thief pays a join credit into this fiber's
-    // `tokens`. The reference keeps the mapping that holds them alive even if
-    // this fiber abandons and is destroyed first.
+    // Before the enqueue: a thief pays a join credit into this fiber's `tokens`.
+    // The reference keeps that mapping alive if this fiber is destroyed first.
     fiber.retainMapping();
     task.holds_parent_ref = true;
 
-    // Before the join obligation becomes observable: a window between CAS and
-    // enqueue would leave the parent waiting on an obligation nothing fulfills.
-    // `enqueueTask` is total, so admission never refuses and tokens deplete the
-    // way the model assumes.
+    // Before the publish: otherwise the parent can wait on an obligation that
+    // nothing fulfills. `enqueueTask` is total, so tokens deplete as the model
+    // assumes.
     worker_mod.enqueueTask(task);
     log.trace_scheduling(.hb_enqueue, @intFromPtr(task), @intFromPtr(obligation), 0);
 
-    // Publish. A failed CAS means the parent or another promoter claimed the
-    // frame, so the queued task is dead work.
-    if (frame.join_obligation.cmpxchgStrong(null, obligation, .release, .monotonic)) |old| {
-        // Claimed either way, so the frame leaves the un-promoted suffix.
-        cursor.lowest_unpromoted = frame_idx + 1;
-        // Take the execution rights back if no worker holds them. The winner
-        // recycles the obligations; the task stays in its queue for the
-        // dequeuing worker to retire. Losing costs a thief fiber whose result
-        // nobody reads, but stays correct.
-        if (task.claimed.cmpxchgStrong(false, true, .acq_rel, .acquire) == null) {
-            worker.recycleObligation(obligation);
-            worker.recycleObligation(child_obl);
-        }
-        frame.child_obligation.store(null, .monotonic);
-        frame.task.store(null, .monotonic);
-        log.trace_scheduling(.hb_cas_fail, frame_idx, @intFromPtr(old), 0);
-        op_counters.bump(.promotion_miss_cas_lost);
-        return false;
+    // A plain, unconditional store: `[lowest_unpromoted, top)` is un-promoted, so
+    // the slot is null. Proof: `Vpf.publication_never_fails` in
+    // `experiments/formal`. It assumes no asynchronous writer, so signal-driven
+    // promotion makes it false.
+    if (std.debug.runtime_safety) {
+        std.debug.assert(frame.join_obligation == null);
     }
+    frame.join_obligation = obligation;
     log.trace_scheduling(.hb_cas_ok, frame_idx, @intFromPtr(obligation), 0);
     cursor.lowest_unpromoted = frame_idx + 1;
     return true;

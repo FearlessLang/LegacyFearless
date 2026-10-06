@@ -7,25 +7,9 @@ import java.util.List;
 import java.util.Optional;
 
 public interface MagicImpls<R> {
-  /// The traits whose values the runtime makes itself, and that cannot carry the
-  /// `base.RuntimeImplemented` marker.
-  ///
-  /// A literal type cannot carry the marker: its implementation is a clone
-  /// {@link Magic#getDec} synthesises from a template, which would carry the marker into a
-  /// lambda that the well-formedness rule on the marker forbids.
-  ///
-  /// A pass reads this to learn that a value of the trait can arrive with no object literal
-  /// behind it, so an implementation set built from literals alone is incomplete for it. That is
-  /// what keeps `base.Var` off the specialised reference-count operations: the runtime makes its
-  /// cells, and their storage mode is not the storage mode of the Fearless lambda in `Vars#`.
-  ///
-  /// `base.Bool` is not here. The runtime makes no value of it and the backend answers no call on
-  /// it: `True` and `False` are ordinary Fearless singletons with Fearless bodies, and where the
-  /// runtime needs a boolean it returns one of those same two singletons.
-  ///
-  /// {@link #get} is not derived from this list and keeps its own if-chain.
   List<Id.DecId> MAGIC_DECS = List.of(
-    Magic.Int, Magic.Nat, Magic.Float, Magic.Byte, Magic.Str, Magic.Var, Magic.IsoPod);
+    Magic.Int, Magic.Nat, Magic.Float, Magic.Byte, Magic.Str, Magic.Var, Magic.IsoPod,
+    Magic.ActorSink);
 
   default Optional<MagicTrait<MIR.E,R>> get(MIR.E e) {
     if (isMagic(Magic.Int, e)) { return Optional.ofNullable(int_(e)); }
@@ -65,9 +49,6 @@ public interface MagicImpls<R> {
   }
   default boolean isMagic(Id.DecId magicDec, Id.DecId freshName) {
     return p().superDecIds(freshName).contains(magicDec);
-//    if (freshName.gen() != magicDec.gen()) { return false; }
-//    var gens = Id.GX.standardNames(freshName.gen()).stream().map(gx->new T(Mdf.mdf, gx)).toList();
-//    return p().isSubType(XBs.empty(), new T(Mdf.mdf, new Id.IT<>(freshName, gens)), new T(Mdf.mdf, new Id.IT<>(magicDec, gens)));
   }
 
   MagicTrait<MIR.E,R> int_(MIR.E e);

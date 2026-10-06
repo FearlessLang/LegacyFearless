@@ -143,7 +143,8 @@ public final class RecursionHotness {
   /// bodies and so cannot judge the size for themselves.
   public boolean fitsInlineBudget(MIR.FName f) { return bodySize(f) <= INLINE_BUDGET; }
 
-  /// Whether `f` is on a recursion cycle.
+  /// Whether `f` is on a recursion cycle, or is a callee of a hot function that fits
+  /// `INLINE_BUDGET`.
   public boolean hot(MIR.FName f) {
     var i = nodes.get(f);
     return i != null && hotBody[i];

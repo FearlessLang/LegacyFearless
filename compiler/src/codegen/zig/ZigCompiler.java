@@ -75,7 +75,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     for (var pkg : program.pkgs()) {
       var name = pkg.name();
       if (!CompilationUnit.isCached(name)) { continue; }
-      var file = dir.resolve(name.replace(".", "_") + ".zig");
+      var file = dir.resolve(ZigStringIds.manglePkg(name) + ".zig");
       if (Files.exists(file)) {
         cached.put(name, IoErr.of(() -> Files.readString(file)));
       }
@@ -111,7 +111,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
 
       var generated = new HashSet<String>();
       for (var entry : program.packageFiles().entrySet()) {
-        var fileName = entry.getKey().replace(".", "_") + ".zig";
+        var fileName = ZigStringIds.manglePkg(entry.getKey()) + ".zig";
         generated.add(fileName);
         writeIfChanged(genDir.resolve(fileName), entry.getValue());
       }
@@ -152,7 +152,7 @@ public record ZigCompiler(CompilerFrontEnd.Verbosity verbosity, InputOutput io, 
     IoErr.of(() -> Files.createDirectories(dir));
     for (var entry : program.packageFiles().entrySet()) {
       if (!CompilationUnit.isCached(entry.getKey())) { continue; }
-      var fileName = entry.getKey().replace(".", "_") + ".zig";
+      var fileName = ZigStringIds.manglePkg(entry.getKey()) + ".zig";
       IoErr.of(() -> Files.writeString(dir.resolve(fileName), entry.getValue()));
     }
   }

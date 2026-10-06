@@ -1,6 +1,7 @@
 package codegen.zig;
 
 import codegen.MIR;
+import id.Mdf;
 
 /**
  * Builds the signature strings that get hashed by FNV-1a at comptime in Zig.
@@ -19,8 +20,13 @@ public final class ZigSigStringBuilder {
    * Format: "<mdf> <name>/<arity>"
    */
   public String sigString(MIR.Sig sig) {
-    var prettyStr = sig.mdf() + " " + sig.name().name() + "/" + sig.xs().size();
-    return "\""+prettyStr.replace("\\", "\\\\").replace("\"", "\\\"")+"\"";
+    return ZigStringIds.zigString(sigText(sig.mdf(), sig.name().name(), sig.xs().size()));
+  }
+
+  /// The text of a signature, before it becomes a Zig string literal: `<capability> <name>/<arity>`,
+  /// for example `imm +/1`. The runtime dispatch of a primitive type tests this text.
+  public static String sigText(Mdf mdf, String name, int arity) {
+    return mdf + " " + name + "/" + arity;
   }
 
   /**

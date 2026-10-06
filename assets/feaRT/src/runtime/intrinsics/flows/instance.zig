@@ -1,9 +1,3 @@
-//! VT_Flow: the vtable of each Zig-resident flow instance.
-//!
-//! An intermediate op (`map`, `filter`, ...) appends one `OpDesc` and returns a new flow.
-//! A terminal op (`fold`, `find`, ...) dispatches into `terminals.zig`.
-//! `only`, `get`, `opt`, `let`, `join` and `#/1` keep their default Fearless bodies. They
-//! stay here as delegation thunks.
 
 const std = @import("std");
 const objs = @import("../../objs.zig");
@@ -24,9 +18,6 @@ const worker_mod = @import("../../worker.zig");
 const FatPtr = objs.FatPtr;
 const h = objs.hash_signature;
 
-// Each terminal pushes a new cancellation scope at entry, chained to the outer scope on the same
-// fiber. Thus all code below it finds a valid scope. The Scope stays on the GC heap, because a
-// thief task can capture it into StolenTask.scope and outlive the terminal.
 fn pushScope() struct { current: *scope_mod.Scope, prev: ?*scope_mod.Scope } {
     const prev = scope_mod.activeScope();
     const s = gc.allocator.create(scope_mod.Scope) catch @panic("OOM");
@@ -36,11 +27,8 @@ fn pushScope() struct { current: *scope_mod.Scope, prev: ?*scope_mod.Scope } {
 }
 fn popScope(prev: ?*scope_mod.Scope) void {
     scope_mod.setActiveScope(prev);
-    // Do not free the Scope. The GC reclaims it when no reference remains.
 }
 
-/// The cells below keep what the flow operator was lent, so each takes a
-/// reference of its own.
 fn make_scan_cell(initial: FatPtr) u64 {
     const cell = gc.recycleAlloc(types.ScanCell);
     cell.* = .{ .acc = initial.share().box_transient() };
@@ -148,18 +136,10 @@ fn flow_assume_finite(self: FatPtr) callconv(.c) FatPtr {
     return object.make_flow_fp(&VT_Flow, object.clone_with_finiteness(object.deref_flow(self), true));
 }
 
-// The terminals below go through the Fearless `_FeartDriver` wrappers, so that APM and VPF find
-// a Fearless body at the top of the call chain. VPF tags the `.merge` in those bodies, and the
-// `.mergeFold` in `.driveReduceFn`, as VPFParallelisable. The split of the driver is the only
-// source of flow data parallelism. Thus a terminal that skips it also makes all upstream ops
-// sequential. Only `forEffect` calls `terminals.drive_*` directly, by design: it runs user side
-// effects through a captured mutable reference, so it can never be parallel.
 
 fn flow_fold(self: FatPtr, initial: FatPtr, combine: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
-    // `initial` and `combine` are lent; `seed` is this frame's own, and the
-    // driver body only borrows it.
     const seed = objs.call(initial, h("mut #/0"), .{}, @src());
     defer seed.rc_decrement();
     return pbf._FeartDriver_0__ZdotdriveReduce_3_mut_Zfun(self, seed, combine, driver_singleton());
@@ -167,13 +147,13 @@ fn flow_fold(self: FatPtr, initial: FatPtr, combine: FatPtr) callconv(.c) FatPtr
 fn flow_first(self: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveFirst_1_mut_Zfun(self, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveFirst_1_mut_Zfun_boxed(self, driver_singleton());
 }
 fn flow_last(self: FatPtr) callconv(.c) FatPtr {
     if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveLast_1_mut_Zfun(self, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveLast_1_mut_Zfun_boxed(self, driver_singleton());
 }
 fn flow_count(self: FatPtr) callconv(.c) FatPtr {
     if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
@@ -197,53 +177,48 @@ fn flow_for_effect(self: FatPtr, callback: FatPtr) callconv(.c) FatPtr {
     const driver_obj = driver_singleton();
     return objs.call(driver_obj, h("mut .runChunkFor/2"), .{ self, callback }, @src());
 }
-// The predicated terminals delegate to the `_TerminalOps[E]` defaults. Those dispatch
-// `.findMap` and `.unorderedFindMap` back through this same VT_Flow, so the parallel and cancel
-// work occurs in the resolved findMap impl. The scope push and pop stay here, to keep the full
-// terminal under one cancel scope. If not, the `scope.request()` of a stolen thief in the
-// findMap call goes to the scope of the caller, not to the scope of this terminal.
 fn flow_any(self: FatPtr, pred: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._TerminalOps_1__Zdotany_1_mut_Zfun(pred, self);
+    return bool_from_tag(pbf._TerminalOps_1__Zdotany_1_mut_Zfun(pred, self));
 }
 fn flow_all(self: FatPtr, pred: FatPtr) callconv(.c) FatPtr {
     if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._TerminalOps_1__Zdotall_1_mut_Zfun(pred, self);
+    return bool_from_tag(pbf._TerminalOps_1__Zdotall_1_mut_Zfun(pred, self));
 }
 fn flow_none(self: FatPtr, pred: FatPtr) callconv(.c) FatPtr {
     if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._TerminalOps_1__Zdotnone_1_mut_Zfun(pred, self);
+    return bool_from_tag(pbf._TerminalOps_1__Zdotnone_1_mut_Zfun(pred, self));
 }
 fn flow_find(self: FatPtr, pred: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._TerminalOps_1__Zdotfind_1_mut_Zfun(pred, self);
+    return pbf._TerminalOps_1__Zdotfind_1_mut_Zfun_boxed(pred, self);
 }
 fn flow_first_pred(self: FatPtr, pred: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._TerminalOps_1__Zdotfirst_1_mut_Zfun(pred, self);
+    return pbf._TerminalOps_1__Zdotfirst_1_mut_Zfun_boxed(pred, self);
 }
 fn flow_find_map(self: FatPtr, mapper: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveFindMap_2_mut_Zfun(self, mapper, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveFindMap_2_mut_Zfun_boxed(self, mapper, driver_singleton());
 }
 fn flow_unordered_find_map(self: FatPtr, mapper: FatPtr) callconv(.c) FatPtr {
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveUnorderedFindMap_2_mut_Zfun(self, mapper, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveUnorderedFindMap_2_mut_Zfun_boxed(self, mapper, driver_singleton());
 }
 fn flow_max(self: FatPtr, comparator: FatPtr) callconv(.c) FatPtr {
     if (!object.deref_flow(self).is_finite) @panic("Terminal on infinite flow");
     const sc = pushScope();
     defer popScope(sc.prev);
-    return pbf._FeartDriver_0__ZdotdriveMax_2_mut_Zfun(self, comparator, driver_singleton());
+    return pbf._FeartDriver_0__ZdotdriveMax_2_mut_Zfun_boxed(self, comparator, driver_singleton());
 }
 
 fn flow_self(self: FatPtr) callconv(.c) FatPtr {
@@ -278,7 +253,7 @@ fn T_flow_get(self: FatPtr) callconv(.c) FatPtr {
     return pbf.Flow_1__Zdotget_0_mut_Zfun(self);
 }
 fn T_flow_opt(self: FatPtr) callconv(.c) FatPtr {
-    return pbf.Flow_1__Zdotopt_0_mut_Zfun(self);
+    return pbf.Flow_1__Zdotopt_0_mut_Zfun_boxed(self);
 }
 fn T_flow_let(self: FatPtr, a: FatPtr, b: FatPtr) callconv(.c) FatPtr {
     return pbf.Flow_1__Zdotlet_2_mut_Zfun(a, b, self);
@@ -286,23 +261,15 @@ fn T_flow_let(self: FatPtr, a: FatPtr, b: FatPtr) callconv(.c) FatPtr {
 fn T_flow_join(self: FatPtr, joinable: FatPtr) callconv(.c) FatPtr {
     return objs.call(joinable, h("imm .join/1"), .{self}, @src());
 }
-/// `Extensible[Flow[E]]#(ext)` at each receiver mdf. The Fearless body is `ext#(this.self)`, and
-/// `.self` on a flow is the identity. Thus all three mdfs pass the receiver to `mut #/1`.
 fn T_flow_hash1(self: FatPtr, ext: FatPtr) callconv(.c) FatPtr {
     return objs.call(ext, h("mut #/1"), .{self}, @src());
 }
 
-/// `.unwrapOp` gives the `FlowOp` of a flow to the Fearless flow operators in base. A
-/// Zig-resident flow replaces those paths with its native `OpDesc` pipeline, and a caller also
-/// needs a `_UnwrapFlowToken`, which is private to `base.flows`. This slot keeps the vtable
-/// complete and fails with a clear message, not with a missing-method dispatch abort.
 fn T_flow_unwrap_op(self: FatPtr, unwrap: FatPtr) callconv(.c) FatPtr {
     _ = .{ self, unwrap };
     @panic("unwrapOp is not supported on FeaRT-native flows");
 }
 
-/// FatPtr of the `_FeartDriver` singleton. It stays in this module, so that the flow instance
-/// vtable and the driver vtable can refer to each other at comptime.
 pub fn driver_singleton() FatPtr {
     return objs.obj_k_singleton(&VT_FeartDriver);
 }
@@ -357,28 +324,28 @@ fn driver_drive_collect(this: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
     return pbf._FeartDriver_0__ZdotdriveCollect_1_mut_Zfun(flow, this);
 }
 fn driver_drive_find_map(this: FatPtr, flow: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    return pbf._FeartDriver_0__ZdotdriveFindMap_2_mut_Zfun(flow, f, this);
+    return pbf._FeartDriver_0__ZdotdriveFindMap_2_mut_Zfun_boxed(flow, f, this);
 }
 fn driver_drive_for(this: FatPtr, flow: FatPtr, f: FatPtr) callconv(.c) FatPtr {
     return pbf._FeartDriver_0__ZdotdriveFor_2_mut_Zfun(flow, f, this);
 }
 fn driver_drive_first(this: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
-    return pbf._FeartDriver_0__ZdotdriveFirst_1_mut_Zfun(flow, this);
+    return pbf._FeartDriver_0__ZdotdriveFirst_1_mut_Zfun_boxed(flow, this);
 }
 fn driver_drive_count(this: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
     return pbf._FeartDriver_0__ZdotdriveCount_1_mut_Zfun(flow, this);
 }
 fn driver_drive_last(this: FatPtr, flow: FatPtr) callconv(.c) FatPtr {
-    return pbf._FeartDriver_0__ZdotdriveLast_1_mut_Zfun(flow, this);
+    return pbf._FeartDriver_0__ZdotdriveLast_1_mut_Zfun_boxed(flow, this);
 }
 fn driver_drive_unordered_find_map(this: FatPtr, flow: FatPtr, f: FatPtr) callconv(.c) FatPtr {
-    return pbf._FeartDriver_0__ZdotdriveUnorderedFindMap_2_mut_Zfun(flow, f, this);
+    return pbf._FeartDriver_0__ZdotdriveUnorderedFindMap_2_mut_Zfun_boxed(flow, f, this);
 }
 fn driver_drive_max(this: FatPtr, flow: FatPtr, compare: FatPtr) callconv(.c) FatPtr {
-    return pbf._FeartDriver_0__ZdotdriveMax_2_mut_Zfun(flow, compare, this);
+    return pbf._FeartDriver_0__ZdotdriveMax_2_mut_Zfun_boxed(flow, compare, this);
 }
 fn driver_run_chunk_max(this: FatPtr, flow: FatPtr, compare: FatPtr) callconv(.c) FatPtr {
-    return pbf._FeartDriver_0__ZdotrunChunkMax_2_mut_Zfun(flow, compare, this);
+    return pbf._FeartDriver_0__ZdotrunChunkMax_2_mut_Zfun_boxed(flow, compare, this);
 }
 fn driver_merge(this: FatPtr, left: FatPtr, right: FatPtr) callconv(.c) FatPtr {
     return pbf._FeartDriver_0__Zdotmerge_2_imm_Zfun(left, right, this);
@@ -387,10 +354,6 @@ fn driver_merge3(_: FatPtr, left: FatPtr, right: FatPtr, combine: FatPtr) callco
     return objs.call(combine, h("read #/2"), .{ left, right }, @src());
 }
 
-/// `_FeartDriver.mergeFold/3`: folds one collected chunk into `acc`, in index order. Every
-/// operand is lent, the chunk's elements included, so they pass to the combining call as they
-/// stand. The accumulator this frame answers with is its own: it starts as a share of `acc`,
-/// and each step releases the one the step before made, so only one stays live.
 fn driver_merge_fold(_: FatPtr, acc: FatPtr, chunk: FatPtr, combine: FatPtr) callconv(.c) FatPtr {
     var a = acc.share();
     const items = list_rt.deref_list(chunk);
@@ -404,18 +367,6 @@ fn driver_merge_fold(_: FatPtr, acc: FatPtr, chunk: FatPtr, combine: FatPtr) cal
 
 const FlowSlot = objs.GenObjectLayoutType(object.FlowCaptures);
 
-/// Both halves of a split live in this frame, which outlives every use of them.
-///
-/// The `.some/2` arms below drive the halves to completion before they return, so no
-/// half survives this call. A VPF promotion inside an arm does not change that: the
-/// promoted frame boxes each transient it captures, and the parent stays suspended at
-/// its join, so the frame it reads stays mapped. Splitting is the whole cost of the
-/// divide-and-conquer, so a frame slot in place of four heap objects is what makes the
-/// leaves, not the splits, the price of a flow.
-///
-/// The halves are lent to the arms as transients, which hold no reference count, and this
-/// frame owns the single release of each body. That covers the `.shouldStop` arms, which
-/// return without driving either half.
 fn driver_split_match(self: FatPtr, flow: FatPtr, cases: FatPtr) callconv(.c) FatPtr {
     _ = self;
 
@@ -441,13 +392,10 @@ fn driver_split_match(self: FatPtr, flow: FatPtr, cases: FatPtr) callconv(.c) Fa
     return objs.call(cases, h("mut .some/2"), .{ left_fp, right_fp }, @src());
 }
 
-/// Promotes a flow in a caller frame to the heap, and leaves the original whole. Called
-/// when a value crosses a fiber boundary, so the copy must be able to outlive that frame.
 fn box_flow(self_m: FatPtr) callconv(.c) FatPtr {
     return object.make_flow_fp(&VT_Flow, object.copy_flow_body(object.deref_flow(self_m)));
 }
 
-/// Folds the right half of a split flow's result list into the left half.
 fn list_concat_apply(_: FatPtr, l: FatPtr, r: FatPtr) callconv(.c) FatPtr {
     const l_storage = list_rt.deref_storage(l);
     const l_al = &l_storage.al;
@@ -456,12 +404,10 @@ fn list_concat_apply(_: FatPtr, l: FatPtr, r: FatPtr) callconv(.c) FatPtr {
     for (r_items) |item| cycles.noteStore(l_edge, item);
     l_al.appendSlice(gc.allocator, r_items) catch @panic("OOM");
     for (r_items) |item| _ = item.share();
-    // Both lists are lent, and the reducer answers with one the caller owns.
     return l.share();
 }
 
 fn first_some_apply(_: FatPtr, l: FatPtr, r: FatPtr) callconv(.c) FatPtr {
-    // Both are lent, and the reducer answers with one the caller owns.
     if (l.vt == &pb.VT_Opt_1) return r.share();
     return l.share();
 }
@@ -726,8 +672,6 @@ pub const VT_Flow: objs.VTable = .{
     .trace_fn = object.flow_trace,
 };
 
-/// `VT_Flow` for a flow whose storage is a caller frame. It answers the same methods:
-/// each intermediate op clones the body onto the heap, and each terminal reads it.
 pub const VT_FlowTransient: objs.VTable = blk: {
     var vt = VT_Flow;
     vt.storage_mode = .transient;
@@ -735,3 +679,14 @@ pub const VT_FlowTransient: objs.VTable = blk: {
     vt.box_fn = &box_flow;
     break :blk vt;
 };
+
+fn bool_from_tag(tag: u8) FatPtr {
+    return switch (tag) {
+        0 => objs.obj_k_singleton(&pb.VT_False_0),
+        1 => objs.obj_k_singleton(&pb.VT_True_0),
+        else => {
+            std.debug.assert(false);
+            unreachable;
+        },
+    };
+}

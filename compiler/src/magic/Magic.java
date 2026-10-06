@@ -55,6 +55,7 @@ public class Magic {
   public static final Id.DecId FlowK = new Id.DecId("base.flows.Flow", 0);
   public static final Id.DecId FeartDriver = new Id.DecId("base.flows._FeartDriver", 0);
   public static final Id.DecId FlowOp = new Id.DecId("base.flows.FlowOp", 1);
+  public static final Id.DecId ActorSink = new Id.DecId("base.flows._ActorSink", 1);
   public static final Id.DecId FlowRange = new Id.DecId("base.flows._FlowRange", 0);
   public static final Id.DecId PipelineParallelSinkK = new Id.DecId("base.flows._PipelineParallelSink", 0);
   public static final Id.DecId PipelineParallelFlowK = new Id.DecId("rt.flows.pipelineParallel.PipelineParallelFlowK", 0);
@@ -78,18 +79,12 @@ public class Magic {
     return base.map(b -> createMagicTrait(b, id)).orElse(null);
   }
 
-  /// The declaration of one literal, cloned from the template of its kind.
-  ///
-  /// {@link #RuntimeImplemented} on the template keeps the template out of codegen, because
-  /// nothing makes a value of it. The clone is the value a literal makes and generated code
-  /// implements it, so it takes the kind alone.
   private static Dec createMagicTrait(Dec b, Id.DecId id) {
     Lambda l = b.lambda();
     LambdaId lid = l.id();
     assert lid.id().name().endsWith("Instance");
     var kinds = l.its().stream().filter(it -> !it.name().equals(RuntimeImplemented)).toList();
     assert kinds.size() == 1 : l;
-    // instance, kind   0.5  anon:base._FloatInstance, base.Float
     var its = List.of(lid.toIT(), kinds.getFirst());
     l = l.withId(lid.withId(id)).withITs(its);
     return b.withLambda(l);
