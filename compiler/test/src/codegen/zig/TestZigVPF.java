@@ -14,8 +14,7 @@ import static utils.RunOutput.Res;
 /// of RSum. An {@code Error!} from a stolen branch must unwind again on the fiber of the waiter.
 /// Leaf 127 throws.
 public class TestZigVPF {
-  // Control: the range excludes 127, so nothing throws.
-  @Test void vpfSumUnderForcedPromotion() { okBase(16, new Res("8001", "", 0), """
+  @Test void vpfSumWithoutTheThrowingLeafUnderForcedPromotion() { okBase(16, new Res("8001", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(RSum#(0, 127).str)}
     RSum: {
@@ -26,7 +25,6 @@ public class TestZigVPF {
       }
     """, Base.mutBaseAliases); }
 
-  // An Error! from a branch that a thief usually steals.
   @Test void vpfErrorCaughtUnderForcedPromotion() { okBase(16, new Res("boom", "", 0), """
     package test
     Test:Main{sys -> sys.io.println(Try#[Nat]{RSum#(0, 128)}.run{
@@ -41,7 +39,6 @@ public class TestZigVPF {
       }
     """, Base.mutBaseAliases); }
 
-  // As above, with no Try: the error unwinds to the top-level boundary.
   @Test void vpfErrorUncaughtUnderForcedPromotion() { okBase(16, new Res("", "Program crashed with: boom[###]", 1), """
     package test
     Test:Main {sys -> sys.io.println(RSum#(0, 128).str)}
@@ -69,7 +66,6 @@ public class TestZigVPF {
       }
     """, Base.mutBaseAliases); assertInstrumented(); }
 
-  // The recursive case is in `.then`, not in `.else`.
   @Test void vpfCallInThenBranch() { okBase(16, new Res("8128", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(RSum#(0, 128).str)}
@@ -81,8 +77,7 @@ public class TestZigVPF {
       }
     """, Base.mutBaseAliases); assertInstrumented(); }
 
-  // Four `.if` levels, with non-parallelisable layers between them.
-  @Test void vpfDeeplyNestedIf() { okBase(16, new Res("8128", "", 0), """
+  @Test void vpfFourNestedIfsWithNonParallelisableLayersBetween() { okBase(16, new Res("8128", "", 0), """
     package test
     Test:Main {sys -> sys.io.println(RSum#(0, 128).str)}
     RSum: {
@@ -158,12 +153,10 @@ public class TestZigVPF {
     okBase(16, new Res("left", "", 0), SUM_MATCH_BOTH_THROW, Base.mutBaseAliases);
   }
 
-  // Sequential control for the test above.
-  @Test void sumMatchReceiverErrorWithoutVpf() {
+  @Test void sumMatchReceiverKeepsLeftmostErrorWithoutVpf() {
     okBaseNoVpf(new Res("left", "", 0), SUM_MATCH_BOTH_THROW, Base.mutBaseAliases);
   }
 
-  // The mirror case: the matcher is the argument, and must not win from the right.
   @Test void vpfSumMatchArgumentLosesToReceiverError() {
     okBase(16, new Res("left", "", 0), """
       package test

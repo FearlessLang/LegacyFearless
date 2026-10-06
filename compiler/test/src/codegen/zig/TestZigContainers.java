@@ -101,9 +101,7 @@ public class TestZigContainers {
     MutThingy:{ mut .n: mut Count[Int] }
     MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { n }  }
     """, Base.mutBaseAliases); }
-  /// `.look` wraps `.peek` in an `Action`, so it is only reachable if the
-  /// Fearless-bodied slot is registered.
-  @Test void isoPodLook() { okBase(new Res("", "", 0), """
+  @Test void isoPodLookWrapsPeekInAnAction() { okBase(new Res("", "", 0), """
     package test
     Test:Main{ _ -> Block#
       .let[mut IsoPod[MutThingy]] a = { IsoPod#[MutThingy](MutThingy'#(Count.int(+3))) }
@@ -113,8 +111,7 @@ public class TestZigContainers {
     MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { .n -> n, .rn -> n } }
     """, Base.mutBaseAliases); }
 
-  /// `.isDead` is `this.isAlive.not`, and only flips once the pod is consumed.
-  @Test void isoPodIsDead() { okBase(new Res("alive/dead", "", 0), """
+  @Test void isoPodIsDeadOnlyAfterConsume() { okBase(new Res("alive/dead", "", 0), """
     package test
     Test:Main{ sys -> Block#
       .let[mut IsoPod[MutThingy]] a = { IsoPod#[MutThingy](MutThingy'#(Count.int(+0))) }
@@ -128,8 +125,7 @@ public class TestZigContainers {
     MutThingy':{ #(n: mut Count[Int]): mut MutThingy -> { n }  }
     """, Base.mutBaseAliases); }
 
-  /// `:=` is the operator spelling of `.next`.
-  @Test void isoPodAssign() { okBase(new Res("", "", 0), """
+  @Test void isoPodAssignIsNext() { okBase(new Res("", "", 0), """
     package test
     Test:Main{ _ -> Block#
       .let[mut IsoPod[MutThingy]] a = { IsoPod#[MutThingy](MutThingy'#(Count.int(+0))) }
@@ -174,9 +170,7 @@ public class TestZigContainers {
 
   // === LinkedHashMap (Maps.hashMap) ===
 
-  /// Insertion order is preserved, and updating an existing key replaces its
-  /// value in place without moving it (keys stay `one,two,three`).
-  @Test void mapInsertionOrder() { okBase(new Res("one,two,three=1,2,30", "", 0), """
+  @Test void mapKeepsInsertionOrderAndUpdatesInPlace() { okBase(new Res("one,two,three=1,2,30", "", 0), """
     package test
     Test:Main{ sys -> Block#
       .let[mut LinkedHashMap[Str,Nat]] m = { Maps.hashMap[Str,Nat]({k1,k2 -> k1 == k2}, {k -> k}) }
@@ -190,9 +184,7 @@ public class TestZigContainers {
       }
     """, Base.mutBaseAliases); }
 
-  /// `.get` finds present keys and yields empty for absent ones; `.remove`
-  /// returns the old value and drops the entry (keys become `one,three`).
-  @Test void mapGetRemove() { okBase(new Res("2/2/none/one,three", "", 0), """
+  @Test void mapGetFindsPresentKeysAndRemoveReturnsTheOldValue() { okBase(new Res("2/2/none/one,three", "", 0), """
     package test
     Test:Main{ sys -> Block#
       .let[mut LinkedHashMap[Str,Nat]] m = { Maps.hashMap[Str,Nat]({k1,k2 -> k1 == k2}, {k -> k}) }

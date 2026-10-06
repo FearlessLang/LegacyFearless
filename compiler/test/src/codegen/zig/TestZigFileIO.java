@@ -13,9 +13,7 @@ import static utils.RunOutput.Res;
 /// Filesystem IO (`accessR`/`accessW`/`accessRW`, `readStr`) and the `Env`
 /// capability (`launchArgs`).
 public class TestZigFileIO {
-  /// Building a `readStr` action does not touch the filesystem: the file does
-  /// not exist, yet no error surfaces because the action is lazy.
-  @Test void readStrIsLazy() { okBase(new Res("built", "", 0), """
+  @Test void readStrActionDoesNotTouchTheFileUntilRun() { okBase(new Res("built", "", 0), """
     package test
     Test:Main{sys -> mut Block[Void]
       .let[mut Action[Str]] a = { sys.io.accessR(List#[Str]("nope.txt")).readStr }
@@ -23,8 +21,7 @@ public class TestZigFileIO {
       }
     """, Base.mutBaseAliases); }
 
-  /// Running `readStr` on a missing file delivers `m.info`.
-  @Test void readStrNotFound() { okBaseInDir(new Res("", "File not found: [###]", 0), Map.of(), List.of(), """
+  @Test void runningReadStrOnAMissingFileDeliversInfo() { okBaseInDir(new Res("", "File not found: [###]", 0), Map.of(), List.of(), """
     package test
     Test:Main{sys -> sys.io.accessR(List#[Str]("nope.txt")).readStr.run{
       .ok(s) -> sys.io.println(s),
@@ -32,8 +29,7 @@ public class TestZigFileIO {
       }}
     """, Base.mutBaseAliases); }
 
-  /// Running `readStr` on an existing file delivers its contents to `m.ok`.
-  @Test void readStrReadsFile() { okBaseInDir(new Res("hello", "", 0), Map.of("data.txt", "hello"), List.of(), """
+  @Test void runningReadStrOnAnExistingFileDeliversItsContentsToOk() { okBaseInDir(new Res("hello", "", 0), Map.of("data.txt", "hello"), List.of(), """
     package test
     Test:Main{sys -> sys.io.accessR(List#[Str]("data.txt")).readStr.run{
       .ok(s) -> sys.io.println(s),
@@ -57,7 +53,6 @@ public class TestZigFileIO {
       )}
     """, Base.mutBaseAliases); }
 
-  /// `Env.launchArgs` exposes the command-line arguments (argv[0] excluded).
   @Test void envLaunchArgsSize() { okBaseInDir(new Res("2", "", 0), Map.of(), List.of("alpha", "beta"), """
     package test
     Test:Main{sys -> sys.io.println(sys.io.env.launchArgs.size .str)}

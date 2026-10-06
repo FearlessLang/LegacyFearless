@@ -21,16 +21,13 @@ public class TestZigDebug {
     Test:Main{ _ -> Debug.println(42) }
     """, Base.mutBaseAliases);}
 
-  /// A value with no `.str` prints as its type name, as the Java backend's
-  /// reflective fallback does.
-  @Test void debugPrintlnNoStr() { okBase(new Res("", "test.Thingy/0", 0), """
+  @Test void debugPrintlnOfAValueWithoutStrPrintsItsTypeName() { okBase(new Res("", "test.Thingy/0", 0), """
     package test
     Test:Main{ _ -> Debug.println(Thingy) }
     Thingy:{}
     """, Base.mutBaseAliases);}
 
-  /// `Debug#x` prints and yields `x`, so it can sit inside an expression.
-  @Test void debugApplyPassesThrough() { okBase(new Res("7", "7", 0), """
+  @Test void debugApplyPrintsAndYieldsItsArgument() { okBase(new Res("7", "7", 0), """
     package test
     Test:Main{ sys -> sys.io.println(Debug#(7 .str)) }
     """, Base.mutBaseAliases);}
