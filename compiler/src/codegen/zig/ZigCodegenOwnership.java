@@ -67,15 +67,15 @@ interface ZigCodegenOwnership extends ZigCodegenContext {
     };
   }
 
-  // Only setup-free operands forward: the forwarder emits no drops for them, and stack-backed ones would outlive the frame.
-  // RC-free temps need no drop, yet this test rejects them while the tail-call test accepts them.
+  // Only drop-free operands forward: the forwarder emits no drops for them, and stack-backed ones would outlive the frame.
+  // An RC-free temp is a plain `const` line before the forward.
   default boolean operandsSlotFree(MIR.E recv, List<? extends MIR.E> args) {
-    if (recv != null && needsPrelude(recv)) { return false; }
-    return args.stream().noneMatch(this::needsPrelude);
+    if (recv != null && !forwardsWithoutDrop(recv)) { return false; }
+    return args.stream().allMatch(this::forwardsWithoutDrop);
   }
 
-  default boolean needsPrelude(MIR.E e) {
-    return isTransientCreateObj(e) || !isPureInline(e);
+  default boolean forwardsWithoutDrop(MIR.E e) {
+    return !isTransientCreateObj(e) && (isPureInline(e) || isRcFree(e));
   }
 
   /// A call that writes its result into a caller-owned slot: setup, the call, and the drop.

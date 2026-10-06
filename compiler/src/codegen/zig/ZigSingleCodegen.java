@@ -685,15 +685,17 @@ public class ZigSingleCodegen implements ZigCodegen {
         var shaped = new CallOperands(
           null,
           marshalWrapperArgs(d.concreteType(), original, operands, this, boxPrelude),
-          ops.prelude()
+          List.of()
         );
+        appendForwardPrelude(sb, ops.prelude());
         boxPrelude.forEach(line -> sb.append(line).append("\n"));
         appendTailForward(sb, shaped, target, dropNames, !dropsBorrowedRecv(original, dropNames));
       }
       case MIR.StaticCall s -> {
         var prelude = new ArrayList<String>();
         var args = staticCallArgs(s, this, true, prelude, false);
-        var ops = new CallOperands(null, args, prelude);
+        var ops = new CallOperands(null, args, List.of());
+        appendForwardPrelude(sb, prelude);
         appendTailForward(
           sb,
           ops,

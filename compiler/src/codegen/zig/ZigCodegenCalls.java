@@ -197,6 +197,14 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     }
   }
 
+  /// Emits the temps of operands that need no drop. A line that is not a plain `const` would be a drop or a frame-bound slot.
+  default void appendForwardPrelude(StringBuilder sb, List<String> prelude) {
+    for (var line : prelude) {
+      if (!line.startsWith("const ")) { throw Bug.unreachable(); }
+      sb.append(line).append("\n");
+    }
+  }
+
   /// Tail-forwards into a slot, dropping enclosing temps first unless the result borrows them.
   default void appendTailForward(
       StringBuilder sb,
