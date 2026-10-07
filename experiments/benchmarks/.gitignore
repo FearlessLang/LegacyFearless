@@ -5,3 +5,7 @@ results/
 # Build trees. `out-<config>` is what a measurement script keeps per configuration.
 */out/
 */out-*/
+# Built by ocaml/build.sh.
+ocaml/bin/
+ocaml/bin-ox/
+ocaml/build/

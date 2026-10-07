@@ -572,14 +572,18 @@ public record JavaMagicImpls(
           return Optional.of(gen.visitMCall(listFlowCall, true));
         }
         if (m.name().equals(".range")) {
-          assert parallelConstr.isPresent();
+          if (parallelConstr.isEmpty()) {
+            return call.withVariants(EnumSet.of(MIR.MCall.CallVariant.Standard)).accept(gen, true).describeConstable();
+          }
           return "rt.flows.FlowCreator.fromFlow(%s, %s)".formatted(
             gen.visitCreateObj(new MIR.CreateObj(Mdf.imm, Magic.DataParallelFlowK), true),
             call.withVariants(EnumSet.of(MIR.MCall.CallVariant.Standard)).accept(gen, true)
           ).describeConstable();
         }
         if (m.name().equals(".ofIsos")) {
-          assert parallelConstr.isPresent();
+          if (parallelConstr.isEmpty()) {
+            return call.withVariants(EnumSet.of(MIR.MCall.CallVariant.Standard)).accept(gen, true).describeConstable();
+          }
           return "rt.flows.FlowCreator.fromFlow(%s, %s)".formatted(
             gen.visitCreateObj(new MIR.CreateObj(Mdf.imm, Magic.DataParallelFlowK), true),
             call.withVariants(EnumSet.of(MIR.MCall.CallVariant.Standard)).accept(gen, true)

@@ -26,7 +26,7 @@ Board: {
 /// Counts the n-queens solutions. The branches stop at very different depths, so this benchmark
 /// tests the promotion policy and not the throughput.
 NQueens: {
-  .n: Nat -> 14,
+  .n: Nat -> 15,
   .solve(b: Board, row: Nat): Nat -> (row >= (this.n)).if[Nat]{
     .then -> 1,
     .else -> this.tryCols(b, row, 0, this.n),

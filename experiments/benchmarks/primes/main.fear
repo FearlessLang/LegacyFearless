@@ -4,7 +4,7 @@ package bench
 /// parallelism comes from the flow driver rather than user-level promotion.
 /// Per-element cost grows with the element: the range is badly unbalanced.
 Primes: {
-  .n: Int -> +1000000,
+  .n: Int -> +17000000,
 
   .isPrime(n: Int): Bool -> (n < (+4)).if[Bool]{
     .then -> True,

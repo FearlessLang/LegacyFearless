@@ -41,5 +41,5 @@ WcState: {
 /// Reading the file is inside the timed process on purpose: wall clock is the
 /// headline number and I/O is part of what the program costs.
 Test: Main {sys -> sys.io.println(
-  sys.io.accessR(List#[Str]("corpus", "corpus.txt")).readStr!
+  sys.io.accessR(List#[Str]("corpus", "corpus64.txt")).readStr!
     .codepoints.fold[WcState]({WcStates.zero}, WcStates.stepper).str)}

@@ -7,10 +7,10 @@
 # the three columns of the report comparable at all.
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERE="/home/nick/Projects/fearless/experiments/fearless-feart/experiments/benchmarks"
 JAR="${JAR:-$HERE/../../compiler/target/fearless.jar}"
 ENTRY=bench.Test
-RESULTS="$HERE/results"
+RESULTS="/tmp/claude-1000/-home-nick-Projects-fearless-experiments-fearless-feart-compiler/2a870739-43c5-45d4-b982-c851f2c2147c/scratchpad/new/results"
 
 read -r -a BENCHES <<< "${BENCHES:-mapLight mapHeavy mandelbrot nqueens primes wc grep}"
 CONFIGS=(feart feart-novpf java)
@@ -33,12 +33,6 @@ config_flags() {
 # own `--run` builds in LogicMainJava (`MakeJavaProcess.makeJavaCommand`), so
 # that timing does not include the compiler re-checking the project on every
 # iteration.
-#
-# The java configuration is built with sequential flows. The environment
-# variable FEARLESS_SEQ_FLOWS removes the data-parallel and pipeline-parallel
-# flow variants at compile time, and it is backend-agnostic, so it must be set
-# for the java build only. In a FeaRT build it would also remove the flow
-# parallelism that the FeaRT backend implements through the same variants.
 run_command() {
   local bench=$1 config=$2 out="$HERE/$1/out"
   case "$config" in
@@ -63,15 +57,20 @@ if [ "$governor" != performance ]; then
   echo "         Run: sudo cpupower frequency-set -g performance" >&2
 fi
 
-# The corpus is generated, not committed: it is a function of the seed alone,
+# The corpora are generated, not committed: they are a function of the seed alone,
 # so regenerating gives a bit-identical file and the checksums stay comparable
-# across machines. `wc` and `grep` read this 64 MiB file, which is large enough
-# that the JVM is warm and process start is a negligible share of the run.
-corpus=corpus64.txt
-if [ ! -f "$HERE/corpus/$corpus" ]; then
-  echo "corpus/$corpus missing; generating it (this takes a moment)"
-  python3 "$HERE/gencorpus.py" --size-mb 64 --out "$HERE/corpus/$corpus"
-fi
+# across machines. `wc` and `grep` read the 1 MiB one; `wc-big` and `grep-big`
+# read the 16 MiB one, at which size the JVM is warm and startup is ~2%.
+for size in 1 16; do
+  case $size in
+    1) corpus=corpus.txt ;;
+    *) corpus=corpus$size.txt ;;
+  esac
+  if [ ! -f "$HERE/corpus/$corpus" ]; then
+    echo "corpus/$corpus missing; generating it (this takes a moment)"
+    python3 "$HERE/gencorpus.py" --size-mb "$size" --out "$HERE/corpus/$corpus"
+  fi
+done
 
 mkdir -p "$RESULTS"
 cd "$HERE"
@@ -87,8 +86,8 @@ for bench in "${BENCHES[@]}"; do
     # A stale out/ is not always invalidated, and the three configurations write
     # different things into it, so it is cleared rather than reused.
     rm -rf "$HERE/$bench/out"
-    if [ "$config" = java ]; then export FEARLESS_SEQ_FLOWS=1; else unset FEARLESS_SEQ_FLOWS; fi
     # shellcheck disable=SC2086
+    if [ "$config" = java ]; then export FEARLESS_SEQ_FLOWS=1; else unset FEARLESS_SEQ_FLOWS; fi
     java -jar "$JAR" "$HERE/$bench" --build $flags -e "$ENTRY" --quiet
     unset FEARLESS_SEQ_FLOWS
 
@@ -113,4 +112,4 @@ for bench in "${BENCHES[@]}"; do
 done
 
 echo
-python3 "$HERE/report.py"
+true

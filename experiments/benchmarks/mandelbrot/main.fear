@@ -20,8 +20,8 @@ Complex: {
 /// for the whole grid. The split runs over the flat index range `[0, w*h)`
 /// rather than over rows, so the leaf is one pixel.
 Mandelbrot: {
-  .w: Nat -> 2048,
-  .h: Nat -> 2048,
+  .w: Nat -> 6600,
+  .h: Nat -> 6600,
   .maxIter: Nat -> 256,
 
   /// Iterations until `|z|^2` exceeds 4, capped at `maxIter`. The cap is

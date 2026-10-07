@@ -49,7 +49,7 @@ GrepState: {
 Test: Main {sys -> Block#
   .let[Needle] needle = {Needles.needle}
   .return {sys.io.println(
-    sys.io.accessR(List#[Str]("corpus", "corpus.txt")).readStr!
+    sys.io.accessR(List#[Str]("corpus", "corpus64.txt")).readStr!
       .codepoints.fold[GrepState]({GrepStates.zero}, {s, c -> s.step(needle, c)})
       .count.str)}
   }

@@ -14,7 +14,7 @@ Xorshift: {
 /// so the checksum does not depend on completion order.
 MapHeavy: {
   .n: Nat -> 1500000,
-  .rounds: Nat -> 1000,
+  .rounds: Nat -> 4000,
 
   .mix(x: Nat, rounds: Nat): Nat -> (rounds == 0).if[Nat]{
     .then -> x,

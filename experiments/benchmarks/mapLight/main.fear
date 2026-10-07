@@ -4,7 +4,8 @@ package bench
 /// element, so `feart / feart-novpf` here is almost purely the cost of the
 /// parallelism machinery. The adversarial case.
 MapLight: {
-  .n: Nat -> 1400000000,
+  /// The checksum is `n * n`, so `n` stays below 2^32 for the result to fit a `Nat`.
+  .n: Nat -> 4200000000,
 
   .leaf(i: Nat): Nat -> (i * 2) + 1,
 

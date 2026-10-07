@@ -2,7 +2,7 @@
 """Generate the deterministic text corpus used by the `wc` and `grep` benchmarks.
 
 The corpus is a function of the seed alone, so every machine that runs this
-script gets a bit-identical `corpus/corpus.txt` and the benchmarks' checksums
+script gets a bit-identical `corpus/corpus64.txt` and the benchmarks' checksums
 are comparable across machines as well as across backends.
 """
 
@@ -15,7 +15,7 @@ VOCAB_SIZE = 2000
 WORDS_PER_LINE = (8, 14)
 NEEDLE = "needle"
 NEEDLE_RATE = 0.001
-DEFAULT_SIZE_MB = 1
+DEFAULT_SIZE_MB = 64
 
 CONSONANTS = "bcdfghjklmnpqrstvwxyz"
 VOWELS = "aeiou"
@@ -59,10 +59,9 @@ def generate(out_path, size_bytes):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--size-mb", type=float, default=DEFAULT_SIZE_MB,
-                        help=f"approximate corpus size in MiB (default {DEFAULT_SIZE_MB}; small "
-                             "because Str.codepoints costs microseconds per character)")
+                        help=f"approximate corpus size in MiB (default {DEFAULT_SIZE_MB})")
     parser.add_argument("--out", type=pathlib.Path,
-                        default=pathlib.Path(__file__).parent / "corpus" / "corpus.txt")
+                        default=pathlib.Path(__file__).parent / "corpus" / "corpus64.txt")
     args = parser.parse_args()
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
