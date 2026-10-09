@@ -9,3 +9,5 @@ results/
 ocaml/bin/
 ocaml/bin-ox/
 ocaml/build/
+
+results*/
