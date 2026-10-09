@@ -392,6 +392,15 @@ fn driver_split_match(self: FatPtr, flow: FatPtr, cases: FatPtr) callconv(.c) Fa
     return objs.call(cases, h("mut .some/2"), .{ left_fp, right_fp }, @src());
 }
 
+/// `driver_split_match` for a serial reducer. Only ops can run in parallel ahead of such a
+/// reducer, so a flow without any is a leaf.
+fn driver_split_match_ops(self: FatPtr, flow: FatPtr, cases: FatPtr) callconv(.c) FatPtr {
+    if (object.deref_flow(flow).ops.len == 0) {
+        return objs.call(cases, h("mut .empty/0"), .{}, @src());
+    }
+    return driver_split_match(self, flow, cases);
+}
+
 fn box_flow(self_m: FatPtr) callconv(.c) FatPtr {
     return object.make_flow_fp(&VT_Flow, object.copy_flow_body(object.deref_flow(self_m)));
 }
@@ -480,6 +489,7 @@ pub const VT_FeartDriver: objs.VTable = .{
         h("imm .findMapReducer/0"),
         h("mut .shouldStop/0"),
         h("imm .splitMatch/2"),
+        h("imm .splitMatchOps/2"),
     },
     .methods = &.{
         @as(*const anyopaque, @ptrCast(&driver_run_chunk_reduce)),
@@ -508,6 +518,7 @@ pub const VT_FeartDriver: objs.VTable = .{
         @as(*const anyopaque, @ptrCast(&driver_find_map_reducer)),
         @as(*const anyopaque, @ptrCast(&driver_should_stop)),
         @as(*const anyopaque, @ptrCast(&driver_split_match)),
+        @as(*const anyopaque, @ptrCast(&driver_split_match_ops)),
     },
     .method_names = &.{
         "mut .runChunkReduce/3",
@@ -536,6 +547,7 @@ pub const VT_FeartDriver: objs.VTable = .{
         "imm .findMapReducer/0",
         "mut .shouldStop/0",
         "imm .splitMatch/2",
+        "imm .splitMatchOps/2",
     },
     .storage_mode = .singleton,
 };

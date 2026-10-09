@@ -1,6 +1,7 @@
 compiler/GeneratedFearless/
 
 .zig-cache
+.idea/zigbrains.xml
 
 lib/
 .attach_*

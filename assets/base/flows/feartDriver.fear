@@ -19,12 +19,21 @@ _FeartDriver: RuntimeImplemented{
   mut .driveReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read F[A,E,A]): A ->
     this.driveReduceFn[E,A](flow, initial, read _FeartReduceFn[A,E]{a, e -> combine#(a, e)}),
 
-  /// Parallel above, ordered at the terminal. At each split, the left half folds recursively
-  /// and the right half collects into its own list. `.mergeFold` then folds that chunk from
-  /// the left accumulator. Thus all elements reach `combine` once, in order, on one thread.
-  /// Each chunk dies at its merge point, so only one chunk is live at a time. The `.empty`
-  /// leaf makes no list at all.
-  mut .driveReduceFn[E:*,A:*](flow: mut Flow[E], initial: A, combine: read _FeartReduceFn[A,E]): A -> _FeartDriver.splitMatch[E,A](flow, {
+  /// Folds in order, but runs the ops of the flow (`.map`, `.filter`, and so on) in parallel.
+  ///
+  /// At each split, two computations run in parallel:
+  /// - The left half folds from `initial`, by recursion. The result is an accumulator.
+  /// - The right half runs its ops and collects the results into a list (`.driveCollect`).
+  ///
+  /// `.mergeFold` then continues the fold from the left accumulator through that list. Thus
+  /// `combine` gets each element once, in order, on one thread. Each list dies at its merge
+  /// point, so only one chunk is live at a time. The `.empty` leaf folds directly from the
+  /// source and makes no list.
+  ///
+  /// `combine` is serial, so only the ops get a speedup. A flow with no ops has nothing to run
+  /// in parallel. `.splitMatchOps` makes such a flow a leaf, and `.runChunkReduce` folds it in
+  /// one loop.
+  mut .driveReduceFn[E:*,A:*](flow: mut Flow[E], initial: A, combine: read _FeartReduceFn[A,E]): A -> _FeartDriver.splitMatchOps[E,A](flow, {
     .some(left, right) -> this.shouldStop ? {
       .then -> initial,
       .else -> _FeartDriver.mergeFold[E,A](
@@ -156,6 +165,10 @@ _FeartDriver: RuntimeImplemented{
     .empty -> this.runChunkMax[E](flow, compare),
     }),
   .splitMatch[E:*, R:*](flow: mut Flow[E], cases: mut _FeartSplitMatch[E, R]): R -> Magic!,
+  /// `.splitMatch` for a drive whose reducer is serial. A flow with no ops answers `.empty`
+  /// without a split: its elements come straight from the source, so splitting it gives the
+  /// reducer nothing to run in parallel.
+  .splitMatchOps[E:*, R:*](flow: mut Flow[E], cases: mut _FeartSplitMatch[E, R]): R -> Magic!,
   mut .runChunkReduce[E:*,A:*](flow: mut Flow[E], initial: A, combine: read _FeartReduceFn[A,E]): A -> Magic!,
   mut .runChunkCollect[E:*](flow: mut Flow[E]): mut List[E] -> Magic!,
   mut .runChunkFindMap[E:*,R:*](flow: mut Flow[E], f: read F[E, mut Opt[R]]): mut Opt[R] -> Magic!,
