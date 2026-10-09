@@ -654,9 +654,8 @@ class VPFCodegen {
         nativeSums[sub.index] = (sub.isFrameAdding || sub.expr instanceof MIR.X)
           && parent.scalarSumOf(sub.expr.t()).isPresent();
       } else {
-        allArgs[sub.index] = (sub.expr instanceof MIR.X x)
-          ? "locals." + parent.id.varName(x.name())
-          : sub.expr.accept(codegen, true);
+        // The visitor converts frame slots to the representation used by the function body.
+        allArgs[sub.index] = sub.expr.accept(codegen, true);
       }
     }
 

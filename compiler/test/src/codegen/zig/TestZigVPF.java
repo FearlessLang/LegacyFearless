@@ -174,6 +174,119 @@ public class TestZigVPF {
     assertMatchArmInThief();
   }
 
+  private static final String BOOL_ARM_CAPTURED_NAT = """
+    package test
+    Test:Main {sys -> sys.io.println(Searches#(Vars#[Nat]0).crossRoad(1, Roads#(2, 3, True)).str)}
+    Road: { read .to: Nat, read .cost: Nat, read .open: Bool }
+    Roads: { #(to: Nat, cost: Nat, open: Bool): Road -> {.to -> to, .cost -> cost, .open -> open} }
+    Searches: { #(value: mut Var[Nat]): mut Search -> {.value -> value} }
+    Search: {
+      mut .value: mut Var[Nat],
+      mut .crossRoad(node: Nat, road: read Road): Nat -> road.open.if[Nat]{
+        .then -> this.relax(node, road.to, road.cost),
+        .else -> node,
+        },
+      mut .relax(node: Nat, to: Nat, cost: Nat): Nat ->
+        Block#(this.value.set((node * 100) + (to * 10) + cost), this.value.get),
+      }
+    """;
+
+  @Test void vpfBoolArmCapturedNatAndTwoReadGetters() {
+    okBase(16, new Res("123", "", 0), BOOL_ARM_CAPTURED_NAT, Base.mutBaseAliases);
+    assertInstrumented();
+  }
+
+  @Test void boolArmCapturedNatAndTwoReadGettersWithoutVpf() {
+    okBaseNoVpf(new Res("123", "", 0), BOOL_ARM_CAPTURED_NAT, Base.mutBaseAliases);
+  }
+
+  @Test void vpfDeepenedBoolArmPreservesPrimitiveAndSumCaptures() {
+    okBase(16, new Res("ok", "", 0), """
+      package test
+      Test:Main {sys -> sys.io.println(Mixed.branch(1, +2, 3.0, 255.byte, "text", True, TagB, Niches#("held")))}
+      Tag:Sealed { .str: Str }
+      TagA:Tag { .str -> "a" }
+      TagB:Tag { .str -> "b" }
+      Niche:Sealed { .str: Str }
+      Empty:Niche { .str -> "empty" }
+      Niches: { #(s: Str): Niche -> {.str -> s} }
+      Mixed: {
+        .branch(n: Nat, i: base.Int, f: base.Float, b: base.Byte, s: Str, flag: Bool, tag: Tag, niche: Niche): Str ->
+          True.if[Str]{
+            .then -> this.check(n, i, f, b, s, flag, tag, niche, this.left, this.middle, this.right),
+            .else -> "wrong arm",
+            },
+        .left: Nat -> this.slow(64),
+        .middle: Nat -> 5,
+        .right: Nat -> 6,
+        .slow(n: Nat): Nat -> (n == 0).if[Nat]{.then -> 4, .else -> this.slow(n - 1)},
+        .check(n: Nat, i: base.Int, f: base.Float, b: base.Byte, s: Str, flag: Bool, tag: Tag, niche: Niche,
+          left: Nat, middle: Nat, right: Nat): Str ->
+          (n == 1).and(i == +2).and(f == 3.0).and(b == (255.byte)).and(s == "text")
+            .and(flag).and(tag.str == "b").and(niche.str == "held")
+            .and(left == 4).and(middle == 5).and(right == 6)
+            .if[Str]{.then -> "ok", .else -> "wrong capture"},
+        }
+      """, Base.mutBaseAliases);
+    assertInstrumented();
+    var zig = RunZigProgramTests.generatedZig("test");
+    assertTrue(Pattern.compile("^fn \\w+_Zdotthen\\w*_thief_\\d+_thief\\(", Pattern.MULTILINE)
+      .matcher(zig).find(), "no deepened thief was emitted for the capture checks:\n" + zig);
+  }
+
+  @Test void vpfBoolArmPreservesBoxedGenericCapture() {
+    okBase(16, new Res("1:4:5", "", 0), """
+      package test
+      Test:Main {sys -> sys.io.println(Generic.branch[Nat](1, {n -> n.str}))}
+      Generic: {
+        .branch[X](value: imm X, render: read F[imm X, Str]): Str -> True.if[Str]{
+          .then -> this.join[X](value, render, this.left, this.right),
+          .else -> "wrong arm",
+          },
+        .left: Nat -> this.slow(64),
+        .right: Nat -> 5,
+        .slow(n: Nat): Nat -> (n == 0).if[Nat]{.then -> 4, .else -> this.slow(n - 1)},
+        .join[X](value: imm X, render: read F[imm X, Str], left: Nat, right: Nat): Str ->
+          render#value + ":" + (left.str) + ":" + (right.str),
+        }
+      """, Base.mutBaseAliases);
+    assertInstrumented();
+  }
+
+  @Test void vpfBoolArmPreservesCapturedTagReceiver() {
+    okBase(16, new Res("abcd\nb", "", 0), """
+      package test
+      Test:Main {sys -> Block#(sys.io.println(Probe.branch(A)), sys.io.println(Probe.branch(B)))}
+      Value:Sealed { .join(left: Str, right: Str): Str }
+      A:Value { .join(left, right) -> left + right }
+      B:Value { .join(left, right) -> "b" }
+      Probe: {
+        .branch(value: Value): Str -> True.if[Str]{
+          .then -> value.join("a" + "b", "c" + "d"),
+          .else -> "wrong arm",
+          },
+        }
+      """, Base.mutBaseAliases);
+    assertInstrumented();
+  }
+
+  @Test void vpfBoolArmPreservesCapturedNicheReceiver() {
+    okBase(16, new Res("abcde\nempty", "", 0), """
+      package test
+      Test:Main {sys -> Block#(sys.io.println(Probe.branch(Values#("e"))), sys.io.println(Probe.branch(Empty)))}
+      Value:Sealed { .join(left: Str, right: Str): Str }
+      Empty:Value { .join(left, right) -> "empty" }
+      Values: { #(suffix: Str): Value -> {.join(left, right) -> left + right + suffix} }
+      Probe: {
+        .branch(value: Value): Str -> True.if[Str]{
+          .then -> value.join("a" + "b", "c" + "d"),
+          .else -> "wrong arm",
+          },
+        }
+      """, Base.mutBaseAliases);
+    assertInstrumented();
+  }
+
   /// Output cannot show if a thief takes the rewritten matcher or the victim runs it early. A
   /// thief function must call a match arm of `ChoiceMatch` (mangled `Zdota`, `Zdotb`).
   private static void assertMatchArmInThief() {
