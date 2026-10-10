@@ -59,6 +59,95 @@ public class TestZigContainers {
     }
     """, Base.mutBaseAliases);}
 
+  @Test void listIdentityAsCollectsLargeInput() {
+    var source = """
+    package test
+    Test: Main{sys -> Output.print(sys, Convert.identity(
+      base.flows.Flow.range(+0, +7168).map{i -> i.nat}.list))}
+    Convert: {
+      .identity(values: mut List[Nat]): List[Nat] -> values.as[Nat]{::},
+      }
+    Output: {
+      .print(sys: mut System, values: List[Nat]): Void -> sys.io.println(
+        values.size.str + "/" + (values.get(0).str) + "/" + (values.get(7167).str)),
+      }
+    """;
+    var expected = new Res("7168/0/7167", "", 0);
+    okBase(expected, source, Base.mutBaseAliases);
+    org.junit.jupiter.api.Assertions.assertFalse(
+      RunZigProgramTests.generatedZig("test").contains("read .as/1"));
+    RunZigProgramTests.okBaseNoVpf(expected, source, Base.mutBaseAliases);
+    org.junit.jupiter.api.Assertions.assertFalse(
+      RunZigProgramTests.generatedZig("test").contains("read .as/1"));
+  }
+
+  @Test void listNonIdentityAsMapsValues() { okBase(new Res("4/8", "", 0), """
+    package test
+    Test: Main{sys -> Output.print(sys, List#[Nat](3, 7).as[Nat]{n -> n + 1})}
+    Output: {
+      .print(sys: mut System, values: List[Nat]): Void -> sys.io.println(
+        values.get(0).str + "/" + (values.get(1).str)),
+      }
+    """, Base.mutBaseAliases); }
+
+  @Test void uListIdentityAsCopiesStorage() { okBase(new Res("2/3/7", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[mut UList[Nat]] original = {UList#[Nat](3, 7)}
+      .let[UList[Nat]] snapshot = {original.as[Nat]{::}}
+      .do {original.add(9)}
+      .return {sys.io.println(snapshot.size.str + "/" + (original.size.str)
+        + "/" + (snapshot.get(1).str))}
+      }
+    """, Base.mutBaseAliases); }
+
+  @Test void listIdentityAsDoesNotFreezeAnAliasedUListView() { okBase(new Res("2/3", "", 0), """
+    package test
+    Test: Main{sys -> Block#
+      .let[mut UList[Nat]] original = {UList#[Nat](3, 7)}
+      .let[List[Nat]] snapshot = {original.list.as[Nat]{::}}
+      .do {original.add(9)}
+      .return {sys.io.println(snapshot.size.str + "/" + (original.size.str))}
+      }
+    """, Base.mutBaseAliases); }
+
+  @Test void uListToListSnapshotsPreserveHeapElements() {
+    var source = """
+      package test
+      Test: Main{sys -> Block#
+        .let[mut UList[Str]] original = {UList#[Str]("a", "b")}
+        .let[read UList[Str]] readonly = {original}
+        .let[List[Str]] fromMut = {original.list.as[Str]{::}}
+        .let[read List[Str]] fromRead = {readonly.list}
+        .do {original.add("c")}
+        .do {Output.print(sys, original, fromMut, fromRead)}
+        .do {original.takeFirst.match[Void]{.some(x) -> Void, .empty -> Error.msg "Missing first element"}}
+        .do {Output.print(sys, original, fromMut, fromRead)}
+        .do {original.clear}
+        .return {Output.print(sys, original, fromMut, fromRead)}
+        }
+      Output: {
+        .print(sys: mut System, original: read UList[Str], fromMut: List[Str], fromRead: read List[Str]): Void ->
+          sys.io.println(fromMut.size.str + "/" + (fromRead.size.str) + "/" + (original.size.str)
+            + "/" + (fromMut.get(0)) + "/" + (fromMut.get(1))
+            + "/" + (fromRead.get(0)) + "/" + (fromRead.get(1))),
+        }
+      """;
+    var expected = new Res("2/2/3/a/b/a/b\n2/2/2/a/b/a/b\n2/2/0/a/b/a/b", "", 0);
+    okBase(expected, source, Base.mutBaseAliases);
+    RunZigProgramTests.okBaseNoVpf(expected, source, Base.mutBaseAliases);
+  }
+
+  @Test void immutableUListToListKeepsValues() { okBase(new Res("a/b", "", 0), """
+    package test
+    Test: Main{sys -> Output.print(sys, UList#[Str]("a", "b"))}
+    Output: {
+      .print(sys: mut System, values: UList[Str]): Void -> this.printList(sys, values.list),
+      .printList(sys: mut System, values: List[Str]): Void ->
+        sys.io.println(values.get(0) + "/" + (values.get(1))),
+      }
+    """, Base.mutBaseAliases); }
+
   @Test void isoPod1() { okBase(new Res("", "", 0), """
     package test
     Test:Main{ _ -> Block#

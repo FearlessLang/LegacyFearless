@@ -74,6 +74,7 @@ public interface LogicMainZig extends FullLogicMain<ZigProgram> {
     var sums = new codegen.optimisations.SumMatchOptimisation(
       magic, cachedImplInfo(), cachedPkg());
     var res = new OptimisationBuilder(magic)
+      .withAsIdFnOptimisation()
       .withBoolIfOptimisation()
       .withBoolShortCircuitOptimisation()
       .withOptimisation(sums)
