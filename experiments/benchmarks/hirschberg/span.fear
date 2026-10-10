@@ -1,0 +1,17 @@
+package bench
+
+/// A view of a sequence. Bounds are half-open and no subsequence is copied.
+Spans: {
+  #(data: List[Nat]): Span -> this#(data, 0, data.size),
+  #(data: List[Nat], start: Nat, end: Nat): Span -> Span: {'span
+    .data: List[Nat] -> data,
+    .start: Nat -> start,
+    .end: Nat -> end,
+    .size: Nat -> span.end - (span.start),
+    .at(i: Nat): Nat -> span.data.get(span.start + i),
+    .prefix(n: Nat): Span -> Spans#(span.data, span.start, span.start + n),
+    .suffix(n: Nat): Span -> Spans#(span.data, span.start + n, span.end),
+    .left: Span -> span.prefix(span.size / 2),
+    .right: Span -> span.suffix(span.size / 2),
+    },
+  }

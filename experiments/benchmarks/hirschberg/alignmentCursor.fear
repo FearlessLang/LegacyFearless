@@ -1,0 +1,27 @@
+package bench
+
+/// Validation advances through the original sequences without changing them.
+AlignmentCursors: {
+  #(left: Nat, right: Nat, cost: Nat): AlignmentCursor -> AlignmentCursor: {'cursor
+    .left: Nat -> left,
+    .right: Nat -> right,
+    .cost: Nat -> cost,
+    .step(column: Column, a: Span, b: Span): AlignmentCursor ->
+      (column.left == 4).and(column.right == 4).if[AlignmentCursor]{
+        .then -> Error.msg "An alignment column cannot contain two gaps",
+        .else -> AlignmentCursors#(
+          cursor.advance(a, cursor.left, column.left),
+          cursor.advance(b, cursor.right, column.right), cursor.cost + (column.cost)),
+        },
+    .advance(input: Span, index: Nat, symbol: Nat): Nat -> (symbol == 4).if[Nat]{
+      .then -> index,
+      .else -> (index < (input.size)).if[Nat]{
+        .then -> (input.at(index) == symbol).if[Nat]{
+          .then -> index + 1, .else -> Error.msg "Alignment changed an input symbol"},
+        .else -> Error.msg "Alignment contains an extra input symbol",
+        },
+      },
+    .complete(a: Span, b: Span, expectedCost: Nat): Bool ->
+      (cursor.left == (a.size)).and(cursor.right == (b.size)).and(cursor.cost == expectedCost),
+    },
+  }

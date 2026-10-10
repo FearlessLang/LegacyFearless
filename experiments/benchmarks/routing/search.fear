@@ -1,0 +1,56 @@
+package bench
+
+SearchTraversal: SearchHeap, SearchResult {
+  mut .relax(from: Nat, to: Nat, cost: Nat): Void -> this.visits.get(to).settled.if[Void]{
+    .then -> Void,
+    .else -> this.relaxTo(from, to, this.visits.get(from).distance + cost),
+    },
+  mut .relaxTo(from: Nat, to: Nat, candidate: Nat): Void ->
+    (candidate < (this.visits.get(to).distance)).if[Void]{
+      .then -> this.offer(to, candidate, from), .else -> Void},
+
+  /// Positive costs and a connected graph allow one extraction per vertex.
+  mut .solve(roads: read RoadNetwork, from: Nat, to: Nat): Route ->
+    (from < (roads.size)).and(to < (roads.size)).and(this.size == (roads.size)).if[Route]{
+      .then -> Block#(this.offer(from, 0, from), this.settleAll(roads), this.result(from, to)),
+      .else -> Error.msg "Invalid shortest-path request",
+      },
+  mut .settleAll(roads: read RoadNetwork): Void ->
+    Flow.range(+0, roads.size.int).forEffect{_ -> this.settle(roads, this.pop)},
+  mut .settle(roads: read RoadNetwork, node: Nat): Void -> Block#(
+    this.visits.get(node).setSettled(True),
+    Flow.range(+0, roads.outgoing(node).size.int).forEffect{i ->
+      this.crossRoad(node, roads.outgoing(node).get(i.nat))}),
+  mut .crossRoad(node: Nat, road: read Road): Void -> road.open.if[Void]{
+    .then -> this.relax(node, road.to, road.cost), .else -> Void},
+  }
+
+SearchResult: SearchState {
+  mut .result(from: Nat, to: Nat): Route -> Block#
+    .let[mut UList[Nat]] reversed = {UList.withCapacity[Nat](this.size)}
+    .var[Nat] cursor = {to}
+    .var[Bool] complete = {False}
+    .do {Flow.range(+0, this.size.int).forEffect{_ -> complete.get.if[Void]{
+      .then -> Void,
+      .else -> Block#(
+        reversed.add(cursor.get),
+        (cursor.get == from).if[Void]{
+          .then -> complete.set(True),
+          .else -> cursor.set(this.visits.get(cursor.get).previous),
+          }),
+      }}}
+    .assert {complete.get}
+    .return {Routes#(Paths.reverse(reversed), this.visits.get(to).distance)},
+  }
+
+Searches: {
+  #(size: Nat): mut Search -> this.withState(
+    Flow.range(+0, size.int).fold[mut UList[mut Visit]](
+      {UList.withCapacity[mut Visit](size)}, {visits, i -> visits + (Visits#(i.nat, size))}),
+    Flow.range(+0, size.int).fold[mut UList[mut Var[Nat]]](
+      {UList.withCapacity[mut Var[Nat]](size)}, {heap, _ -> heap + (Vars#0)}), Vars#0),
+  .withState(visits: mut UList[mut Visit], heap: mut UList[mut Var[Nat]],
+      count: mut Var[Nat]): mut Search -> mut Search: SearchTraversal {
+    .visits -> visits, .heap -> heap, .count -> count,
+    },
+  }

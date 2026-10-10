@@ -12,7 +12,7 @@ JAR="${JAR:-$HERE/../../compiler/target/fearless.jar}"
 ENTRY=bench.Test
 RESULTS="$HERE/results"
 
-read -r -a BENCHES <<< "${BENCHES:-mapLight mapHeavy mandelbrot nqueens primes wc grep}"
+read -r -a BENCHES <<< "${BENCHES:-mapLight mapHeavy mandelbrot nqueens primes wc grep routing hirschberg}"
 CONFIGS=(feart feart-novpf java)
 REFERENCE=feart
 
@@ -29,10 +29,8 @@ config_flags() {
 }
 
 # The command that runs an already-built benchmark. FeaRT emits a native
-# executable; the Java backend is launched with the same command the compiler's
-# own `--run` builds in LogicMainJava (`MakeJavaProcess.makeJavaCommand`), so
-# that timing does not include the compiler re-checking the project on every
-# iteration.
+# executable. The Java backend uses the compiler's launch flags. Long mutable
+# traversals need a larger JVM stack. These commands do not invoke the compiler.
 #
 # The java configuration is built with sequential flows. The environment
 # variable FEARLESS_SEQ_FLOWS removes the data-parallel and pipeline-parallel
@@ -43,8 +41,12 @@ run_command() {
   local bench=$1 config=$2 out="$HERE/$1/out"
   case "$config" in
     feart|feart-novpf) printf '%s' "$out/Test" ;;
-    java) printf '%s -cp %s:%s --enable-preview --enable-native-access=ALL-UNNAMED -ea base.FearlessMain %s' \
-            "$JAVA_BIN" "$out" "$out" "$ENTRY" ;;
+    java)
+      local stack_flag=""
+      # Java Flow.forEffect traverses a list with a recursive iterator.
+      case "$bench" in routing|hirschberg) stack_flag=" -Xss16m" ;; esac
+      printf '%s%s -cp %s:%s --enable-preview --enable-native-access=ALL-UNNAMED -ea base.FearlessMain %s' \
+        "$JAVA_BIN" "$stack_flag" "$out" "$out" "$ENTRY" ;;
   esac
 }
 

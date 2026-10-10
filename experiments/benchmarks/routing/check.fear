@@ -1,0 +1,47 @@
+package bench
+
+/// Bellman-Ford is an independent reference for the indexed-heap implementation.
+Checks: {
+  .run: Void -> Block#(
+    this.withNetwork(RoadNetworks.grid(1)),
+    this.withNetwork(RoadNetworks.grid(2)),
+    this.withNetwork(RoadNetworks.grid(3))),
+  .withNetwork(roads: mut RoadNetwork): Void -> Block#(
+    this.allPairs(roads), Flow.range(+0, +17).forEffect{round ->
+      Block#(roads.refresh(round.nat), this.allPairs(roads))}),
+  .allPairs(roads: read RoadNetwork): Void ->
+    Flow.range(+0, roads.size.int).forEffect{from ->
+      Flow.range(+0, roads.size.int).forEffect{to ->
+        this.compare(roads, from.nat, to.nat, roads.route(from.nat, to.nat))}},
+  .compare(roads: read RoadNetwork, from: Nat, to: Nat, route: Route): Void -> Block#(
+    route.check(roads, from, to),
+    (route.cost == (this.referenceCost(roads, from, to))).if[Void]{
+      .then -> Void, .else -> Error.msg "Shortest-path cost differs from Bellman-Ford"}),
+  .referenceCost(roads: read RoadNetwork, from: Nat, to: Nat): Nat ->
+    this.withDistances(roads, from, to, this.distances(roads.size)),
+  .distances(size: Nat): mut UList[mut Var[Nat]] ->
+    Flow.range(+0, size.int).fold[mut UList[mut Var[Nat]]](
+      {UList.withCapacity[mut Var[Nat]](size)},
+      {distances, _ -> distances + (Vars#((size * 9) + 1))}),
+  .withDistances(roads: read RoadNetwork, from: Nat, to: Nat,
+      distances: mut UList[mut Var[Nat]]): Nat -> Block#(
+    distances.get(from).set(0),
+    Flow.range(+1, roads.size.int).forEffect{_ ->
+      Flow.range(+0, roads.size.int).forEffect{node ->
+        this.relaxFrom(roads, distances, node.nat)}}, distances.get(to).get),
+  .relaxFrom(roads: read RoadNetwork, distances: mut UList[mut Var[Nat]], from: Nat): Void ->
+    (distances.get(from).get < ((roads.size * 9) + 1)).if[Void]{
+      .then -> Flow.range(+0, roads.outgoing(from).size.int).forEffect{i ->
+        this.relaxRoad(distances, from, roads.outgoing(from).get(i.nat))},
+      .else -> Void,
+      },
+  .relaxRoad(distances: mut UList[mut Var[Nat]], from: Nat, road: read Road): Void ->
+    road.open.if[Void]{
+      .then -> this.lower(distances.get(road.to), distances.get(from).get + (road.cost)),
+      .else -> Void,
+      },
+  .lower(distance: mut Var[Nat], candidate: Nat): Void -> (candidate < (distance.get)).if[Void]{
+    .then -> distance.set(candidate), .else -> Void},
+  }
+
+Check: Main {sys -> Block#(Checks.run, sys.io.println("ok"))}

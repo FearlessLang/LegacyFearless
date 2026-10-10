@@ -1,0 +1,46 @@
+package bench
+
+/// Each cell can be overwritten while the row storage is reused.
+ScoreRows: {
+  #(size: Nat): mut ScoreRow -> this.withCells(
+    Flow.range(+0, size.int).fold[mut UList[mut Var[Nat]]](
+      {UList.withCapacity[mut Var[Nat]](size)}, {cells, i -> cells + (Vars#(i.nat))})),
+  .withCells(cells: mut UList[mut Var[Nat]]): mut ScoreRow -> mut ScoreRow: {'row
+    mut .cells: mut UList[mut Var[Nat]] -> cells,
+    read .cells: read UList[mut Var[Nat]] -> cells,
+    read .size: Nat -> row.cells.size,
+    read .at(i: Nat): Nat -> row.cells.get(i).get,
+    mut .put(i: Nat, value: Nat): Void -> row.cells.get(i).set(value),
+    },
+  }
+
+/// The previous and current rows exchange roles after each edit-distance sweep.
+EditDistanceWorkspaces: {
+  #(size: Nat): mut EditDistanceWorkspace -> this.withRows(
+    Vars#[mut ScoreRow](ScoreRows#size), Vars#[mut ScoreRow](ScoreRows#size)),
+  .withRows(previousState: mut Var[mut ScoreRow], currentState: mut Var[mut ScoreRow]): mut EditDistanceWorkspace -> mut EditDistanceWorkspace: {'work
+    mut .previous: mut Var[mut ScoreRow] -> previousState,
+    mut .current: mut Var[mut ScoreRow] -> currentState,
+    mut .finish: mut ScoreRow -> work.previous.get,
+    mut .row(a: Span, b: Span, backward: Bool, i: Nat): mut EditDistanceWorkspace ->
+      work.sweep(a, b, backward, i, work.previous.get, work.current.get),
+    mut .sweep(a: Span, b: Span, backward: Bool, i: Nat,
+        previous: mut ScoreRow, current: mut ScoreRow): mut EditDistanceWorkspace -> Block#(
+      current.put(0, i + 1),
+      Flow.range(+1, (b.size + 1).int).forEffect{j -> current.put(j.nat, Scores.min3(
+        previous.at(j.nat) + 1, current.at(j.nat - 1) + 1,
+        previous.at(j.nat - 1) + (Scores.substitution(a, b, backward, i, j.nat))))},
+      work.rotate(previous, current)),
+    mut .rotate(previous: mut ScoreRow, current: mut ScoreRow): mut EditDistanceWorkspace ->
+      Block#(work.previous.set(current), work.current.set(previous), work),
+    },
+  }
+
+Scores: {
+  .min(a: Nat, b: Nat): Nat -> (a <= b).if[Nat]{.then -> a, .else -> b},
+  .min3(a: Nat, b: Nat, c: Nat): Nat -> this.min(this.min(a, b), c),
+  .substitution(a: Span, b: Span, backward: Bool, i: Nat, j: Nat): Nat ->
+    (a.at(backward.if[Nat]{.then -> (a.size - 1) - i, .else -> i}) ==
+      (b.at(backward.if[Nat]{.then -> b.size - j, .else -> j - 1})))
+      .if[Nat]{.then -> 0, .else -> 1},
+  }

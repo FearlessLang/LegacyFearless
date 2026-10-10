@@ -1,0 +1,23 @@
+package bench
+
+Routing: {
+  /// The waypoints determine the independent searches; all use the same mutable network.
+  .plan(roads: read RoadNetwork, a: Nat, b: Nat, c: Nat, d: Nat): Itinerary -> Itineraries#(
+    roads.route(a, b), roads.route(b, c), roads.route(c, d)),
+  .request(roads: read RoadNetwork): Itinerary -> this.plan(
+    roads, 0, roads.size - 1, roads.size - (roads.width), roads.width - 1),
+  }
+
+RouteTotals: {
+  #: mut Totals -> this.withState(Vars#0, Vars#0),
+  .withState(cost: mut Var[Nat], digest: mut Var[Nat]): mut Totals -> mut Totals: {'totals
+    read .cost: Nat -> cost.get,
+    read .digest: Nat -> digest.get,
+    mut .costState: mut Var[Nat] -> cost,
+    mut .digestState: mut Var[Nat] -> digest,
+    mut .add(itinerary: Itinerary): Void -> Block#(
+      totals.costState.set(totals.cost + (itinerary.cost)),
+      totals.digestState.set(((totals.digest * 31) + (itinerary.digest)) % 1000000007)),
+    read .str: Str -> "cost=" + (totals.cost.str) + " digest=" + (totals.digest.str),
+    },
+  }

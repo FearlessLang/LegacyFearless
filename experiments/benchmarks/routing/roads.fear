@@ -1,0 +1,71 @@
+package bench
+
+/// The destination is fixed. Travel cost and availability can change between requests.
+Roads: {
+  #(id: Nat, to: Nat, backbone: Bool): mut Road ->
+    this.withState(id, to, backbone, Vars#1, Vars#[Bool]True),
+  .withState(id: Nat, to: Nat, backbone: Bool, cost: mut Var[Nat], open: mut Var[Bool]): mut Road -> mut Road: {
+    read .id: Nat -> id,
+    read .to: Nat -> to,
+    read .backbone: Bool -> backbone,
+    read .cost: Nat -> cost.get,
+    read .open: Bool -> open.get,
+    mut .setCost(value: Nat): Void -> cost.set(value),
+    mut .setOpen(value: Bool): Void -> open.set(value),
+    },
+  }
+
+/// Horizontal roads and the leftmost vertical roads keep the grid connected.
+RoadNetworks: {
+  .grid(width: Nat): mut RoadNetwork -> (width > 0).if[mut RoadNetwork]{
+    .then -> this.withRows(width,
+      Flow.range(+0, (width * width).int).fold[mut UList[mut UList[mut Road]]](
+        {UList.withCapacity[mut UList[mut Road]](width * width)},
+        {rows, i -> rows + (this.outgoing(i.nat, width))})),
+    .else -> Error.msg "A road grid must have positive width",
+    },
+  .withRows(width: Nat, roads: mut UList[mut UList[mut Road]]): mut RoadNetwork -> mut RoadNetwork: {'network
+    read .width: Nat -> width,
+    read .size: Nat -> network.width * (network.width),
+    mut .roads: mut UList[mut UList[mut Road]] -> roads,
+    read .roads: read UList[mut UList[mut Road]] -> roads,
+    read .outgoing(node: Nat): read UList[mut Road] -> network.roads.get(node),
+    mut .refresh(round: Nat): Void -> Flow.range(+0, network.size.int).forEffect{i ->
+      Flow.range(+0, network.outgoing(i.nat).size.int).forEffect{j ->
+        network.refreshRoad(network.roads.get(i.nat).get(j.nat), round)}},
+    mut .refreshRoad(road: mut Road, round: Nat): Void -> Block#(
+      road.setCost(1 + (((road.id * 13) + (round * 7)) % 9)),
+      road.setOpen(road.backbone.or(((road.id + round) % 17) != 0))),
+
+    /// Each request owns its distance table, predecessor table, and indexed heap.
+    read .route(from: Nat, to: Nat): Route -> Searches#(network.size).solve(network, from, to),
+    read .linkCost(from: Nat, to: Nat): Nat ->
+      Flow.range(+0, network.outgoing(from).size.int)
+        .find{i -> network.outgoing(from).get(i.nat).to == to}.match[Nat]{
+          .some(i) -> network.openCost(network.outgoing(from).get(i.nat)),
+          .empty -> Error.msg "Route uses a missing road",
+          },
+    read .openCost(road: read Road): Nat -> road.open.if[Nat]{
+      .then -> road.cost, .else -> Error.msg "Route uses a closed road"},
+    },
+  .outgoing(node: Nat, width: Nat): mut UList[mut Road] ->
+    Flow.range(+0, +4).fold[mut UList[mut Road]]({UList.withCapacity[mut Road](4)},
+      {roads, direction -> this.road(node, width, direction.nat).match[mut UList[mut Road]]{
+        .some(road) -> roads + road, .empty -> roads,
+        }}),
+  .road(node: Nat, width: Nat, direction: Nat): mut Opt[mut Road] ->
+    (direction == 0).if[mut Opt[mut Road]]{
+      .then -> ((node % width) + 1 < width).if[mut Opt[mut Road]]{
+        .then -> Opts#(Roads#(node * 4, node + 1, True)), .else -> {}},
+      .else -> (direction == 1).if[mut Opt[mut Road]]{
+        .then -> (node % width > 0).if[mut Opt[mut Road]]{
+          .then -> Opts#(Roads#((node * 4) + 1, node - 1, True)), .else -> {}},
+        .else -> (direction == 2).if[mut Opt[mut Road]]{
+          .then -> ((node / width) + 1 < width).if[mut Opt[mut Road]]{
+            .then -> Opts#(Roads#((node * 4) + 2, node + width, node % width == 0)), .else -> {}},
+          .else -> (node / width > 0).if[mut Opt[mut Road]]{
+            .then -> Opts#(Roads#((node * 4) + 3, node - width, node % width == 0)), .else -> {}},
+          },
+        },
+      },
+  }

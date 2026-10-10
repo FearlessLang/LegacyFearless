@@ -1,0 +1,18 @@
+package bench
+
+Sequences: {
+  .base(i: Nat): Nat -> (i * 2654435761).xor(i.shiftRight(4)).shiftRight(16) % 4,
+  .source(size: Nat): List[Nat] -> Flow.range(+0, size.int).map{i -> this.base(i.nat)}.list,
+  .edited(source: List[Nat]): List[Nat] -> Flow.range(+0, source.size.int)
+    .flatMap{i -> this.editAt(source, i.nat)}.list,
+  .editAt(source: List[Nat], i: Nat): mut Flow[Nat] -> (i % 29 == 0).if[mut Flow[Nat]]{
+    .then -> (i % 31 == 0).if[mut Flow[Nat]]{
+      .then -> Flow#(this.base(i + (source.size))),
+      .else -> Flow#(this.base(i + (source.size)), this.editedBase(source, i)),
+      },
+    .else -> (i % 31 == 0).if[mut Flow[Nat]]{
+      .then -> Flow#[Nat], .else -> Flow#(this.editedBase(source, i))},
+    },
+  .editedBase(source: List[Nat], i: Nat): Nat -> (i % 17 == 0).if[Nat]{
+    .then -> (source.get(i) + 1) % 4, .else -> source.get(i)},
+  }

@@ -1,0 +1,16 @@
+package bench
+
+Benchmark: {
+  .width: Nat -> 64,
+  .rounds: Nat -> 422,
+  .run: Str -> this.run(RoadNetworks.grid(this.width), RouteTotals#),
+  .run(roads: mut RoadNetwork, totals: mut Totals): Str -> Block#(
+    Flow.range(+0, this.rounds.int).forEffect{round -> this.round(roads, totals, round.nat)}, totals.str),
+  .round(roads: mut RoadNetwork, totals: mut Totals, round: Nat): Void ->
+    Block#(roads.refresh(round), this.collect(roads, totals, Routing.request(roads))),
+  .collect(roads: read RoadNetwork, totals: mut Totals, itinerary: Itinerary): Void -> Block#(
+    itinerary.check(roads, 0, roads.size - 1, roads.size - (roads.width), roads.width - 1),
+    totals.add(itinerary)),
+  }
+
+Test: Main {sys -> sys.io.println(Benchmark.run)}

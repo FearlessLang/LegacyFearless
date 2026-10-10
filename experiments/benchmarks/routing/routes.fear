@@ -1,0 +1,37 @@
+package bench
+
+Paths: {
+  .reverse(reversed: read UList[Nat]): List[Nat] ->
+    Flow.range(+0, reversed.size.int)
+      .map{i -> reversed.get((reversed.size - 1) - (i.nat))}.list.as[Nat]{::},
+  }
+
+Routes: {
+  #(nodes: List[Nat], cost: Nat): Route -> Route: {'route
+    .nodes: List[Nat] -> nodes,
+    .cost: Nat -> cost,
+    .check(roads: read RoadNetwork, from: Nat, to: Nat): Void -> (route.nodes.size > 0).if[Void]{
+      .then -> (route.nodes.get(0) == from).and(route.nodes.get(route.nodes.size - 1) == to)
+        .and(route.totalCost(roads) == (route.cost)).if[Void]{
+          .then -> Void, .else -> Error.msg "Route endpoints or cost are incorrect"},
+      .else -> Error.msg "A route must contain its endpoints",
+      },
+    .totalCost(roads: read RoadNetwork): Nat ->
+      Flow.range(+1, route.nodes.size.int).fold[Nat]({0}, {total, i ->
+        total + (roads.linkCost(route.nodes.get(i.nat - 1), route.nodes.get(i.nat)))}),
+    .digest: Nat -> Flow.range(+0, route.nodes.size.int).fold[Nat]({0},
+      {digest, i -> ((digest * 31) + (route.nodes.get(i.nat))) % 1000000007}),
+    },
+  }
+
+Itineraries: {
+  #(first: Route, second: Route, third: Route): Itinerary -> Itinerary: {'itinerary
+    .first: Route -> first,
+    .second: Route -> second,
+    .third: Route -> third,
+    .cost: Nat -> itinerary.first.cost + (itinerary.second.cost) + (itinerary.third.cost),
+    .digest: Nat -> ((itinerary.first.digest * 31) + (itinerary.second.digest)).xor(itinerary.third.digest),
+    .check(roads: read RoadNetwork, a: Nat, b: Nat, c: Nat, d: Nat): Void -> Block#(
+      itinerary.first.check(roads, a, b), itinerary.second.check(roads, b, c), itinerary.third.check(roads, c, d)),
+    },
+  }

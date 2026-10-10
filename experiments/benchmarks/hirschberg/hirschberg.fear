@@ -1,0 +1,31 @@
+package bench
+
+/// Hirschberg alignment with unit insertion, deletion, and substitution costs.
+Hirschberg: {
+  .align(a: Span, b: Span): Alignment -> (a.size == 0).or(b.size == 0).if[Alignment]{
+    .then -> Alignments.gaps(a, b),
+    .else -> (a.size == 1).if[Alignment]{
+      .then -> Alignments.single(a, b),
+      .else -> this.alignAt(a, b, this.findSplit(a, b)),
+      },
+    },
+  .forwardScores(a: Span, b: Span): mut ScoreRow -> this.scores(a, b, False),
+  .backwardScores(a: Span, b: Span): mut ScoreRow -> this.scores(a, b, True),
+  .scores(a: Span, b: Span, backward: Bool): mut ScoreRow ->
+    Flow.range(+0, a.size.int).fold[mut EditDistanceWorkspace](
+      {EditDistanceWorkspaces#(b.size + 1)}, {work, i -> work.row(a, b, backward, i.nat)}).finish,
+
+  /// The split search completes before recursive alignment starts.
+  .findSplit(a: Span, b: Span): Nat ->
+    this.split(this.forwardScores(a.left, b), this.backwardScores(a.right, b)),
+  .alignAt(a: Span, b: Span, split: Nat): Alignment ->
+    this.align(a.left, b.prefix(split)).join(this.align(a.right, b.suffix(split))),
+  .split(left: read ScoreRow, right: read ScoreRow): Nat ->
+    Flow.range(+1, left.size.int).fold[Nat]({0},
+      {best, i -> this.betterSplit(left, right, best, i.nat)}),
+  .betterSplit(left: read ScoreRow, right: read ScoreRow, best: Nat, candidate: Nat): Nat ->
+    (this.splitCost(left, right, candidate) < (this.splitCost(left, right, best)))
+      .if[Nat]{.then -> candidate, .else -> best},
+  .splitCost(left: read ScoreRow, right: read ScoreRow, i: Nat): Nat ->
+    left.at(i) + (right.at((right.size - 1) - i)),
+  }

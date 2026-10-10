@@ -14,7 +14,7 @@ import math
 import pathlib
 import sys
 
-BENCHES = ["mapLight", "mapHeavy", "mandelbrot", "nqueens", "primes", "wc", "grep"]
+BENCHES = ["mapLight", "mapHeavy", "mandelbrot", "nqueens", "primes", "wc", "grep", "routing", "hirschberg"]
 CONFIGS = ["java", "feart-novpf", "feart"]
 RESULTS = pathlib.Path(__file__).parent / "results"
 

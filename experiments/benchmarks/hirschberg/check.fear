@@ -1,0 +1,49 @@
+package bench
+
+Checks: {
+  .expect(a: List[Nat], b: List[Nat], cost: Nat): Void ->
+    (Hirschberg.align(Spans#a, Spans#b).check(Spans#a, Spans#b).cost == cost).if[Void]{
+      .then -> Void, .else -> Error.msg "Unexpected alignment cost"},
+  .run: Void -> Block#(
+    this.expect(List#[Nat], List#[Nat], 0),
+    this.expect(List#[Nat], List#[Nat](0, 1), 2),
+    this.expect(List#[Nat](0, 1), List#[Nat], 2),
+    this.basic),
+  .basic: Void -> Block#(
+    this.expect(List#[Nat](0), List#[Nat](1), 1),
+    this.expect(List#[Nat](0, 1, 2, 3), List#[Nat](0, 1, 2, 3), 0),
+    this.expect(List#[Nat](0, 1, 2, 3), List#[Nat](0, 2, 3), 1),
+    this.edits),
+  .edits: Void -> Block#(
+    this.expect(List#[Nat](0, 1, 2), List#[Nat](0, 3, 2), 1),
+    this.expect(List#[Nat](0, 1, 2), List#[Nat](0, 3, 1, 2), 1),
+    this.expect(List#[Nat](0, 1, 2, 3, 0, 1), List#[Nat](0, 1, 3, 0, 1), 1),
+    this.exhaustive),
+
+  /// Enumerate every pair of binary sequences of length zero to four.
+  .exhaustive: Void -> Flow.range(+0, +31).forEffect{a ->
+    Flow.range(+0, +31).forEffect{b -> this.compare(Spans#(this.sequence(a.nat)), Spans#(this.sequence(b.nat)))}},
+  .compare(a: Span, b: Span): Void ->
+    (Hirschberg.align(a, b).check(a, b).cost == (this.referenceCost(a, b))).if[Void]{
+      .then -> Void, .else -> Error.msg "Alignment cost differs from the reference recurrence"},
+  .sequence(id: Nat): List[Nat] -> this.sequence(id + 1, this.sequenceSize(id + 1)),
+  .sequence(code: Nat, size: Nat): List[Nat] -> Flow.range(+0, size.int)
+    .map{i -> code.shiftRight(i.nat).bitwiseAnd(1)}.list,
+  .sequenceSize(code: Nat): Nat -> (code <= 1).if[Nat]{
+    .then -> 0, .else -> 1 + (this.sequenceSize(code / 2))},
+
+  /// The short-input reference uses the full edit-distance recurrence without DP rows.
+  .referenceCost(a: Span, b: Span): Nat -> (a.size == 0).if[Nat]{
+    .then -> b.size,
+    .else -> (b.size == 0).if[Nat]{
+      .then -> a.size,
+      .else -> Scores.min3(
+        this.referenceCost(a.prefix(a.size - 1), b) + 1,
+        this.referenceCost(a, b.prefix(b.size - 1)) + 1,
+        this.referenceCost(a.prefix(a.size - 1), b.prefix(b.size - 1))
+          + ((a.at(a.size - 1) == (b.at(b.size - 1))).if[Nat]{.then -> 0, .else -> 1})),
+      },
+    },
+  }
+
+Check: Main {sys -> Block#(Checks.run, sys.io.println("ok"))}

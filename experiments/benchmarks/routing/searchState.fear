@@ -1,0 +1,27 @@
+package bench
+
+Visits: {
+  #(node: Nat, size: Nat): mut Visit -> this.withState(
+    Vars#((size * 9) + 1), Vars#node, Vars#size, Vars#[Bool]False),
+  .withState(distance: mut Var[Nat], previous: mut Var[Nat], position: mut Var[Nat],
+      settled: mut Var[Bool]): mut Visit -> mut Visit: {
+    read .distance: Nat -> distance.get,
+    read .previous: Nat -> previous.get,
+    read .position: Nat -> position.get,
+    read .settled: Bool -> settled.get,
+    mut .setDistance(value: Nat): Void -> distance.set(value),
+    mut .setPrevious(value: Nat): Void -> previous.set(value),
+    mut .setPosition(value: Nat): Void -> position.set(value),
+    mut .setSettled(value: Bool): Void -> settled.set(value),
+    },
+  }
+
+/// Each search owns its visit records and heap slots.
+SearchState: {
+  mut .visits: mut UList[mut Visit],
+  read .visits: read UList[mut Visit],
+  mut .heap: mut UList[mut Var[Nat]],
+  read .heap: read UList[mut Var[Nat]],
+  mut .count: mut Var[Nat],
+  read .size: Nat -> this.visits.size,
+  }

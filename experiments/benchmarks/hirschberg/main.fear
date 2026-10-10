@@ -1,0 +1,10 @@
+package bench
+
+Benchmark: {
+  .size: Nat -> 7680,
+  .run: Str -> this.withSource(Spans#(Sequences.source(this.size))),
+  .withSource(a: Span): Str -> this.withInputs(a, Spans#(Sequences.edited(a.data))),
+  .withInputs(a: Span, b: Span): Str -> Hirschberg.align(a, b).check(a, b).str,
+  }
+
+Test: Main {sys -> sys.io.println(Benchmark.run)}

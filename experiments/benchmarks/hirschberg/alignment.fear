@@ -1,0 +1,62 @@
+package bench
+
+/// Symbols 0 to 3 encode bases. Symbol 4 encodes a gap.
+Columns: {
+  #(left: Nat, right: Nat): Column -> Column: {'column
+    .left: Nat -> left,
+    .right: Nat -> right,
+    .cost: Nat -> (column.left == (column.right)).if[Nat]{.then -> 0, .else -> 1},
+    },
+  .digest(digest: Nat, column: Column): Nat ->
+    ((digest * 31) + (column.left * 5) + (column.right)) % 1000000007,
+  }
+
+/// Concatenation retains both sub-alignments without copying their columns.
+Alignment: {
+  .size: Nat,
+  .cost: Nat,
+  .at(i: Nat): Column,
+  .join(other: Alignment): Alignment -> Alignments.join(this, other),
+  .check(a: Span, b: Span): Alignment -> this.checked(a, b,
+    Flow.range(+0, this.size.int).fold[AlignmentCursor]({AlignmentCursors#(0, 0, 0)},
+      {cursor, i -> cursor.step(this.at(i.nat), a, b)})),
+  .checked(a: Span, b: Span, cursor: AlignmentCursor): Alignment ->
+    cursor.complete(a, b, this.cost).if[Alignment]{
+      .then -> this, .else -> Error.msg "Alignment does not reconstruct its inputs",
+      },
+  .digest: Nat -> Flow.range(+0, this.size.int).fold[Nat]({0},
+    {digest, i -> Columns.digest(digest, this.at(i.nat))}),
+  .str: Str -> "cost=" + (this.cost.str) + " columns=" + (this.size.str)
+    + " digest=" + (this.digest.str),
+  }
+
+Alignments: {
+  .leaf(columns: List[Column]): Alignment -> this.leaf(columns,
+    Flow.range(+0, columns.size.int).fold[Nat]({0},
+      {cost, i -> cost + (columns.get(i.nat).cost)})),
+  .leaf(columns: List[Column], cost: Nat): Alignment -> {
+    .size -> columns.size, .cost -> cost, .at(i) -> columns.get(i),
+    },
+  .join(left: Alignment, right: Alignment): Alignment -> this.join(
+    left, right, left.size + (right.size), left.cost + (right.cost)),
+  .join(left: Alignment, right: Alignment, size: Nat, cost: Nat): Alignment -> {
+    .size -> size, .cost -> cost,
+    .at(i) -> (i < (left.size)).if[Column]{
+      .then -> left.at(i), .else -> right.at(i - (left.size)),
+      },
+    },
+  .gaps(a: Span, b: Span): Alignment -> this.leaf(
+    Flow.range(+0, (a.size + (b.size)).int).map{i -> this.gapAt(a, b, i.nat)}.list),
+  .gapAt(a: Span, b: Span, i: Nat): Column -> (i < (a.size)).if[Column]{
+    .then -> Columns#(a.at(i), 4), .else -> Columns#(4, b.at(i - (a.size))),
+    },
+
+  /// With one left symbol, use its first exact match, or substitute at position zero.
+  .single(a: Span, b: Span): Alignment -> this.single(a, b,
+    Flow.range(+0, b.size.int).find{i -> a.at(0) == (b.at(i.nat))}.match[Nat]{
+      .some(i) -> i.nat, .empty -> 0,
+      }),
+  .single(a: Span, b: Span, position: Nat): Alignment -> this.leaf(
+    Flow.range(+0, b.size.int).map{i -> Columns#(
+      (i.nat == position).if[Nat]{.then -> a.at(0), .else -> 4}, b.at(i.nat))}.list),
+  }

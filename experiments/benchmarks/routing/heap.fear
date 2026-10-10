@@ -1,0 +1,50 @@
+package bench
+
+/// The heap contains each unsettled vertex at most once. Position `size` means absent.
+SearchHeap: SearchState {
+  read .less(a: Nat, b: Nat): Bool ->
+    (this.visits.get(a).distance < (this.visits.get(b).distance)).or(
+      (this.visits.get(a).distance == (this.visits.get(b).distance)).and(a < b)),
+  mut .swap(a: Nat, b: Nat): Void ->
+    this.exchange(a, b, this.heap.get(a).get, this.heap.get(b).get),
+  mut .exchange(a: Nat, b: Nat, av: Nat, bv: Nat): Void -> Block#(
+    this.heap.get(a).set(bv), this.heap.get(b).set(av),
+    this.visits.get(av).setPosition(b), this.visits.get(bv).setPosition(a)),
+
+  mut .rise(index: Nat): Void -> (index == 0).if[Void]{
+    .then -> Void, .else -> this.rise(index, (index - 1) / 2)},
+  mut .rise(index: Nat, parent: Nat): Void ->
+    this.less(this.heap.get(index).get, this.heap.get(parent).get).if[Void]{
+      .then -> Block#(this.swap(index, parent), this.rise(parent)), .else -> Void},
+  mut .sink(index: Nat): Void -> ((index * 2) + 1 < (this.count.get)).if[Void]{
+    .then -> this.sink(index, this.child((index * 2) + 1)), .else -> Void},
+  mut .child(left: Nat): Nat -> (left + 1 < (this.count.get)).if[Nat]{
+    .then -> this.less(this.heap.get(left + 1).get, this.heap.get(left).get).if[Nat]{
+      .then -> left + 1, .else -> left},
+    .else -> left,
+    },
+  mut .sink(index: Nat, child: Nat): Void ->
+    this.less(this.heap.get(child).get, this.heap.get(index).get).if[Void]{
+      .then -> Block#(this.swap(index, child), this.sink(child)), .else -> Void},
+
+  mut .offer(node: Nat, distance: Nat, previous: Nat): Void ->
+    this.lower(node, distance, previous, this.visits.get(node)),
+  mut .lower(node: Nat, distance: Nat, previous: Nat, visit: mut Visit): Void -> Block#(
+    visit.setDistance(distance), visit.setPrevious(previous),
+    this.insertIfAbsent(node, visit), this.rise(visit.position)),
+  mut .insertIfAbsent(node: Nat, visit: mut Visit): Void ->
+    (visit.position == (this.size)).if[Void]{
+      .then -> this.insert(node, visit, this.count.get), .else -> Void},
+  mut .insert(node: Nat, visit: mut Visit, position: Nat): Void -> Block#(
+    this.heap.get(position).set(node), visit.setPosition(position), this.count.set(position + 1)),
+  mut .pop: Nat -> (this.count.get > 0).if[Nat]{
+    .then -> this.remove(this.heap.get(0).get, this.count.get - 1),
+    .else -> Error.msg "A connected road network must not exhaust the heap early",
+    },
+  mut .remove(node: Nat, last: Nat): Nat -> Block#(
+    this.count.set(last), this.visits.get(node).setPosition(this.size), this.replaceRoot(last), node),
+  mut .replaceRoot(last: Nat): Void -> (last > 0).if[Void]{
+    .then -> this.replaceRootWith(this.heap.get(last).get), .else -> Void},
+  mut .replaceRootWith(node: Nat): Void -> Block#(
+    this.heap.get(0).set(node), this.visits.get(node).setPosition(0), this.sink(0)),
+  }
