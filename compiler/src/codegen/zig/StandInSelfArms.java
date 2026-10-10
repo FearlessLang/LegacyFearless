@@ -1,6 +1,7 @@
 package codegen.zig;
 
 import codegen.MIR;
+import visitors.MIRVisitor;
 
 import java.util.HashMap;
 import java.util.HashSet;
@@ -26,7 +27,7 @@ import java.util.stream.Collectors;
 /// The slot is the arm's own arity, because a function takes its declared parameters, then its
 /// receiver, then its captures. An arm of a `BoolExpr` declares none and holds its receiver
 /// first; an arm such as `.some(x)` holds one parameter in front of it.
-public final class StandInSelfArms {
+public final class StandInSelfArms implements MIRVisitor<Void> {
   private final Map<MIR.FName, MIR.Fun> funMap;
   private final Map<MIR.FName, Integer> selfSlots = new HashMap<>();
   private final Set<MIR.FName> walked = new HashSet<>();
@@ -55,34 +56,40 @@ public final class StandInSelfArms {
   }
 
   private void walk(MIR.E e) {
-    switch (e) {
-      case MIR.X ignored -> {}
-      // The methods of a literal are funs of their own, so they are walked as such.
-      case MIR.CreateObj ignored -> {}
-      case MIR.Box box -> walk(box.inner());
-      // Both views of a block: `original` is the expression it came from and `stmts` the
-      // statements codegen emits, and an arm can sit in either one alone.
-      case MIR.Block block -> {
-        walk(block.original());
-        block.stmts().forEach(stmt -> walk(stmt.e()));
-      }
-      case MIR.BoolExpr b -> {
-        walk(b.condition());
-        walkArm(b.then(), 0);
-        walkArm(b.else_(), 0);
-      }
-      case MIR.SumMatch s -> {
-        walk(s.receiver());
-        s.arms().forEach(arm -> walkArm(arm.arm(), arm.arm().m().num()));
-      }
-      case MIR.MCall call -> {
-        walk(call.recv());
-        call.args().forEach(this::walk);
-      }
-      case MIR.UpdatableListAsIdFnCall u -> walk(u.e());
-      case MIR.GuardedCall g -> walk(g.original());
-      case MIR.DirectCall d -> walk(d.original());
-      case MIR.StaticCall s -> s.args().forEach(this::walk);
-    }
+    e.accept(this, true);
+  }
+
+  @Override public Void visitX(MIR.X x, boolean checkMagic) {
+    return null;
+  }
+
+  // The methods of a literal are visited as functions.
+  @Override public Void visitCreateObj(MIR.CreateObj obj, boolean checkMagic) {
+    return null;
+  }
+
+  @Override public Void visitBlockExpr(MIR.Block block, boolean checkMagic) {
+    walk(block.original());
+    block.stmts().forEach(stmt -> walk(stmt.e()));
+    return null;
+  }
+
+  @Override public Void visitBoolExpr(MIR.BoolExpr expr, boolean checkMagic) {
+    walk(expr.condition());
+    walkArm(expr.then(), 0);
+    walkArm(expr.else_(), 0);
+    return null;
+  }
+
+  @Override public Void visitSumMatch(MIR.SumMatch expr, boolean checkMagic) {
+    walk(expr.receiver());
+    expr.arms().forEach(arm -> walkArm(arm.arm(), arm.arm().m().num()));
+    return null;
+  }
+
+  @Override public Void visitMCall(MIR.MCall call, boolean checkMagic) {
+    walk(call.recv());
+    call.args().forEach(this::walk);
+    return null;
   }
 }

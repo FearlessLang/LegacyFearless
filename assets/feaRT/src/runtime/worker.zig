@@ -427,6 +427,12 @@ pub const WorkerPool = struct {
 	}
 };
 
+/// The stolen task that `fiber` runs, or null when `fiber` is not a thief fiber.
+pub fn stolenTaskOf(fiber: *Fiber) ?*StolenTask {
+	if (fiber.entry_fn != &thiefTrampoline) return null;
+	return @ptrCast(@alignCast(fiber.context.?));
+}
+
 fn thiefTrampoline(fiber: *Fiber) void {
 	const task: *StolenTask = @ptrCast(@alignCast(fiber.context.?));
 

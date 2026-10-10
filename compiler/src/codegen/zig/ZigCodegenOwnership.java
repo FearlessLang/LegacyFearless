@@ -61,8 +61,6 @@ interface ZigCodegenOwnership extends ZigCodegenContext {
       case MIR.CreateObj k -> isTransientCreateObj(k);
       case MIR.DirectCall d -> shapes().calleeOf(d).map(f -> hasTransientVariant(f.name())).orElse(false)
         && operandsSlotFree(d.original().recv(), d.original().args());
-      case MIR.StaticCall s -> funMap().containsKey(s.fun()) && hasTransientVariant(s.fun())
-        && operandsSlotFree(null, s.args());
       default -> false;
     };
   }
@@ -163,11 +161,6 @@ interface ZigCodegenOwnership extends ZigCodegenContext {
           "var " + takenName + ": bool = false;\nvar " + ownedName + ": rt.FatPtr = undefined;\n"
         ));
       }
-      case MIR.StaticCall s when funMap().containsKey(s.fun()) && hasTransientVariant(s.fun()) -> {
-        summaryObj = shapes().freshObj(s.fun()).orElseThrow();
-        target = funRef(s.fun()) + "_transient";
-        operands.addAll(staticCallArgs(s, gen, checkMagic, operandPrelude, true));
-      }
       case null, default -> {
         return Optional.empty();
       }
@@ -250,10 +243,10 @@ interface ZigCodegenOwnership extends ZigCodegenContext {
       case MIR.MCall ignored -> e.accept(gen, checkMagic);
       case MIR.DirectCall ignored -> boxedOwned(e, e.accept(gen, checkMagic));
       case MIR.GuardedCall ignored -> boxedOwned(e, e.accept(gen, checkMagic));
-      case MIR.StaticCall ignored -> boxedOwned(e, e.accept(gen, checkMagic));
       case MIR.UpdatableListAsIdFnCall ignored -> generateBoxOwned(e.accept(gen, checkMagic));
       case MIR.Block ignored ->
         generateBoxOwned(boxedOwned(e, e.accept(gen, checkMagic)));
+      default -> e.accept(gen, checkMagic);
     };
   }
 }

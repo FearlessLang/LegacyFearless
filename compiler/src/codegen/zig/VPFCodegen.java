@@ -10,15 +10,14 @@ import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
-/// Emits code for VPF-capable calls. The type checker certifies them ([ComputeVPFMode], criteria A/B).
-/// Each call pushes one promotable frame for its combiner. The runtime promotes the oldest frame when its fiber holds H tokens.
-/// A thief runs the stolen task. This class sets no promotion policy.
+/// Emits Zig for calls that have the `VPFParallelisable` variant. Each call pushes one frame that the runtime can promote.
+/// A promoted frame runs the emitted thief function, which computes the remaining operands.
 class VPFCodegen {
   private final ZigSingleCodegen parent;
   private int vpfCounter = 0;
 
-  /// Maximum locals size in bytes to copy on promotion. Deepening stops above this size.
-  /// Equals the size of `locals_copy` in worker.zig.
+  /// Maximum size in bytes of a locals struct that a frame can carry.
+  /// On promotion the runtime copies the struct into `locals_copy` in worker.zig, which has this size.
   static final int LOCALS_COPY_LIMIT = 256;
 
   VPFCodegen(ZigSingleCodegen parent) {
@@ -51,7 +50,6 @@ class VPFCodegen {
       case MIR.GuardedCall gc when gc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable) ->
         buildGuardedVPFInfo(gc);
       case MIR.BoolExpr boolExpr -> {
-        // A VPF call can sit one if-level down, in the else arm.
         var elseFun = parent.funMap.get(boolExpr.else_());
         if (elseFun != null) {
           var inner = findVPFCallInner(elseFun.body());
@@ -92,9 +90,8 @@ class VPFCodegen {
     };
   }
 
-  /// Emits the parent side of a VPF join: pushes a promotable frame and computes r1, then combines
-  /// sequentially if never promoted, reclaims the task if unclaimed, else sends r1 and waits.
-  /// A call in an else arm returns the then value first.
+  /// Emits the function that owns a VPF call. It pushes a frame and computes the first operand, then combines
+  /// in place, or publishes that result and waits when a thief runs the other operands.
   void emitVPFFun(
       MIR.Fun fun,
       String name,
@@ -188,15 +185,21 @@ class VPFCodegen {
       sb.append(slot.dropDefer());
     });
 
-    // Pins locals init before the push; a promotion can copy them at any nested call.
+    // Forces the stores to `locals` before the push. A promotion can copy `locals` at each nested call.
     sb.append("asm volatile (\"\" ::: .{ .memory = true });\n");
 
-    // The calls inside r1 can promote this frame, so the push comes first.
+    // The first operand can promote this frame, so the push comes first.
     emitPushFrame(sb, vpf.hashName, "locals", localsName, thiefName);
 
     var firstResult = parent.freshName("fear_vpf_first_");
+    var borrowedFirst = frameAddingExprs.isEmpty() || firstSlot.isPresent()
+      ? Optional.<ZigSingleCodegen.BorrowedCapture>empty()
+      : parent.borrowedCaptureRead(frameAddingExprs.getFirst().expr(), parent, true);
     if (!frameAddingExprs.isEmpty()) {
-      if (firstSlot.isPresent()) {
+      if (borrowedFirst.isPresent()) {
+        sb.append("const ").append(firstResult).append(": rt.FatPtr = ")
+          .append(borrowedFirst.get().read()).append(";\n");
+      } else if (firstSlot.isPresent()) {
         sb.append(firstSlot.get().operandStatements());
         sb.append("const ").append(firstResult).append(": ").append(resultType(firstResultExpr)).append(" = ")
           .append(nativeResult(firstResultExpr, firstSlot.get().call(), parent)).append(";\n");
@@ -205,15 +208,18 @@ class VPFCodegen {
         sb.append("const ").append(firstResult).append(": ").append(resultType(firstResultExpr)).append(" = ")
           .append(nativeResult(firstResultExpr, firstExprCode, parent)).append(";\n");
       }
-      // The frame field aliases the owned local. Each path consumes the result once.
+      // `locals.r1` copies the local without a count. Each path consumes only one of the two names.
       sb.append("locals.r1 = ").append(firstResult).append(";\n");
     }
+    // The thief consumes a count on the published result, so a borrowed result gets one here.
+    var published = borrowedFirst
+      .map(borrowed -> parent.generateShare("locals.r1", borrowed.type()))
+      .orElseGet(() -> boxedResult(firstResultExpr, "locals.r1"));
 
     sb.append("if (frame_idx_opt) |frame_idx| {\n");
     sb.append("    if (shadow_stack_mod.popAndClaim(frame_idx)) |obligation| {\n");
     sb.append("        if (!shadow_stack_mod.reclaimPromotion(frame_idx, obligation)) {\n");
-    sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, ")
-      .append(boxedResult(firstResultExpr, "locals.r1")).append(");\n");
+    sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, ").append(published).append(");\n");
     sb.append("        const wait_result = obligation.wait(worker_mod.getCurrentWorker().?);\n");
     sb.append("        shadow_stack_mod.freeObligation(obligation);\n");
     sb.append("        if (error_rt.tagOf(wait_result) != .none) errors.feart_unwind(wait_result);\n");
@@ -222,9 +228,16 @@ class VPFCodegen {
     sb.append("    }\n");
     sb.append("}\n");
 
-    // Never promoted or reclaimed: compute the rest here.
+    // No thief took the frame: compute the remaining operands here.
+    var borrowedRest = new HashSet<Integer>();
     for (int i = 1; i < frameAddingExprs.size(); i++) {
       var expr = frameAddingExprs.get(i);
+      var borrowed = parent.borrowedCaptureRead(expr.expr, parent, true);
+      if (borrowed.isPresent()) {
+        sb.append("const r").append(i + 1).append(": rt.FatPtr = ").append(borrowed.get().read()).append(";\n");
+        borrowedRest.add(i);
+        continue;
+      }
       var code = expr.expr.accept(parent, true);
       sb.append("const r").append(i + 1).append(" = ").append(nativeResult(expr.expr, code, parent)).append(";\n");
     }
@@ -235,7 +248,8 @@ class VPFCodegen {
       var resultRef = i == 0 ? firstResult : "r" + (i + 1);
       var resultExpr = frameAddingExprs.get(i).expr;
       resultMap.put(frameAddingExprs.get(i).index, resultRef);
-      if (!parent.isRcFree(resultExpr)) {
+      var isBorrowed = i == 0 ? borrowedFirst.isPresent() : borrowedRest.contains(i);
+      if (!parent.isRcFree(resultExpr) && !isBorrowed) {
         owned.add(new ZigSingleCodegen.Drop(resultRef, resultExpr.t()));
       }
     }
@@ -275,7 +289,6 @@ class VPFCodegen {
       .orElseGet(() -> parent.toScalarOwned(target.orElseThrow(), code));
   }
 
-  /// Converts the owned value of a conditional arm that returns early to the declared result representation of `fun`.
   private String earlyReturnResult(MIR.Fun fun, MIR.FName arm, String code, boolean deInlined) {
     if (deInlined) { return declaredResult(fun, parent.funResultShape(arm), code); }
     var body = parent.funMap.get(arm).body();
@@ -286,16 +299,16 @@ class VPFCodegen {
   }
 
   private VPFCallInfo findVPFCallInner(MIR.E body) {
-    if (body instanceof MIR.Box box) {
-      return findVPFCallInner(box.inner());
+    if (body instanceof MIR.Box(MIR.E inner)) {
+      return findVPFCallInner(inner);
     }
     if (body instanceof MIR.MCall call &&
         call.variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
       return buildVPFInfo(call, Optional.empty());
     }
-    if (body instanceof MIR.DirectCall dc &&
-        dc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
-      return buildVPFInfo(dc.original(), Optional.of(dc.concreteType()));
+    if (body instanceof MIR.DirectCall(MIR.MCall original, DecId concreteType) &&
+        original.variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
+      return buildVPFInfo(original, Optional.of(concreteType));
     }
     if (body instanceof MIR.GuardedCall gc &&
         gc.original().variant().contains(MIR.MCall.CallVariant.VPFParallelisable)) {
@@ -333,7 +346,6 @@ class VPFCodegen {
     var hashExpr = parent.sigBuilder.inlineHash(sig);
 
     var plainExprs = subExprs.stream().filter(s -> !s.isFrameAdding).toList();
-    // Holds [isInfallibleExpr]: a plain part that can fail must not move past parts to its right.
     plainExprs.stream()
       .map(SubExprInfo::expr)
       .filter(e -> !isInfallibleExpr(e))
@@ -352,16 +364,15 @@ class VPFCodegen {
       || expr instanceof MIR.SumMatch;
   }
 
-  /// Codegen computes a plain part after all promotable parts, whatever its
-  /// position. This is sound only if the part cannot fail: its failure must win over a failure
-  /// on its right.
+  /// True when `expr` cannot fail. The emitted code computes an operand that adds no frame after the
+  /// operands that add one, so a failure there would lose its left-to-right position.
   private static boolean isInfallibleExpr(MIR.E expr) {
     if (expr instanceof MIR.Box(MIR.E inner)) { return isInfallibleExpr(inner); }
     return expr instanceof MIR.X || expr instanceof MIR.CreateObj;
   }
 
-  /// Emits a thief for one operand when a call has more than two promotable operands.
-  /// It computes its operand, pushes a frame for the remainder, then runs the tail which joins and combines.
+  /// Emits a thief that computes one operand and pushes a frame for the operands after it.
+  /// It then joins the earlier results and calls the combiner.
   private void emitVPFThiefFunction(
       String thiefName,
       String localsName,
@@ -444,14 +455,24 @@ class VPFCodegen {
 
     emitPushFrame(sb, vpf.hashName, "thief_locals", innerLocalsName, innerThiefName);
 
-    var myExprCode = myExpr.expr.accept(thiefGen, true);
-    sb.append("thief_locals.r_thief = ").append(nativeResult(myExpr.expr, myExprCode, thiefGen)).append(";\n");
+    var borrowedMine = parent.borrowedCaptureRead(myExpr.expr, thiefGen, true);
+    if (borrowedMine.isPresent()) {
+      sb.append("thief_locals.r_thief = ").append(borrowedMine.get().read()).append(";\n");
+    } else {
+      var myExprCode = myExpr.expr.accept(thiefGen, true);
+      sb.append("thief_locals.r_thief = ").append(nativeResult(myExpr.expr, myExprCode, thiefGen)).append(";\n");
+    }
+    // The next thief consumes a count on the published result, so a borrowed result gets one here.
+    var published = borrowedMine
+      .map(borrowed -> parent.generateShare("thief_locals.r_thief", borrowed.type()))
+      .orElseGet(() -> boxedResult(myExpr.expr, "thief_locals.r_thief"));
+    var borrowedIndexes = new HashSet<Integer>();
+    if (borrowedMine.isPresent()) { borrowedIndexes.add(myExpr.index()); }
 
     sb.append("if (frame_idx_opt) |frame_idx| {\n");
     sb.append("    if (shadow_stack_mod.popAndClaim(frame_idx)) |inner_obl| {\n");
     sb.append("        if (!shadow_stack_mod.reclaimPromotion(frame_idx, inner_obl)) {\n");
-    sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, ")
-      .append(boxedResult(myExpr.expr, "thief_locals.r_thief")).append(");\n");
+    sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, ").append(published).append(");\n");
     sb.append("        const wait_result = inner_obl.wait(worker_mod.getCurrentWorker().?);\n");
     sb.append("        shadow_stack_mod.freeObligation(inner_obl);\n");
     sb.append("        if (error_rt.tagOf(wait_result) != .none) errors.feart_unwind(wait_result);\n");
@@ -468,7 +489,8 @@ class VPFCodegen {
       vpf,
       fwdCount,
       myGlobalIdx,
-      forwardedChildOblFields
+      forwardedChildOblFields,
+      borrowedIndexes
     );
 
     sb.append("}");
@@ -539,7 +561,8 @@ class VPFCodegen {
       vpf,
       fwdCount,
       -1,
-      forwardedChildOblFields
+      forwardedChildOblFields,
+      new HashSet<>()
     );
 
     var sb = new StringBuilder();
@@ -555,6 +578,8 @@ class VPFCodegen {
     parent.currentState().functions.add(sb.toString());
   }
 
+  /// Emits the operands that this thief computes, the joins, the combiner call and the drops.
+  /// `borrowedIndexes` holds the indexes of the operands with a borrowed result, which gets no drop.
   private void emitThiefTail(
       StringBuilder sb,
       ThiefCodegen thiefGen,
@@ -563,10 +588,17 @@ class VPFCodegen {
       VPFCallInfo vpf,
       int fwdCount,
       int myGlobalIdx,
-      List<String> forwardedChildOblFields
+      List<String> forwardedChildOblFields,
+      Set<Integer> borrowedIndexes
   ) {
     for (var expr : exprsToCompute) {
       int globalIdx = allFrameAdding.indexOf(expr);
+      var borrowed = parent.borrowedCaptureRead(expr.expr, thiefGen, true);
+      if (borrowed.isPresent()) {
+        sb.append("const r").append(globalIdx + 1).append(": rt.FatPtr = ").append(borrowed.get().read()).append(";\n");
+        borrowedIndexes.add(expr.index());
+        continue;
+      }
       var code = expr.expr.accept(thiefGen, true);
       sb.append("const r").append(globalIdx + 1).append(" = ")
         .append(nativeResult(expr.expr, code, thiefGen)).append(";\n");
@@ -579,7 +611,7 @@ class VPFCodegen {
     emitWaitForwardedObligations(sb, forwardedChildOblFields, allFrameAdding);
     var resultMap = buildThiefCombinerMap(allFrameAdding, fwdCount, myGlobalIdx);
     var owned = allFrameAdding.stream()
-      .filter(sub -> !parent.isRcFree(sub.expr()))
+      .filter(sub -> !parent.isRcFree(sub.expr()) && !borrowedIndexes.contains(sub.index()))
       .map(sub -> new ZigSingleCodegen.Drop(resultMap.get(sub.index()), sub.expr().t()))
       .collect(Collectors.toCollection(ArrayList::new));
     for (var sub : vpf.plainExprs) {
@@ -612,8 +644,8 @@ class VPFCodegen {
   }
 
   private void emitWaitForwardedObligations(StringBuilder sb, List<String> forwardedChildOblFields, List<SubExprInfo> frameAddingExprs) {
-    // The first error tag seen here unwinds, which selects the error that goes up, so keeps this order.
-    // VPF is an unobservable optimisation, so the error must match sequential left-to-right evaluation.
+    // An error tag here comes from the owner of an earlier operand, which raises that error itself and does not
+    // wait for this thief. The wait order thus does not select the error that the program sees.
     for (int i = forwardedChildOblFields.size() - 1; i >= 0; i--) {
       var field = forwardedChildOblFields.get(i);
       sb.append("const fwd_obl_").append(i).append(": ?*JoinObligation = @ptrFromInt(locals.").append(field).append(");\n");
@@ -659,7 +691,6 @@ class VPFCodegen {
         nativeSums[sub.index] = (sub.isFrameAdding || sub.expr instanceof MIR.X)
           && parent.scalarSumOf(sub.expr.t()).isPresent();
       } else {
-        // The visitor converts frame slots to the representation used by the function body.
         allArgs[sub.index] = sub.expr.accept(codegen, true);
       }
     }
@@ -782,7 +813,6 @@ class VPFCodegen {
       .orElse(code);
   }
 
-  /// Boxes an owned result that moves into an obligation or a return. The box consumes the native value.
   private String boxedResult(MIR.E expr, String code) {
     if (expr == null) { return code; }
     var shape = parent.scalarSumOf(expr.t());
@@ -805,7 +835,7 @@ class VPFCodegen {
       if (slot.elided()) { continue; }
       size = align(size, slot.align()) + slot.bytes();
     }
-    // +16 for r1/r_thief, +8 per forwarded obligation.
+    // 16 bytes for `r1` or `r_thief`, and 8 bytes for each forwarded obligation.
     size = align(size, 8) + nextFwdCount * 8 + 16;
     return size;
   }
@@ -872,25 +902,6 @@ class VPFCodegen {
     }
     @Override public String visitSumMatch(MIR.SumMatch e, boolean checkMagic) {
       return delegate.sumMatch(e, this, checkMagic);
-    }
-    @Override public String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
-      var fRef = delegate.funRef(call.fun());
-      var prelude = new ArrayList<String>();
-      var args = call.args().stream()
-        .map(a -> {
-          if (delegate.isTransientCreateObj(a)) {
-            var materialised = delegate.materialiseTransient((MIR.CreateObj) a, this, checkMagic);
-            prelude.addAll(materialised.prelude());
-            return materialised.ref();
-          }
-          if (delegate.isPureInline(a)) { return a.accept(this, checkMagic); }
-          var tmp = delegate.freshName("fear_thief_arg_");
-          prelude.add("const " + tmp + " = " + delegate.ownedExpr(a, this, checkMagic) + ";");
-          if (!delegate.isRcFree(a)) { prelude.add("defer " + delegate.generateDecrement(tmp, a.t()) + ";"); }
-          return tmp;
-        })
-        .collect(Collectors.joining(", "));
-      return delegate.withTransientPrelude(prelude, fRef + "(" + args + ")");
     }
     @Override public String visitBox(MIR.Box box, boolean checkMagic) {
       return delegate.boxExpr(box.inner(), this, checkMagic);

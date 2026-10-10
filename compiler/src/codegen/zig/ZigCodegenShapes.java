@@ -134,7 +134,6 @@ interface ZigCodegenShapes extends ZigCodegenContext {
         call.original().mdf()
       ).result();
       case MIR.GuardedCall call -> scalarSumOf(call.t());
-      case MIR.StaticCall call -> funResultShape(call.fun());
       case MIR.BoolExpr expr -> scalarSumOf(expr.t());
       case MIR.SumMatch expr -> scalarSumOf(expr.t());
       default -> Optional.empty();

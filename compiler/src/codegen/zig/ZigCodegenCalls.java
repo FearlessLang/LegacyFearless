@@ -14,7 +14,7 @@ import codegen.zig.ZigCodegenValues.Scalar;
 
 /// Call emission: operand preparation, tail calls, and turning a final share into a move.
 interface ZigCodegenCalls extends ZigCodegenContext {
-  /// Closes a function body: conditionals emit both arms, calls try the tail form, the rest binds a temp, drops, and returns.
+  /// Emits the statements that end a function body, with the drops and the return. A call becomes a tail call when its operands permit.
   default String tailStatements(MIR.E expression, List<Drop> drops, boolean checkMagic) {
     return switch (expression) {
       case MIR.Box box -> tailStatements(box.inner(), drops, checkMagic);
@@ -57,7 +57,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     };
   }
 
-  /// A method call over pre-bound operand temps, for tail positions.
+  /// Emits a dynamic method call whose operands are the temps in `refs`.
   default String mCallOn(MIR.MCall call, List<String> refs, boolean checkMagic) {
     var sig = new MIR.Sig(
       call.name(),
@@ -79,7 +79,6 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return currentReturn(call, withTransientPrelude(prelude, result), checkMagic);
   }
 
-  /// Closes an arm: a called arm reshapes to the caller's result, a body recurses.
   default String armTailStatements(MIR.FName arm, List<Drop> drops, boolean checkMagic) {
     var deInlined = deInlinedBranch(arm, this, checkMagic);
     if (deInlined.isPresent()) {
@@ -99,7 +98,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
       Function<List<String>, String> build,
       List<Drop> drops
   ) {
-    // A deferred drop runs after the call returns, so the frame survives; transient storage lives in it too.
+    // A deferred drop runs after the call returns, so the call cannot be a tail call.
     if (operands.prelude().stream().anyMatch(line -> line.startsWith("defer "))) {
       return Optional.empty();
     }
@@ -120,7 +119,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return Optional.of(sb.toString());
   }
 
-  // Shaping can drop an operand; Zig still needs every temp acknowledged.
+  /// Discards the temps that `call` does not name, because Zig rejects an unused constant.
   default void appendUnusedOperandDiscards(StringBuilder sb, List<String> refs, String call) {
     var unused = refs.stream().filter(ref -> !call.contains(ref)).toList();
     if (unused.isEmpty()) { return; }
@@ -129,7 +128,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
 
   record MovedShares(List<String> operands, Set<Drop> cancelled) {}
 
-  /// Turns a final share-then-drop into a move: when every use of a dropped name is a share, the last one takes the name itself.
+  /// Replaces the last share of a dropped name with the name, and cancels the drop. This applies only when each use of the name in `operands` is a share.
   default MovedShares moveLastShares(List<String> operands, List<Drop> drops) {
     var working = new ArrayList<>(operands);
     var cancelled = new LinkedHashSet<Drop>();
@@ -144,7 +143,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
         var raw = working.get(i);
         var bare = withoutStringLiterals(raw);
         var here = countOccurrences(bare, name);
-        // A name inside a string literal is not a use.
+        // The replacement below works on raw text, so a name in a string literal blocks the move.
         if (countOccurrences(raw, name) != here) { literalClash = true; }
         if (here == 0) { continue; }
         uses += here;
@@ -197,7 +196,6 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     }
   }
 
-  /// Emits the temps of operands that need no drop. A line that is not a plain `const` would be a drop or a frame-bound slot.
   default void appendForwardPrelude(StringBuilder sb, List<String> prelude) {
     for (var line : prelude) {
       if (!line.startsWith("const ")) { throw Bug.unreachable(); }
@@ -205,7 +203,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     }
   }
 
-  /// Tail-forwards into a slot, dropping enclosing temps first unless the result borrows them.
+  /// Emits a call that writes its result to `fear_out`, then the return. `hoistDrops` puts the drops before the call, and must be false when the result can borrow a dropped name.
   default void appendTailForward(
       StringBuilder sb,
       CallOperands operands,
@@ -252,7 +250,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return emitMCall(call, this, checkMagic);
   }
 
-  /// The runtime module that implements the methods of a primitive receiver, if the receiver is a primitive.
+  /// The runtime module that implements the methods of `receiver`, when `receiver` is a primitive.
   default Optional<String> primitiveIntrinsic(MIR.E receiver) {
     return magicImpls().primitiveModule(receiver);
   }
@@ -263,7 +261,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return fun.name().m().num();
   }
 
-  /// Prepares a call operand: stack and slot values in place, inline values as-is, else an owned temp dropped after the call.
+  /// Gives the code of a borrowed operand. Each temp and each deferred drop that the operand needs goes into `prelude`.
   default String borrowedOperand(
       MIR.E expression,
       MIRVisitor<String> gen,
@@ -278,6 +276,12 @@ interface ZigCodegenCalls extends ZigCodegenContext {
       return materialised.ref();
     }
     if (isPureInline(expression)) { return expression.accept(gen, checkMagic); }
+    var borrowed = borrowedCaptureRead(expression, gen, checkMagic);
+    if (borrowed.isPresent()) {
+      var tmp = tmpPrefix + nextBlock();
+      prelude.add("const " + tmp + ": rt.FatPtr = " + borrowed.get().read() + ";");
+      return tmp;
+    }
     if (slotEligible) {
       var slotted = materialiseSlotCall(expression, gen, checkMagic);
       if (slotted.isPresent()) {
@@ -291,10 +295,8 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return tmp;
   }
 
-  /// An operand that stays in place and needs no temp or drop: a variable, a box, an RC-free literal, or a primitive operation on such operands.
-  /// An operand in place runs after every operand that moves to a prelude, so it must not have an effect that a program can observe, and it must always give a result.
-  /// A primitive operation qualifies only when its method is in the in-place list of its receiver type (see `ZigMagicImpls.isInPlacePrimitiveCall`).
-  /// Every other call gets a temp, in operand order.
+  /// True for an operand that the call evaluates in place, with no temp.
+  /// Such an operand runs after each operand that moves to a prelude, so it must have no observable effect and must not fail.
   default boolean isPureInline(MIR.E expression) {
     return switch (expression) {
       case MIR.X ignored -> true;
@@ -326,12 +328,6 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return lendsDroppedName(call.recv(), drops);
   }
 
-  default boolean staticCallLendsDroppedName(MIR.StaticCall call, List<Drop> drops) {
-    var selfIndex = call.fun().m().num();
-    return java.util.stream.IntStream.range(0, call.args().size())
-      .anyMatch(i -> i >= selfIndex && lendsDroppedName(call.args().get(i), drops));
-  }
-
   default boolean receiverNeedsOwner(MIR.E expression) {
     return !(expression instanceof MIR.X) && !isRcFree(expression) && !isTransientCreateObj(expression);
   }
@@ -346,12 +342,12 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return borrowedOperand(expression, gen, checkMagic, prelude, slotEligible, "fear_arg_");
   }
 
-  /// A call worth routing through slots: its receiver needs a temp owner, or an argument can fill a slot.
+  /// True when an operand of `call` needs storage in the caller frame: an owner for the receiver, or a slot for a transient result.
   default boolean operandWantsSlot(MIR.MCall call, Optional<MIR.Fun> knownCallee) {
     return operandWantsSlot(call, knownCallee, List.of());
   }
 
-  /// As above, where `targets` is the list from [#operandTargets]. An argument that its parameter folds needs no slot.
+  /// The same test with `targets` from [#operandTargets]. An argument that [#foldsAtOperand] accepts needs no slot.
   default boolean operandWantsSlot(
       MIR.MCall call,
       Optional<MIR.Fun> knownCallee,
@@ -374,14 +370,12 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return index + 1 < targets.size() ? targets.get(index + 1) : Optional.<Scalar>empty();
   }
 
-  /// An expression that can fill a caller slot: a transient literal or a call with a transient variant.
   default boolean canFillSlot(MIR.E expression) {
     while (expression instanceof MIR.Box box) { expression = box.inner(); }
     if (isTransientCreateObj(expression)) { return true; }
     return switch (expression) {
       case MIR.DirectCall call -> shapes().calleeOf(call).map(f -> hasTransientVariant(f.name())).orElse(false);
       case MIR.GuardedCall call -> shapes().calleeOf(call).map(f -> hasTransientVariant(f.name())).orElse(false);
-      case MIR.StaticCall call -> funMap().containsKey(call.fun()) && hasTransientVariant(call.fun());
       default -> false;
     };
   }
@@ -390,7 +384,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return callOperands(call, gen, checkMagic, List.of());
   }
 
-  /// As above, where `targets` is the list from [#operandTargets]. An argument that its parameter folds is not prepared.
+  /// `targets` is the list from [#operandTargets].
   default CallOperands callOperands(
       MIR.MCall call,
       MIRVisitor<String> gen,
@@ -415,7 +409,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return slottedCallOperands(call, gen, checkMagic, knownCallee, List.of());
   }
 
-  /// As above, where `targets` is the list from [#operandTargets]. An argument that its parameter folds is not prepared.
+  /// `targets` is the list from [#operandTargets].
   default CallOperands slottedCallOperands(
       MIR.MCall call,
       MIRVisitor<String> gen,
@@ -435,8 +429,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return new CallOperands(recv, args, prelude);
   }
 
-  /// Prepares one argument. A literal that its parameter folds to its capture is that capture, held in place: it gets no object, temp or prelude line.
-  /// `target` is the scalar that the call converts the argument to; [#foldsAtOperand] and [#scalar] decide the fold with one test.
+  /// Gives the code of one argument. When [#foldsAtOperand] accepts the argument for the scalar `target`, the code is the folded scalar and `prelude` gets no line.
   default String argOperand(
       MIR.E arg,
       Optional<Scalar> target,
@@ -447,47 +440,6 @@ interface ZigCodegenCalls extends ZigCodegenContext {
   ) {
     if (!foldsAtOperand(target, arg)) { return operand(arg, gen, checkMagic, prelude, slotEligible); }
     return nicheBorrowedFold(target.orElseThrow(), arg, gen, true).orElseThrow();
-  }
-
-  /// Static calls have no receiver, so arguments from the self index on borrow like one; earlier ones fill slots only when they cannot escape.
-  default List<String> staticCallArgs(
-      MIR.StaticCall call,
-      MIRVisitor<String> gen,
-      boolean checkMagic,
-      List<String> prelude,
-      boolean allowSlots
-  ) {
-    var callee = funMap().get(call.fun());
-    var selfIndex = call.fun().m().num();
-    var shape = funShape(call.fun());
-    var receiverArgs = new ArrayList<String>();
-    for (int i = selfIndex; i < call.args().size(); i++) {
-      if (i < shape.size() && shape.get(i).elided()) { continue; }
-      receiverArgs.add(receiverOperand(call.args().get(i), gen, checkMagic, prelude));
-    }
-    var args = new ArrayList<String>();
-    var receiverIndex = 0;
-    for (int i = 0; i < call.args().size(); i++) {
-      if (i < shape.size() && shape.get(i).elided()) { continue; }
-      if (i >= selfIndex) {
-        var receiver = receiverArgs.get(receiverIndex++);
-        if (i < shape.size() && shape.get(i).scalar().isPresent()) {
-          args.add(scalar(shape.get(i).scalar().orElseThrow(), call.args().get(i), receiver, gen));
-        } else {
-          args.add(boxedBorrowed(call.args().get(i), receiver, prelude));
-        }
-        continue;
-      }
-      var slotOk = allowSlots && callee != null && callee.args().size() == call.args().size()
-        && !shapes().paramMayEscape(call.fun(), i);
-      var arg = operand(call.args().get(i), gen, checkMagic, prelude, slotOk);
-      if (i < shape.size() && shape.get(i).scalar().isPresent()) {
-        args.add(scalar(shape.get(i).scalar().orElseThrow(), call.args().get(i), arg, gen));
-      } else {
-        args.add(boxedBorrowed(call.args().get(i), arg, prelude));
-      }
-    }
-    return args;
   }
 
   default String emitMCall(MIR.MCall call, MIRVisitor<String> gen, boolean checkMagic) {
@@ -538,7 +490,7 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return prefix + nextBlock();
   }
 
-  /// A guarded call: exact-type fast path, alternate-type path, then a full `rt.call` fallback.
+  /// Emits a guarded call: a direct call when the receiver has the expected type, a second direct call for the alternate type when there is one, else `rt.call`.
   default String emitGuardedCall(MIR.GuardedCall call, MIRVisitor<String> gen, boolean checkMagic) {
     var original = call.original();
     var operands = slottedCallOperands(original, gen, checkMagic, Optional.empty());
@@ -606,9 +558,4 @@ interface ZigCodegenCalls extends ZigCodegenContext {
     return emitDirectCall(call, this, checkMagic);
   }
 
-  default String visitStaticCall(MIR.StaticCall call, boolean checkMagic) {
-    var prelude = new ArrayList<String>();
-    var args = staticCallArgs(call, this, checkMagic, prelude, true);
-    return withTransientPrelude(prelude, callRef(call.fun(), funRef(call.fun()), args));
-  }
 }

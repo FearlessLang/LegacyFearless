@@ -14,7 +14,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
-/// Shared state for the codegen traits. [ZigSingleCodegen] holds it; the traits compute from it.
+/// The state and the cross-trait methods that the codegen traits share. [ZigSingleCodegen] implements it.
 interface ZigCodegenContext extends MIRVisitor<String> {
   MIR.Program program();
   Map<MIR.FName, MIR.Fun> funMap();
@@ -127,6 +127,7 @@ interface ZigCodegenContext extends MIRVisitor<String> {
       boolean checkMagic
   );
   String ownedExpr(MIR.E expression, MIRVisitor<String> gen, boolean checkMagic);
+  Optional<ZigSingleCodegen.BorrowedCapture> borrowedCaptureRead(MIR.E expression, MIRVisitor<String> gen, boolean checkMagic);
   Optional<String> deInlinedBranch(MIR.FName name, MIRVisitor<String> gen, boolean checkMagic);
   String visitCreateObj(MIR.CreateObj expression, boolean checkMagic);
   ZigCodegenCalls.CallOperands slottedCallOperands(
@@ -134,13 +135,6 @@ interface ZigCodegenContext extends MIRVisitor<String> {
       MIRVisitor<String> gen,
       boolean checkMagic,
       java.util.Optional<MIR.Fun> knownCallee
-  );
-  List<String> staticCallArgs(
-      MIR.StaticCall call,
-      MIRVisitor<String> gen,
-      boolean checkMagic,
-      List<String> prelude,
-      boolean allowSlots
   );
   String freshName(String prefix);
   String guardTest(String value, DecId target);

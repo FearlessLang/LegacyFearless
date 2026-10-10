@@ -15,6 +15,7 @@ import utils.Bug;
 
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 /// The FeaRT Zig backend: MIR to Zig text. Holds all shared state; the `ZigCodegen*` traits compute from it.
 public class ZigSingleCodegen implements ZigCodegen {
@@ -26,7 +27,7 @@ public class ZigSingleCodegen implements ZigCodegen {
   private int transientCounter = 0;
   private int blockCounter = 0;
 
-  /// One package's Zig output: functions, capture structs, vtables, and per-type capture metadata.
+  /// The Zig output of one package.
   static class PackageState {
     final String packageName;
     final List<String> functions = new ArrayList<>();
@@ -58,6 +59,7 @@ public class ZigSingleCodegen implements ZigCodegen {
   private final RcFreeTypes rcFree;
   private final ScalarSumTypes scalarSums;
   private final main.java.ImplInfo cachedImpls;
+  private final RapidTypeAnalysis rta;
   private final Map<MIR.FName, Boolean> transientVariantCache = new HashMap<>();
   private final Map<ZigCodegenShapes.WrapperKey, ZigCodegenShapes.WrapperShape> wrapperShapeCache = new HashMap<>();
   private final Map<MIR.FName, List<ZigCodegenShapes.ArgSlot>> funShapeCache = new HashMap<>();
@@ -72,6 +74,7 @@ public class ZigSingleCodegen implements ZigCodegen {
     this.vpfEnabled = vpfEnabled;
     this.cachedPkg = cachedPkg;
     this.cachedImpls = cachedImpls;
+    this.rta = rta;
     this.rcFree = new RcFreeTypes(rta, p.p(), cachedPkg, cachedImpls);
     this.scalarSums = new ScalarSumTypes(rta, p.p(), cachedPkg, cachedImpls);
     magic = new ZigMagicImpls(this, t -> "rt.FatPtr", p.p(), this::generateShare);
@@ -123,7 +126,6 @@ public class ZigSingleCodegen implements ZigCodegen {
     return getOrCreatePackageState(emitTargetPkg);
   }
 
-  /// Emits a type: its singleton, its functions. Magic instances and literals emit nothing.
   public String visitTypeDef(String pkg, MIR.TypeDef def, List<MIR.Fun> funs) {
     this.pkg = pkg;
     this.emitTargetPkg = pkg;
@@ -144,7 +146,7 @@ public class ZigSingleCodegen implements ZigCodegen {
     return "";
   }
 
-  /// Emits a type once: capture struct, methods, inherited signatures, vtable. Switches package while emitting.
+  /// Emits the type of `createObj` into the package that owns it. A type that is already emitted is skipped.
   public void emitCreateObj(MIR.CreateObj createObj, boolean checkMagic) {
     if (magic.isMagic(Magic.Str, createObj.concreteT().id())) { return; }
 
@@ -158,7 +160,6 @@ public class ZigSingleCodegen implements ZigCodegen {
     if (emittedTypes.containsKey(objId)) { return; }
     emittedTypes.put(objId, true);
 
-    // Types emit into their owning package, then restore the target.
     var savedEmitTarget = this.emitTargetPkg;
     var owningPkg = typeToPackage.get(objId);
     if (owningPkg != null) {
@@ -228,7 +229,8 @@ public class ZigSingleCodegen implements ZigCodegen {
     return findFun(objId, sig.name(), sig.mdf(), typeDef);
   }
 
-  /// Emits a method's wrappers: its Mearless function's generated code, the vtable thunk, plus inline and transient variants when wanted.
+  /// Emits the wrappers of one method: `MF_` calls its function with shaped arguments, and `T_` is the boxed vtable entry.
+  /// The `MFI_` and `_transient` variants follow when the function has them.
   private void emitMeth(
       MIR.Meth meth,
       DecId objId,
@@ -390,7 +392,70 @@ public class ZigSingleCodegen implements ZigCodegen {
     return currentState().captureLists.get(objId);
   }
 
-  /// Whether a type stores captures, looking into its owning package when cached.
+  /// The object literal of `objId`, when this compilation emits a capture struct for it.
+  /// The answer does not depend on which types are already emitted.
+  Optional<MIR.CreateObj> literalWithCaptureStruct(DecId objId) {
+    return rta.literalOf(objId)
+      .filter(literal -> !cachedPkg.contains(objId.pkg()))
+      .filter(literal -> !literal.captures().isEmpty())
+      .filter(literal -> !magic.isMagic(Magic.Str, objId) && magic.get(literal).isEmpty());
+  }
+
+  /// A capture that the emitted code reads from its owner with no count. `read` is the Zig expression.
+  record BorrowedCapture(String read, MIR.MT type) {}
+
+  /// The read with no count for an expression that calls the getter of a capture on a boxed parameter of the current function.
+  /// The parameter keeps the capture live while the function runs, so the value is borrowed: the code that uses it must not consume a count.
+  public Optional<BorrowedCapture> borrowedCaptureRead(MIR.E expression, visitors.MIRVisitor<String> gen, boolean checkMagic) {
+    var fun = funMap.get(currentFun);
+    if (fun == null || !(expression instanceof MIR.DirectCall call)) { return Optional.empty(); }
+    var original = call.original();
+    var objId = call.concreteType();
+    if (!original.args().isEmpty()) { return Optional.empty(); }
+    // A computed owner is dropped when the getter call ends, before the use of the capture.
+    if (!(original.recv() instanceof MIR.X owner) || !isBoxedArg(fun, owner.name())) { return Optional.empty(); }
+    var callee = shapes.calleeOf(call).orElse(null);
+    if (callee == null || !callee.name().d().equals(objId) || callee.name().m().num() != 0) { return Optional.empty(); }
+    var body = callee.body() instanceof MIR.Box box ? box.inner() : callee.body();
+    if (!(body instanceof MIR.X capture)) { return Optional.empty(); }
+    // The function of a method with no parameters takes the receiver first, then the captures.
+    var isSelf = !callee.args().isEmpty() && callee.args().getFirst().name().equals(capture.name());
+    if (isSelf || !isBoxedArg(callee, capture.name())) { return Optional.empty(); }
+    var stored = literalWithCaptureStruct(objId)
+      .filter(literal -> literal.captures().stream().anyMatch(x -> x.name().equals(capture.name())))
+      .isPresent();
+    if (!stored) { return Optional.empty(); }
+    var wrapper = wrapperShape(objId, original.name(), original.mdf());
+    var boxedResult = wrapper.result().isEmpty()
+      && funResultShape(callee.name()).isEmpty()
+      && emittedScalar(call).isEmpty()
+      && scalarSumOf(call.t()).isEmpty();
+    if (wrapper.elideRecv() || !boxedResult) { return Optional.empty(); }
+    var strategy = rcStrategy(capture.t());
+    if (strategy == RcFreeTypes.Strategy.NONE || strategy != rcStrategy(call.t())) { return Optional.empty(); }
+
+    var sig = new MIR.Sig(original.name(), List.of(), original.originalRet());
+    var block = freshName("fear_blk_");
+    var field = freshName("fear_capture_");
+    // The read keeps the trace entry and the promotion point that the getter call has.
+    var read = block + ": {\n"
+      + "shadow_stack_mod.tracePush(&" + vtableRef(objId) + ", " + sigBuilder.inlineHash(sig) + ");\n"
+      + "defer shadow_stack_mod.tracePop();\n"
+      + "const " + field + " = rt.deref(" + capturesRef(objId) + ", " + owner.accept(gen, checkMagic) + ")."
+      + id.varName(capture.name()) + ";\n"
+      + "heartbeat.tryPromote();\n"
+      + "break :" + block + " " + field + ";\n}";
+    return Optional.of(new BorrowedCapture(read, capture.t()));
+  }
+
+  private boolean isBoxedArg(MIR.Fun fun, String name) {
+    var shape = funShape(fun.name());
+    return IntStream.range(0, fun.args().size())
+      .filter(i -> fun.args().get(i).name().equals(name))
+      .anyMatch(i -> i >= shape.size() || shape.get(i).isBoxed());
+  }
+
+  /// True when the capture struct of `objId` is already emitted, or when a cached package gives the type as a non-singleton.
   private boolean createObjHasCaptures(DecId objId) {
     var owningPkg = typeToPackage.get(objId);
     if (owningPkg != null) {
@@ -403,7 +468,6 @@ public class ZigSingleCodegen implements ZigCodegen {
     return false;
   }
 
-  /// Names the capture fields that need no counting, so the runtime skips them.
   private String rcFreeFieldsDecl(Collection<MIR.X> captures) {
     var free = captures.stream()
       .filter(this::isRcFree)
@@ -413,7 +477,6 @@ public class ZigSingleCodegen implements ZigCodegen {
     return "pub const rc_free_fields = [_][]const u8{ " + free + " };\n";
   }
 
-  /// A type with one value: a declared singleton, or any captureless literal.
   private boolean isSingletonType(DecId objId) {
     var typeDef = p.pkgs().stream()
       .filter(pkg -> pkg.defs().containsKey(objId))
@@ -423,14 +486,13 @@ public class ZigSingleCodegen implements ZigCodegen {
     return !createObjHasCaptures(objId);
   }
 
-  /// Tests an object's type, accepting the transient vtable twin too.
+  /// The Zig test that `recvName` has the type `target`. A stack object has the transient vtable, so the test accepts the two vtables.
   public String guardTest(String recvName, DecId target) {
     var plain = recvName + ".vt == &" + vtableRef(target);
     if (!isTransientEligibleType(target) || !createObjHasCaptures(target)) { return plain; }
     return "(" + plain + " or " + recvName + ".vt == &" + vtableRef(target, true) + ")";
   }
 
-  /// Emits the vtable, plus a transient twin and box hook when the type can live on the stack and has captures.
   private void emitVTable(List<MIR.Meth> allMeths, DecId objId) {
     emitVTable(allMeths, objId, false);
     if (isTransientEligibleType(objId) && createObjHasCaptures(objId)) {
@@ -482,7 +544,7 @@ public class ZigSingleCodegen implements ZigCodegen {
       + "};");
   }
 
-  /// Boxes a stack object to the heap, sharing each capture first.
+  /// Emits the function that copies a stack object to the heap. The copy shares each counted capture.
   private void emitBoxHook(DecId objId) {
     var typeName = id.getSimpleName(objId);
     var capturesName = capturesRef(objId);
@@ -524,7 +586,6 @@ public class ZigSingleCodegen implements ZigCodegen {
     try { emitFun(fun); } finally { currentFun = savedFun; }
   }
 
-  /// Emits a function: the VPF variant when certified and within the locals copy limit, else sequential. Boxed and transient entries follow where wanted.
   private void emitFun(MIR.Fun fun) {
     var name = id.getFName(fun.name());
     var dropNames = List.<Drop>of();
@@ -571,7 +632,6 @@ public class ZigSingleCodegen implements ZigCodegen {
     emitTransientVariant(fun, name, signature, dropNames);
   }
 
-  /// A boxed entry point over a scalar function: calls it, then boxes the result.
   private void emitBoxedResultEntry(MIR.Fun fun, String name, FunSignature signature) {
     var result = funResultShape(fun.name());
     if (result.isEmpty()) { return; }
@@ -584,7 +644,7 @@ public class ZigSingleCodegen implements ZigCodegen {
       + "}");
   }
 
-  /// Zig parameters for a function: unboxed scalars plus prologue code, discard list, and scalar names for the boxed entry.
+  /// The Zig signature of a function. `scalarNames` has one entry for each argument: the name of its parameter, or null when the argument is elided.
   record FunSignature(
     String params,
     String prologue,
@@ -592,7 +652,7 @@ public class ZigSingleCodegen implements ZigCodegen {
     List<String> scalarNames
   ) {}
 
-  /// Builds a function's Zig parameters: elided self becomes a constant, sums pass directly, primitives pass raw with a boxing prologue.
+  /// Builds the signature. An elided argument becomes a constant in the prologue, and a primitive scalar arrives as `<name>_s` and the prologue boxes it to `<name>`.
   FunSignature funSignature(MIR.Fun fun) {
     var shape = funShape(fun.name());
     var params = new ArrayList<String>();
@@ -635,8 +695,8 @@ public class ZigSingleCodegen implements ZigCodegen {
     );
   }
 
-  /// Emits the slot-writing variant: builds a literal in place, or tail-forwards to a callee that does.
-  /// Only bodies accepted by [computeHasTransientVariant] reach here.
+  /// Emits the `_transient` variant, which writes its result object to `fear_out`.
+  /// [#computeHasTransientVariant] accepts only the body forms in the switch.
   private void emitTransientVariant(
       MIR.Fun fun,
       String name,
@@ -690,19 +750,6 @@ public class ZigSingleCodegen implements ZigCodegen {
         appendForwardPrelude(sb, ops.prelude());
         boxPrelude.forEach(line -> sb.append(line).append("\n"));
         appendTailForward(sb, shaped, target, dropNames, !dropsBorrowedRecv(original, dropNames));
-      }
-      case MIR.StaticCall s -> {
-        var prelude = new ArrayList<String>();
-        var args = staticCallArgs(s, this, true, prelude, false);
-        var ops = new CallOperands(null, args, List.of());
-        appendForwardPrelude(sb, prelude);
-        appendTailForward(
-          sb,
-          ops,
-          funRef(s.fun()) + "_transient",
-          dropNames,
-          !staticCallLendsDroppedName(s, dropNames)
-        );
       }
       default -> throw Bug.unreachable();
     }
