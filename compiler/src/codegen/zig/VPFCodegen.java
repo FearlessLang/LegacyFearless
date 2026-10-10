@@ -194,14 +194,19 @@ class VPFCodegen {
     // The calls inside r1 can promote this frame, so the push comes first.
     emitPushFrame(sb, vpf.hashName, "locals", localsName, thiefName);
 
+    var firstResult = parent.freshName("fear_vpf_first_");
     if (!frameAddingExprs.isEmpty()) {
       if (firstSlot.isPresent()) {
         sb.append(firstSlot.get().operandStatements());
-        sb.append("locals.r1 = ").append(nativeResult(firstResultExpr, firstSlot.get().call(), parent)).append(";\n");
+        sb.append("const ").append(firstResult).append(": ").append(resultType(firstResultExpr)).append(" = ")
+          .append(nativeResult(firstResultExpr, firstSlot.get().call(), parent)).append(";\n");
       } else {
         var firstExprCode = frameAddingExprs.getFirst().expr.accept(parent, true);
-        sb.append("locals.r1 = ").append(nativeResult(firstResultExpr, firstExprCode, parent)).append(";\n");
+        sb.append("const ").append(firstResult).append(": ").append(resultType(firstResultExpr)).append(" = ")
+          .append(nativeResult(firstResultExpr, firstExprCode, parent)).append(";\n");
       }
+      // The frame field aliases the owned local. Each path consumes the result once.
+      sb.append("locals.r1 = ").append(firstResult).append(";\n");
     }
 
     sb.append("if (frame_idx_opt) |frame_idx| {\n");
@@ -227,7 +232,7 @@ class VPFCodegen {
     var resultMap = new HashMap<Integer, String>();
     var owned = new ArrayList<ZigSingleCodegen.Drop>();
     for (int i = 0; i < frameAddingExprs.size(); i++) {
-      var resultRef = i == 0 ? "locals.r1" : "r" + (i + 1);
+      var resultRef = i == 0 ? firstResult : "r" + (i + 1);
       var resultExpr = frameAddingExprs.get(i).expr;
       resultMap.put(frameAddingExprs.get(i).index, resultRef);
       if (!parent.isRcFree(resultExpr)) {

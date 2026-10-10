@@ -287,6 +287,66 @@ public class TestZigVPF {
     assertInstrumented();
   }
 
+  private static final String HEAP_FIRST_RECEIVER = """
+    package test
+    Test:Main {sys -> sys.io.println(Views#(List#[Nat](3, 7, 11), 1).at(0).str)}
+    Views: {
+      #(data: List[Nat], start: Nat): View -> View: {'view
+        .data: List[Nat] -> data,
+        .start: Nat -> start,
+        .at(i: Nat): Nat -> view.data.get(view.start + i),
+        },
+      }
+    """;
+
+  @Test void vpfHeapReceiverWithoutPromotion() {
+    okBase(Integer.MAX_VALUE, new Res("7", "", 0), HEAP_FIRST_RECEIVER, Base.mutBaseAliases);
+  }
+
+  @Test void vpfHeapReceiverUnderForcedPromotion() {
+    okBase(1, new Res("7", "", 0), HEAP_FIRST_RECEIVER, Base.mutBaseAliases);
+  }
+
+  private static final String SLOT_FIRST_RESULT = """
+    package test
+    Test:Main {sys -> sys.io.println(Probe.run(List#[Nat](7)).str)}
+    Payloads: { #(data: List[Nat]): Payload -> { .value -> data.get(0) } }
+    Payload: { .value: Nat }
+    Probe: {
+      .run(data: List[Nat]): Nat -> this.join(Payloads#data, this.slow(64)),
+      .slow(depth: Nat): Nat -> (depth == 0).if[Nat]{
+        .then -> 5,
+        .else -> this.slow(depth - 1),
+        },
+      .join(payload: Payload, n: Nat): Nat -> payload.value + n,
+      }
+    """;
+
+  @Test void vpfSlotResultWithOwnedCaptureWithoutPromotion() {
+    okBase(Integer.MAX_VALUE, new Res("12", "", 0), SLOT_FIRST_RESULT, Base.mutBaseAliases);
+  }
+
+  @Test void vpfSlotResultWithOwnedCaptureUnderForcedPromotion() {
+    okBase(1, new Res("12", "", 0), SLOT_FIRST_RESULT, Base.mutBaseAliases);
+  }
+
+  @Test void vpfThreeHeapArgumentsUnderForcedPromotion() {
+    okBase(1, new Res("21", "", 0), """
+      package test
+      Test:Main {sys -> sys.io.println(Probe.run.str)}
+      Probe: {
+        .run: Nat -> this.join(this.row(3), this.row(7), this.row(11)),
+        .row(n: Nat): List[Nat] -> List#[Nat](this.slow(64, n)),
+        .slow(depth: Nat, n: Nat): Nat -> (depth == 0).if[Nat]{
+          .then -> n,
+          .else -> this.slow(depth - 1, n),
+          },
+        .join(a: List[Nat], b: List[Nat], c: List[Nat]): Nat ->
+          a.get(0) + (b.get(0)) + (c.get(0)),
+        }
+      """, Base.mutBaseAliases);
+  }
+
   /// Output cannot show if a thief takes the rewritten matcher or the victim runs it early. A
   /// thief function must call a match arm of `ChoiceMatch` (mangled `Zdota`, `Zdotb`).
   private static void assertMatchArmInThief() {
