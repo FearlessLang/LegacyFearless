@@ -90,12 +90,16 @@ fn list_isEmpty(self: FatPtr) callconv(.c) FatPtr {
     return bool_intrinsics.to_bool(al.items.len == 0);
 }
 
-fn list_uList(self: FatPtr) callconv(.c) FatPtr {
+fn copy_storage(self: FatPtr) *ListStorage {
     const al = deref_list(self);
     const storage = storage_mod.make_storage(al.items.len);
     storage.al.appendSliceAssumeCapacity(al.items);
     for (storage.al.items) |item| _ = item.share();
-    return wrap_ulist_storage(storage);
+    return storage;
+}
+
+fn list_uList(self: FatPtr) callconv(.c) FatPtr {
+    return wrap_ulist_storage(copy_storage(self));
 }
 
 /// Adds `item` to the storage. The item is on loan, so the list takes the one
@@ -122,8 +126,12 @@ fn ulist_clear(self: FatPtr) callconv(.c) FatPtr {
     return make_void();
 }
 
-fn ulist_to_list(self: FatPtr) callconv(.c) FatPtr {
-    // Zero-copy retag: a List wrapper over the same storage.
+fn ulist_to_list_copy(self: FatPtr) callconv(.c) FatPtr {
+    return wrap_list_storage(copy_storage(self));
+}
+
+fn ulist_to_list_imm(self: FatPtr) callconv(.c) FatPtr {
+    // An immutable receiver can share its storage with the List wrapper.
     const caps = objs.deref(ListCaptures, self);
     storage_mod.retain_storage(@ptrFromInt(caps.list_ptr));
     return objs.obj_k(ListCaptures, &VT_List, caps.*);
@@ -252,8 +260,8 @@ pub const VT_UList: objs.VTable = .{
         @as(*const anyopaque, @ptrCast(&list_get)),            @as(*const anyopaque, @ptrCast(&list_get)),              @as(*const anyopaque, @ptrCast(&list_get)),
         @as(*const anyopaque, @ptrCast(&list_tryGet)),         @as(*const anyopaque, @ptrCast(&list_tryGet)),           @as(*const anyopaque, @ptrCast(&list_tryGet)),
         @as(*const anyopaque, @ptrCast(&list_size)),           @as(*const anyopaque, @ptrCast(&list_isEmpty)),          @as(*const anyopaque, @ptrCast(&ulist_add)),
-        @as(*const anyopaque, @ptrCast(&ulist_takeFirst)),     @as(*const anyopaque, @ptrCast(&ulist_clear)),           @as(*const anyopaque, @ptrCast(&ulist_to_list)),
-        @as(*const anyopaque, @ptrCast(&ulist_to_list)),       @as(*const anyopaque, @ptrCast(&ulist_to_list)),         @as(*const anyopaque, @ptrCast(&T_ulist_plus_mut)),
+        @as(*const anyopaque, @ptrCast(&ulist_takeFirst)),     @as(*const anyopaque, @ptrCast(&ulist_clear)),           @as(*const anyopaque, @ptrCast(&ulist_to_list_copy)),
+        @as(*const anyopaque, @ptrCast(&ulist_to_list_copy)),  @as(*const anyopaque, @ptrCast(&ulist_to_list_imm)),         @as(*const anyopaque, @ptrCast(&T_ulist_plus_mut)),
         @as(*const anyopaque, @ptrCast(&T_ulist_addAll_mut)),  @as(*const anyopaque, @ptrCast(&T_ulist_as_read)),       @as(*const anyopaque, @ptrCast(&T_ulist_flow_mut)),
         @as(*const anyopaque, @ptrCast(&T_ulist_flow_read)),   @as(*const anyopaque, @ptrCast(&T_ulist_flowread_read)), @as(*const anyopaque, @ptrCast(&T_ulist_flow_imm)),
         @as(*const anyopaque, @ptrCast(&T_ulist_flowimm_imm)), @as(*const anyopaque, @ptrCast(&T_ulist_iter_mut)),      @as(*const anyopaque, @ptrCast(&T_ulist_iter_read)),
