@@ -669,7 +669,7 @@ public class TestZigVPF {
   @Test void vpfFourOperandLeftmostErrorWinsUnderForcedPromotion() {
     okBase(1, new Res("a b a c d 4", "", 0), FOUR_OPERAND_ERRORS, Base.mutBaseAliases);
     var zig = RunZigProgramTests.generatedZig("test");
-    assertTrue(zig.contains("fwd_obl_1"), "no thief waits on two forwarded obligations:\n" + zig);
+    assertTrue(zig.contains("fwd_r1_boxed"), "no thief waits on two forwarded obligations:\n" + zig);
   }
 
   @Test void vpfFourOperandLeftmostErrorWinsWithSparsePromotion() {

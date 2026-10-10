@@ -3,6 +3,7 @@ const abort = @import("abort.zig");
 const signals = @import("signals.zig");
 
 pub const feart_unwind = unwind.feart_unwind;
+pub const joinFailed = unwind.joinFailed;
 pub const throwDeterministic = unwind.throwDeterministic;
 pub const ndPanicHandler = unwind.ndPanicHandler;
 pub const VT_ErrorK = unwind.VT_ErrorK;

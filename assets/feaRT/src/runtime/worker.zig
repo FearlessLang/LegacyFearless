@@ -31,6 +31,12 @@ pub const StolenTask = struct {
 	locals_drop_fn: LocalsDropHook,
 	obligation: *JoinObligation,
 	child_obligation: ?*JoinObligation,
+	/// The obligations that the thief function must wait on, in a local of that
+	/// function. A null entry is a completed wait.
+	owed: []const ?*JoinObligation,
+	/// The index of the shadow frame of the thief fiber whose promotion moves
+	/// `owed` to the new thief. Null when no such frame exists.
+	owed_frame: ?usize,
 	initial_tokens: u32,
 	/// The promoter. The thief fiber copies this into its own `parent` and pays
 	/// the token refund through it, just before it fulfills the obligation that
@@ -433,8 +439,16 @@ pub fn stolenTaskOf(fiber: *Fiber) ?*StolenTask {
 	return @ptrCast(@alignCast(fiber.context.?));
 }
 
+pub fn thiefOwes(owed: []const ?*JoinObligation, frame: ?usize) void {
+	const task = stolenTaskOf(fiber_mod.currentFiber()).?;
+	task.owed = owed;
+	task.owed_frame = frame;
+}
+
 fn thiefTrampoline(fiber: *Fiber) void {
 	const task: *StolenTask = @ptrCast(@alignCast(fiber.context.?));
+	task.owed = &.{};
+	task.owed_frame = null;
 
 	// No claim check: `workerLoop` wins the claim before it builds this fiber, so
 	// a fiber only exists for work this side owns.

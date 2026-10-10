@@ -222,7 +222,7 @@ class VPFCodegen {
     sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, ").append(published).append(");\n");
     sb.append("        const wait_result = obligation.wait(worker_mod.getCurrentWorker().?);\n");
     sb.append("        shadow_stack_mod.freeObligation(obligation);\n");
-    sb.append("        if (error_rt.tagOf(wait_result) != .none) errors.feart_unwind(wait_result);\n");
+    sb.append("        if (error_rt.tagOf(wait_result) != .none) errors.joinFailed(frame_idx, wait_result);\n");
     sb.append("        return ").append(declaredResult(fun, Optional.empty(), "wait_result")).append(";\n");
     sb.append("        }\n");
     sb.append("    }\n");
@@ -437,6 +437,7 @@ class VPFCodegen {
     var sb = new StringBuilder();
     sb.append("fn ").append(thiefName).append("(locals_ptr: *anyopaque, child_obl_opt: ?*JoinObligation) rt.FatPtr {\n");
     sb.append("const locals: *const ").append(localsName).append(" = @ptrCast(@alignCast(locals_ptr));\n");
+    emitOwedObligations(sb, forwardedChildOblFields);
 
     sb.append("var thief_locals = ").append(innerLocalsName).append("{ ");
     var shape = parent.funShape(fun.name());
@@ -454,6 +455,8 @@ class VPFCodegen {
     sb.append("asm volatile (\"\" ::: .{ .memory = true });\n");
 
     emitPushFrame(sb, vpf.hashName, "thief_locals", innerLocalsName, innerThiefName);
+    // A promotion of this frame gives the waits to the next thief.
+    sb.append("worker_mod.thiefOwes(&owed, frame_idx_opt);\n");
 
     var borrowedMine = parent.borrowedCaptureRead(myExpr.expr, thiefGen, true);
     if (borrowedMine.isPresent()) {
@@ -472,14 +475,16 @@ class VPFCodegen {
     sb.append("if (frame_idx_opt) |frame_idx| {\n");
     sb.append("    if (shadow_stack_mod.popAndClaim(frame_idx)) |inner_obl| {\n");
     sb.append("        if (!shadow_stack_mod.reclaimPromotion(frame_idx, inner_obl)) {\n");
+    sb.append("        worker_mod.thiefOwes(&.{}, null);\n");
     sb.append("        shadow_stack_mod.fulfillChildObligation(frame_idx, ").append(published).append(");\n");
     sb.append("        const wait_result = inner_obl.wait(worker_mod.getCurrentWorker().?);\n");
     sb.append("        shadow_stack_mod.freeObligation(inner_obl);\n");
-    sb.append("        if (error_rt.tagOf(wait_result) != .none) errors.feart_unwind(wait_result);\n");
+    sb.append("        if (error_rt.tagOf(wait_result) != .none) errors.joinFailed(frame_idx, wait_result);\n");
     sb.append("        return wait_result;\n");
     sb.append("        }\n");
     sb.append("    }\n");
     sb.append("}\n");
+    sb.append("worker_mod.thiefOwes(&owed, null);\n");
 
     emitThiefTail(
       sb,
@@ -516,9 +521,10 @@ class VPFCodegen {
       retain.append("_ = .{ copy, parent };\n");
     } else {
       for (var field : fatPtrFields) {
-        // A transient field lives on the parent stack, so box it before the copy shares it.
-        retain.append("if (parent.").append(field.name()).append(".is_transient()) parent.").append(field.name()).append(" = parent.").append(field.name()).append(".box_transient();\n");
-        retain.append("copy.").append(field.name()).append(" = ").append(parent.generateShare("parent." + field.name(), field.strategy())).append(";\n");
+        // A transient field lives on the parent stack, so the copy gets a box. The copy owns that box.
+        retain.append("copy.").append(field.name()).append(" = if (parent.").append(field.name())
+          .append(".is_transient()) parent.").append(field.name()).append(".box_transient() else ")
+          .append(parent.generateShare("parent." + field.name(), field.strategy())).append(";\n");
       }
     }
     retain.append("}");
@@ -553,6 +559,8 @@ class VPFCodegen {
     int fwdCount = forwardedChildOblFields.size();
 
     var body = new StringBuilder();
+    emitOwedObligations(body, forwardedChildOblFields);
+    body.append("worker_mod.thiefOwes(&owed, null);\n");
     emitThiefTail(
       body,
       thiefGen,
@@ -603,8 +611,7 @@ class VPFCodegen {
       sb.append("const r").append(globalIdx + 1).append(" = ")
         .append(nativeResult(expr.expr, code, thiefGen)).append(";\n");
     }
-    sb.append("const r1_boxed = child_obl_opt.?.wait(worker_mod.getCurrentWorker().?);\n");
-    sb.append("shadow_stack_mod.freeObligation(child_obl_opt.?);\n");
+    sb.append("const r1_boxed = shadow_stack_mod.joinOwed(&owed[0]);\n");
     sb.append("if (error_rt.tagOf(r1_boxed) != .none) errors.feart_unwind(r1_boxed);\n");
     var parentExpr = allFrameAdding.get(fwdCount).expr();
     sb.append("const r1 = ").append(fromObligation(parentExpr.t(), "r1_boxed")).append(";\n");
@@ -643,14 +650,21 @@ class VPFCodegen {
     sb.append("});\n");
   }
 
+  /// Emits `owed`, the obligations that the thief must wait on: its child obligation, then each forwarded
+  /// obligation.
+  private void emitOwedObligations(StringBuilder sb, List<String> forwardedChildOblFields) {
+    sb.append("var owed = [_]?*JoinObligation{ child_obl_opt");
+    for (var field : forwardedChildOblFields) {
+      sb.append(", @ptrFromInt(locals.").append(field).append(")");
+    }
+    sb.append(" };\n");
+  }
+
   private void emitWaitForwardedObligations(StringBuilder sb, List<String> forwardedChildOblFields, List<SubExprInfo> frameAddingExprs) {
     // An error tag here comes from the owner of an earlier operand, which raises that error itself and does not
     // wait for this thief. The wait order thus does not select the error that the program sees.
     for (int i = forwardedChildOblFields.size() - 1; i >= 0; i--) {
-      var field = forwardedChildOblFields.get(i);
-      sb.append("const fwd_obl_").append(i).append(": ?*JoinObligation = @ptrFromInt(locals.").append(field).append(");\n");
-      sb.append("const fwd_r").append(i).append("_boxed = fwd_obl_").append(i).append(".?.wait(worker_mod.getCurrentWorker().?);\n");
-      sb.append("shadow_stack_mod.freeObligation(fwd_obl_").append(i).append(".?);\n");
+      sb.append("const fwd_r").append(i).append("_boxed = shadow_stack_mod.joinOwed(&owed[").append(i + 1).append("]);\n");
       sb.append("if (error_rt.tagOf(fwd_r").append(i).append("_boxed) != .none) errors.feart_unwind(fwd_r")
         .append(i).append("_boxed);\n");
       sb.append("const fwd_r").append(i).append(" = ")

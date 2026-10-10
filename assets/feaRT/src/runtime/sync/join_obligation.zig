@@ -4,6 +4,9 @@ const log = @import("../log.zig");
 
 const FatPtr = @import("../objs.zig").FatPtr;
 
+/// The `waiter` value of an obligation that `abandon` gave up.
+const ABANDONED: *Fiber = @ptrFromInt(@alignOf(Fiber));
+
 pub const JoinObligation = struct {
 	/// The result, as two 64-bit atomics. `vt` doubles as the ready flag: null
 	/// means not yet fulfilled.
@@ -26,6 +29,12 @@ pub const JoinObligation = struct {
 	}
 
 	pub fn fulfill(self: *JoinObligation, value: FatPtr) void {
+		_ = self.deliver(value);
+	}
+
+	/// Publishes `value` and wakes the waiter. False when `abandon` ran first:
+	/// this call then released `value` and freed the obligation.
+	pub fn deliver(self: *JoinObligation, value: FatPtr) bool {
 		log.trace_scheduling(.obl_fulfill, @intFromPtr(self), @intFromPtr(value.vt), @bitCast(value.data));
 
 		// Data then vt; a reader treats vt != 0 as ready.
@@ -41,6 +50,12 @@ pub const JoinObligation = struct {
 		// wait's CAS act on it, so the fiber cannot be scheduled twice.
 		const w = self.waiter.swap(null, .seq_cst);
 
+		if (w == ABANDONED) {
+			value.rc_decrement();
+			@import("../shadow_stack.zig").freeObligation(self);
+			return false;
+		}
+
 		// Last touch of the obligation's memory. From here the waiter may free or
 		// reuse it, so the code below reads only the fiber and the queue.
 		self.fulfill_done.store(true, .release);
@@ -49,6 +64,24 @@ pub const JoinObligation = struct {
 			log.trace_scheduling(.fiber_enqueue, @intFromPtr(fiber), @intFromEnum(fiber.state), @intFromPtr(self));
 			@import("../worker.zig").enqueueFiber(fiber);
 		}
+		return true;
+	}
+
+	/// Gives up the wait on a pooled obligation that holds a counted FatPtr.
+	/// The caller must not use the obligation after this call.
+	///
+	/// Returns the result when `deliver` ran first: the caller owns one count
+	/// on it, and this call freed the obligation. Null otherwise: `deliver`
+	/// releases its value and frees the obligation.
+	pub fn abandon(self: *JoinObligation) ?FatPtr {
+		// The same pair as `wait`, with `ABANDONED` as the waiter.
+		self.waiter.store(ABANDONED, .seq_cst);
+		if (self.result_vt.load(.seq_cst) == 0) return null;
+		if (self.waiter.cmpxchgStrong(ABANDONED, null, .seq_cst, .seq_cst) != null) return null;
+		self.awaitFulfillDone();
+		const result = self.loadResult();
+		@import("../shadow_stack.zig").freeObligation(self);
+		return result;
 	}
 
 	/// The caller must have established that vt is non-zero.

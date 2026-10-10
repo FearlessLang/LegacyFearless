@@ -23,11 +23,18 @@ const writeStderr = @import("./io.zig").writeStderr;
 /// its thief, which waits for this frame's `r1`, so no deadlock occurs. At the
 /// root, fulfills `root_obligation` and switches to the scheduler.
 ///
+/// Does not wait, because this function can run on the recovery stack of a
+/// worker. It abandons each obligation that the fiber has not yet joined.
+///
 /// `Error!` lowers to this, not to a checked return through every `rt.call`.
 /// Abandoned non-promoted Zig frames thus skip their `defer` releases.
 pub fn feart_unwind(payload: FatPtr) noreturn {
     gc.disable_cycle_collection();
     const cursor = shadow_stack.getShadowCursor() orelse dieNoFiber();
+    const worker = worker_mod.getCurrentWorker().?;
+    const fiber = worker.current_fiber.?;
+    const stolen = worker_mod.stolenTaskOf(fiber);
+    var owes = stolen != null;
 
     var top = cursor.top;
     while (top > 0) {
@@ -35,13 +42,18 @@ pub fn feart_unwind(payload: FatPtr) noreturn {
         const ss = shadow_stack.getShadowStack().?;
         const frame = &ss[top];
 
-        // Non-null and not CLAIMED: the frame was promoted, and its thief waits
-        // on `child_obligation`. Do not recycle the join obligation. The thief
-        // still writes to it, which would corrupt an unrelated promotion.
+        // Non-null and not CLAIMED: the frame was promoted. If a worker took
+        // the task, its thief waits on `child_obligation`.
         const prev = frame.join_obligation;
         if (prev == null) frame.join_obligation = CLAIMED;
         if (prev) |obl| {
-            if (obl != CLAIMED) shadow_stack.fulfillChildObligation(top, payload.share());
+            if (obl != CLAIMED and !shadow_stack.reclaimPromotion(top, obl)) {
+                shadow_stack.fulfillChildObligation(top, payload.share());
+                if (obl.abandon()) |result| releaseJoinResult(worker, frame, result);
+                if (stolen) |task| {
+                    if (task.owed_frame == top) owes = false;
+                }
+            }
         }
 
         // No release of `frame.locals`: a frame borrows its locals, from the
@@ -50,20 +62,23 @@ pub fn feart_unwind(payload: FatPtr) noreturn {
         cursor.lowest_unpromoted = @min(cursor.lowest_unpromoted, top);
     }
 
-    const worker = worker_mod.getCurrentWorker().?;
-    const fiber = worker.current_fiber.?;
     fiber.state = .Done;
 
-    // A thief fiber owns the counts in the locals copy of its task, and an
-    // unwind does not go back to the trampoline that releases them. The task
-    // stays allocated: its promoter can still read it in `reclaimPromotion`.
-    if (worker_mod.stolenTaskOf(fiber)) |task| {
-        task.locals_drop_fn(@ptrCast(&task.locals_copy), worker.workerId());
+    if (owes) {
+        for (stolen.?.owed) |slot| {
+            const obl = slot orelse continue;
+            if (obl.abandon()) |result| result.rc_decrement();
+        }
     }
 
     if (fiber.root_obligation) |obl| {
         fiber.creditParentTokens();
-        obl.fulfill(payload.box_transient());
+        // The promoter reads the task in `reclaimPromotion` until it joins, so
+        // it retires the task when it gets the error. False: the promoter
+        // abandoned the join, so this fiber retires the task.
+        if (!obl.deliver(payload.box_transient())) {
+            if (stolen) |task| worker.recycleTask(task);
+        }
     } else {
         crashAndExit(payload);
     }
@@ -73,6 +88,28 @@ pub fn feart_unwind(payload: FatPtr) noreturn {
     gc.enable_cycle_collection();
     fiber_mod.switchTo(fiber, &worker.scheduler_fiber);
     unreachable;
+}
+
+/// Releases `result` from the thief of `frame`. An error result means that the
+/// thief unwound, so this also retires its task.
+fn releaseJoinResult(worker: *worker_mod.Worker, frame: *shadow_stack.ShadowFrame, result: FatPtr) void {
+    if (error_rt.tagOf(result) != .none) retireUnwoundThief(worker, frame);
+    result.rc_decrement();
+}
+
+/// Retires the task of a thief that unwound. Such a thief does not go back to
+/// the trampoline that retires its task.
+fn retireUnwoundThief(worker: *worker_mod.Worker, frame: *shadow_stack.ShadowFrame) void {
+    worker.recycleTask(frame.task.load(.acquire).?);
+}
+
+/// Retires the task of the thief of frame `frame_idx`, then unwinds with its
+/// error `payload`. The caller must have popped the frame and pushed no frame
+/// since.
+pub fn joinFailed(frame_idx: usize, payload: FatPtr) noreturn {
+    const frame = &shadow_stack.getShadowStack().?[frame_idx];
+    retireUnwoundThief(worker_mod.getCurrentWorker().?, frame);
+    feart_unwind(payload);
 }
 
 /// Lowering target for `Error!info`. `noreturn`, so it coerces into a FatPtr

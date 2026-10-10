@@ -110,9 +110,9 @@ pub fn freeObligation(obl: *JoinObligation) void {
 /// Takes back a promotion that no worker took. True: this fiber must run the
 /// work. False: a thief owns it, and the caller waits on `obligation`.
 ///
-/// The task stays alive during this call. A thief finishes only after the
-/// caller fulfills the child obligation, which is after a false return. After a
-/// true return, the dequeuing worker retires the task.
+/// The task stays alive during this call: a thief returns only after the caller
+/// fulfills the child obligation, and a thief that unwinds leaves the task to
+/// the caller. After a true return, the dequeuing worker retires the task.
 pub fn reclaimPromotion(frame_idx: usize, obligation: *JoinObligation) bool {
 	const frame = &getShadowStack().?[frame_idx];
 	const task = frame.task.load(.acquire) orelse return false;
@@ -132,6 +132,16 @@ pub inline fn fulfillChildObligation(frame_idx: usize, value: FatPtr) void {
 	const child_obl = frame.child_obligation.load(.acquire).?;
 	const boxed = value.box_transient();
 	child_obl.fulfill(boxed);
+}
+
+/// Waits on the obligation in `slot`, then frees it. Clears `slot`, so that
+/// `feart_unwind` does not abandon the freed obligation.
+pub fn joinOwed(slot: *?*JoinObligation) FatPtr {
+	const obl = slot.*.?;
+	const result = obl.wait(worker_mod.getCurrentWorker().?);
+	freeObligation(obl);
+	slot.* = null;
+	return result;
 }
 
 /// Null off a fiber stack, and always null when `trace_frames` is off.
