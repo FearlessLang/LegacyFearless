@@ -6,7 +6,7 @@ App:Main{ s -> Block#
   .return {io.println(parsed.flow.peek[IO](io.iso, {io',e -> io'.printlnErr e}).join ", ")}
   }
 
-Parse: {#(input: Str): List[Str] -> input.flow
+Parse: {#(input: Str): List[Str] -> input.graphemes
   .actor[mut Str, Str](mut "", {downstream, state, e -> Block#
     .if {e != "\n"} .return {Block#(state.append(e), ActorRes.continue)}
     .do {downstream#(state.str)}
