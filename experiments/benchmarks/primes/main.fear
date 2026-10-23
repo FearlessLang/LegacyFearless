@@ -21,9 +21,6 @@ Primes: {
 
   .mid(lo: Int, hi: Int): Int -> lo + ((hi - lo) / (+2)),
 
-  /// Binary split over the candidate divisors `[lo, hi)`. A linear scan --
-  /// `.loop` or plain recursion -- overflows the stack at this range. `&&`
-  /// takes a thunk, so the early exit on composites survives the split.
   .noDivisorIn(n: Int, lo: Int, hi: Int): Bool -> (lo >= hi).if[Bool]{
     .then -> True,
     .else -> ((hi - lo) <= (+1)).if[Bool]{

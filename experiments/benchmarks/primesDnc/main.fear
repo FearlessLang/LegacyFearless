@@ -1,0 +1,42 @@
+package bench
+
+/// Counts the primes below `n` by trial division. The same work as `primes`,
+/// but the range is split by plain binary recursion instead of a flow. Each
+/// split has one promotable continuation, so VPF parallelises it with no help
+/// from the flow driver. Per-element cost grows with the element: the range is
+/// badly unbalanced.
+Primes: {
+  .n: Int -> +17000000,
+
+  .isPrime(n: Int): Bool -> (n < (+4)).if[Bool]{
+    .then -> True,
+    .else -> ((n % (+2)) == +0).if[Bool]{
+      .then -> False,
+      .else -> this.noDivisorIn(n, +3, this.limit(n)),
+      },
+    },
+
+  /// One past the largest divisor worth testing. Two rather than one absorbs
+  /// a rounding error of a whole unit at a perfect square, and stays below `n`
+  /// for every odd `n` that reaches here.
+  .limit(n: Int): Int -> n.float.sqrt.floor.int + (+2),
+
+  .mid(lo: Int, hi: Int): Int -> lo + ((hi - lo) / (+2)),
+
+  .noDivisorIn(n: Int, lo: Int, hi: Int): Bool -> (lo >= hi).if[Bool]{
+    .then -> True,
+    .else -> ((hi - lo) <= (+1)).if[Bool]{
+      .then -> (n % lo) != +0,
+      .else -> this.noDivisorIn(n, lo, this.mid(lo, hi))
+        && {this.noDivisorIn(n, this.mid(lo, hi), hi)},
+      },
+    },
+
+  /// The number of primes in `[lo, hi)`. The range must not be empty.
+  .count(lo: Int, hi: Int): Nat -> ((hi - lo) <= (+1)).if[Nat]{
+    .then -> this.isPrime(lo).if[Nat]{.then -> 1, .else -> 0},
+    .else -> this.count(lo, this.mid(lo, hi)) + (this.count(this.mid(lo, hi), hi)),
+    },
+  }
+
+Test: Main {sys -> sys.io.println(Primes.count(+2, Primes.n).str)}
